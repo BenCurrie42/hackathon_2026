@@ -1,10 +1,6 @@
-@AGENTS.md
-
 # CLAUDE.md
 
-Project context. `AGENTS.md` (imported above) carries the process ruleset — PRD
-lifecycle, quality gates, ADRs. This file carries what the code and the file
-format actually do.
+Project context: what the code does and what the .als format actually does.
 
 ## What this is
 
