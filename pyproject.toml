@@ -1,0 +1,13 @@
+[project]
+name = "rigforge"
+version = "0.1.0"
+description = "Generate Ableton Live session files from a structured rig spec"
+requires-python = ">=3.11"
+dependencies = [
+    "lxml>=5.3.0",
+    "pydantic>=2.9.0",
+    "typer>=0.15.0",
+]
+
+[tool.uv]
+package = false
