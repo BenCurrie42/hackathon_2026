@@ -2,7 +2,7 @@
 
 **Describe your Sunday. Get a working Ableton session.**
 
-[Watch the Holy Sound introduction (57 seconds)](assets/holy-sound-intro.mp4)
+[Watch the Holy Sound introduction (57 seconds)](https://drive.google.com/file/d/1JS_2oy9hb-i6gZmTE7OLHSQjQRqbP8_h/view?usp=sharing)
 
 Holy Sound helps church worship teams turn a plain-English description of a
 service into a ready-to-open Ableton Live session. A volunteer describes the
