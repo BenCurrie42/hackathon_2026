@@ -24,7 +24,7 @@ The **Rig Spec is the product.** It's a Pydantic model describing a session in
 terms a human would use. Everything else is replaceable around it.
 
 ```
-conversation → RigSpec (rigspec.py) → render() (render.py) → .als
+conversation → RigSpec (spec.py) → render() (write_als.py) → .als
                     ↑                        ↑
               model writes it          swappable backend
 ```
@@ -68,7 +68,7 @@ Reference set: `templates/test.als`, saved by **Ableton Live 12.4.5** on macOS.
 
 ### Ableton's own formatting
 
-Matched by `render.py` out of caution, not demonstrated necessity:
+Matched by `write_als.py` out of caution, not demonstrated necessity:
 
 - Declaration `<?xml version="1.0" encoding="UTF-8"?>` then `\n`
 - Tab indentation, trailing newline at EOF
@@ -127,7 +127,7 @@ Element names are internal, not display names — `Compressor2`, `Eq8`,
 guess it.
 
 Only 10 devices have a factory default on disk. Compressor isn't one, so
-`PRESET_FALLBACKS` in `render.py` names a preset instead.
+`PRESET_FALLBACKS` in `write_als.py` names a preset instead.
 
 ## Hard invariants — violating these corrupts the set
 
@@ -174,8 +174,10 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 ## Layout
 
 ```
-rigspec.py                    RigSpec / TrackSpec — the contract
-render.py                     render(spec, template_path) -> bytes
+spec.py                       RigSpec / TrackSpec — the contract
+write_als.py                  render(spec, template_path) -> bytes
+remote_script/RigLink/        Control Surface: live socket bridge into Live
+runtime.py                    Client for RigLink — the live-edit path
 templates/test.als            Reference Live 12.4.5 set, read-only
 templates/test.reference.xml  Its decompressed XML, for diffing
 templates/probe_noinput.als   Live's own save of a generated set; source of
