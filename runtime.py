@@ -70,8 +70,106 @@ class LiveConnection:
     def create_midi_track(self, name=None):
         return self.send("create_midi_track", name=name)
 
-    def set_track_name(self, track_index, name):
-        return self.send("set_track_name", track_index=track_index, name=name)
+    def list_returns(self):
+        return self.send("list_returns")
 
-    def load_device(self, track_index, device_name):
-        return self.send("load_device", track_index=track_index, device_name=device_name)
+    def create_return_track(self, name=None):
+        return self.send("create_return_track", name=name)
+
+    def set_track_name(self, track_index, name, is_return=False):
+        return self.send("set_track_name", track_index=track_index, name=name, is_return=is_return)
+
+    def delete_track(self, track_index, is_return=False):
+        return self.send("delete_track", track_index=track_index, is_return=is_return)
+
+    def get_routing(self, track_index, is_return=False):
+        return self.send("get_routing", track_index=track_index, is_return=is_return)
+
+    def set_routing(self, track_index, direction, type_name, channel_name=None, is_return=False):
+        return self.send(
+            "set_routing",
+            track_index=track_index,
+            direction=direction,
+            type_name=type_name,
+            channel_name=channel_name,
+            is_return=is_return,
+        )
+
+    def get_mixer(self, track_index, is_return=False):
+        return self.send("get_mixer", track_index=track_index, is_return=is_return)
+
+    def set_volume(self, track_index, db, is_return=False):
+        return self.send("set_volume", track_index=track_index, db=db, is_return=is_return)
+
+    def set_pan(self, track_index, pan, is_return=False):
+        return self.send("set_pan", track_index=track_index, pan=pan, is_return=is_return)
+
+    def set_mute(self, track_index, on, is_return=False):
+        return self.send("set_mute", track_index=track_index, on=on, is_return=is_return)
+
+    def set_solo(self, track_index, on, is_return=False):
+        return self.send("set_solo", track_index=track_index, on=on, is_return=is_return)
+
+    def set_send(self, track_index, return_index, db, is_return=False):
+        return self.send(
+            "set_send", track_index=track_index, return_index=return_index, db=db, is_return=is_return
+        )
+
+    def list_presets(self, device_name):
+        return self.send("list_presets", device_name=device_name)
+
+    def load_device(self, track_index, device_name, preset=None, is_return=False):
+        return self.send(
+            "load_device",
+            track_index=track_index,
+            device_name=device_name,
+            preset=preset,
+            is_return=is_return,
+        )
+
+    def list_devices(self, track_index, is_return=False):
+        return self.send("list_devices", track_index=track_index, is_return=is_return)
+
+    def delete_device(self, track_index, device_index, is_return=False):
+        return self.send(
+            "delete_device", track_index=track_index, device_index=device_index, is_return=is_return
+        )
+
+    def get_song(self):
+        return self.send("get_song")
+
+    def set_tempo(self, bpm):
+        return self.send("set_tempo", bpm=bpm)
+
+    def play(self):
+        return self.send("play")
+
+    def stop(self):
+        return self.send("stop")
+
+    def list_scenes(self):
+        return self.send("list_scenes")
+
+    def create_scene(self, name=None, bpm=None):
+        return self.send("create_scene", name=name, bpm=bpm)
+
+    def set_scene(self, scene_index, name=None, bpm=None):
+        return self.send("set_scene", scene_index=scene_index, name=name, bpm=bpm)
+
+    def delete_scene(self, scene_index):
+        return self.send("delete_scene", scene_index=scene_index)
+
+    def fire_scene(self, scene_index):
+        return self.send("fire_scene", scene_index=scene_index)
+
+    def list_locators(self):
+        return self.send("list_locators")
+
+    def add_locator(self, time, name=None):
+        return self.send("add_locator", time=time, name=name)
+
+    def delete_locator(self, locator_index):
+        return self.send("delete_locator", locator_index=locator_index)
+
+    def jump_to_locator(self, locator_index):
+        return self.send("jump_to_locator", locator_index=locator_index)

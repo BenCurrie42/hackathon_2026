@@ -4,11 +4,16 @@ Loaded by Live as a Control Surface (Preferences -> Link/MIDI). Opens a local
 TCP socket and accepts newline-delimited JSON commands from runtime.py,
 executing them against the currently open Live Set.
 
-Command vocabulary matches RigSpec, not Live's full API surface: create a
-track, name it, load a stock device onto it. Nothing here writes device
-parameters or dB/pan values yet -- those need an empirical probe first (see
-CLAUDE.md's "Live is the source of truth" rule) before we ship a possibly-wrong
-conversion.
+Command vocabulary matches RigSpec, not Live's full API surface: tracks,
+routing, mixer, stock devices and presets, returns and sends, tempo, scenes,
+locators, transport. Nothing here writes raw device parameters.
+
+Volume and send levels are set in dB without a dB-to-value formula: we
+binary-search the parameter's own str_for_value() display text, so Live's
+fader law is the only source of truth for the conversion.
+
+Tracks are addressed by index into song.tracks, or into song.return_tracks
+when is_return is true.
 """
 
 import json
@@ -143,6 +148,27 @@ class RigLink(ControlSurface):
 # "args" object, and returns a JSON-serializable result.
 
 
+def _track(rf, track_index, is_return=False):
+    song = rf.song()
+    tracks = song.return_tracks if is_return else song.tracks
+    return tracks[track_index]
+
+
+def _display(param):
+    return param.str_for_value(param.value)
+
+
+def _by_display_name(options, wanted, noun):
+    for option in options:
+        if option.display_name.casefold() == wanted.casefold():
+            return option
+    names = ", ".join(o.display_name for o in options) or "none"
+    raise LookupError("no %s called %r (options: %s)" % (noun, wanted, names))
+
+
+# -- Tracks ----------------------------------------------------------------
+
+
 def _ping(rf):
     return "pong"
 
@@ -153,6 +179,10 @@ def _list_tracks(rf):
         {"index": i, "name": t.name, "is_midi": t.has_midi_input}
         for i, t in enumerate(song.tracks)
     ]
+
+
+def _list_returns(rf):
+    return [{"index": i, "name": t.name} for i, t in enumerate(rf.song().return_tracks)]
 
 
 def _create_audio_track(rf, name=None):
@@ -173,50 +203,364 @@ def _create_midi_track(rf, name=None):
     return {"index": len(song.tracks) - 1, "name": track.name}
 
 
-def _set_track_name(rf, track_index, name):
-    track = rf.song().tracks[track_index]
+def _create_return_track(rf, name=None):
+    song = rf.song()
+    song.create_return_track()
+    track = song.return_tracks[-1]
+    if name:
+        track.name = name
+    return {"index": len(song.return_tracks) - 1, "name": track.name}
+
+
+def _set_track_name(rf, track_index, name, is_return=False):
+    track = _track(rf, track_index, is_return)
     track.name = name
     return {"index": track_index, "name": track.name}
 
 
-def _find_browser_item(root, device_name):
-    """Depth-first search of a browser tree for an item matching device_name."""
-    stack = list(root.children) if root.children else []
-    while stack:
-        item = stack.pop()
-        if item.name == device_name:
-            return item
-        if item.children:
-            stack.extend(item.children)
-    return None
-
-
-def _load_device(rf, track_index, device_name):
+def _delete_track(rf, track_index, is_return=False):
     song = rf.song()
-    track = song.tracks[track_index]
-    song.view.selected_track = track
+    if is_return:
+        song.delete_return_track(track_index)
+    else:
+        song.delete_track(track_index)
+    return {"index": track_index}
+
+
+# -- Routing ---------------------------------------------------------------
+# Since Live 10, routing is set by assigning one of the objects from the
+# available_*_routing_types / _channels vectors, never by string.
+
+
+def _routing_side(track, direction):
+    return {
+        "type": getattr(track, "%s_routing_type" % direction).display_name,
+        "channel": getattr(track, "%s_routing_channel" % direction).display_name,
+        "types": [t.display_name for t in getattr(track, "available_%s_routing_types" % direction)],
+        "channels": [c.display_name for c in getattr(track, "available_%s_routing_channels" % direction)],
+    }
+
+
+def _get_routing(rf, track_index, is_return=False):
+    track = _track(rf, track_index, is_return)
+    routing = {"output": _routing_side(track, "output")}
+    if not is_return:
+        routing["input"] = _routing_side(track, "input")
+    return routing
+
+
+def _set_routing(rf, track_index, direction, type_name, channel_name=None, is_return=False):
+    if direction not in ("input", "output"):
+        raise ValueError("direction must be input or output")
+    track = _track(rf, track_index, is_return)
+    type_attr = "%s_routing_type" % direction
+    channel_attr = "%s_routing_channel" % direction
+    types = getattr(track, "available_%s_routing_types" % direction)
+    chosen_type = _by_display_name(types, type_name, direction)
+
+    # The channel list depends on the type, so it can only be checked after
+    # switching. Put the old routing back if the channel doesn't exist, so a
+    # failed command changes nothing.
+    previous_type = getattr(track, type_attr)
+    previous_channel = getattr(track, channel_attr)
+    setattr(track, type_attr, chosen_type)
+    if channel_name:
+        channels = getattr(track, "available_%s_routing_channels" % direction)
+        try:
+            chosen_channel = _by_display_name(channels, channel_name, "%s channel" % direction)
+        except LookupError:
+            setattr(track, type_attr, previous_type)
+            setattr(track, channel_attr, previous_channel)
+            raise
+        setattr(track, channel_attr, chosen_channel)
+    return _routing_side(track, direction)
+
+
+# -- Mixer -----------------------------------------------------------------
+
+
+def _parse_db(text):
+    # Live may use a Unicode minus; "-inf dB" parses to float("-inf").
+    return float(text.replace("−", "-").split()[0])
+
+
+def _set_db(param, db):
+    """Set a dB-displayed parameter by searching its own display strings."""
+    lo, hi = param.min, param.max
+    if db <= _parse_db(param.str_for_value(lo)):
+        param.value = lo
+        return _display(param)
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if _parse_db(param.str_for_value(mid)) < db:
+            lo = mid
+        else:
+            hi = mid
+    param.value = hi
+    return _display(param)
+
+
+def _get_mixer(rf, track_index, is_return=False):
+    song = rf.song()
+    track = _track(rf, track_index, is_return)
+    mixer = track.mixer_device
+    return {
+        "volume": _display(mixer.volume),
+        "pan": _display(mixer.panning),
+        "mute": track.mute,
+        "solo": track.solo,
+        "sends": [
+            {"return": r.name, "level": _display(s)}
+            for r, s in zip(song.return_tracks, mixer.sends)
+        ],
+    }
+
+
+def _set_volume(rf, track_index, db, is_return=False):
+    track = _track(rf, track_index, is_return)
+    return {"volume": _set_db(track.mixer_device.volume, float(db))}
+
+
+def _set_pan(rf, track_index, pan, is_return=False):
+    param = _track(rf, track_index, is_return).mixer_device.panning
+    param.value = max(param.min, min(param.max, float(pan)))
+    return {"pan": _display(param)}
+
+
+def _set_mute(rf, track_index, on, is_return=False):
+    track = _track(rf, track_index, is_return)
+    track.mute = bool(on)
+    return {"mute": track.mute}
+
+
+def _set_solo(rf, track_index, on, is_return=False):
+    track = _track(rf, track_index, is_return)
+    track.solo = bool(on)
+    return {"solo": track.solo}
+
+
+def _set_send(rf, track_index, return_index, db, is_return=False):
+    sends = _track(rf, track_index, is_return).mixer_device.sends
+    return {"level": _set_db(sends[return_index], float(db))}
+
+
+# -- Devices and presets ---------------------------------------------------
+# Only effect and instrument folders are searched. Sounds and Drums are huge
+# and hold presets that share names with devices ("Reverb"), so they're out.
+
+DEVICE_CATEGORIES = ("audio_effects", "midi_effects", "instruments")
+DEVICE_SEARCH_DEPTH = 2
+
+
+def _find_device_item(browser, device_name):
+    """Breadth-first, shallow search for the stock device itself (not a preset)."""
+    wanted = device_name.casefold()
+    for category in DEVICE_CATEGORIES:
+        level = list(getattr(browser, category).children)
+        for _ in range(DEVICE_SEARCH_DEPTH):
+            for item in level:
+                if item.is_device and item.name.casefold() == wanted:
+                    return item
+            level = [c for item in level if item.is_folder for c in item.children]
+    raise LookupError("no stock device called %r" % device_name)
+
+
+def _presets_under(item):
+    stack = list(item.children)
+    while stack:
+        child = stack.pop()
+        if child.is_loadable and not child.is_folder:
+            yield child
+        stack.extend(child.children)
+
+
+def _list_presets(rf, device_name):
+    device = _find_device_item(rf.application().browser, device_name)
+    return sorted(p.name for p in _presets_under(device))
+
+
+def _load_device(rf, track_index, device_name, preset=None, is_return=False):
+    song = rf.song()
+    song.view.selected_track = _track(rf, track_index, is_return)
 
     browser = rf.application().browser
-    for category in (
-        browser.audio_effects,
-        browser.midi_effects,
-        browser.instruments,
-        browser.drums,
-        browser.sounds,
-    ):
-        item = _find_browser_item(category, device_name)
-        if item is not None:
-            browser.load_item(item)
-            return {"track_index": track_index, "device": device_name}
+    item = _find_device_item(browser, device_name)
+    if preset:
+        wanted = preset.casefold()
+        if wanted.endswith(".adv"):
+            wanted = wanted[: -len(".adv")]
+        matches = [p for p in _presets_under(item) if p.name.casefold() == wanted]
+        if not matches:
+            raise LookupError("%s has no preset called %r" % (item.name, preset))
+        item = matches[0]
 
-    raise LookupError("no browser item named %r" % device_name)
+    browser.load_item(item)
+    return {"track_index": track_index, "device": device_name, "preset": preset}
+
+
+def _list_devices(rf, track_index, is_return=False):
+    track = _track(rf, track_index, is_return)
+    return [
+        {"index": i, "name": d.name, "class_name": d.class_name, "is_rack": d.can_have_chains}
+        for i, d in enumerate(track.devices)
+    ]
+
+
+def _delete_device(rf, track_index, device_index, is_return=False):
+    track = _track(rf, track_index, is_return)
+    name = track.devices[device_index].name
+    track.delete_device(device_index)
+    return {"index": device_index, "name": name}
+
+
+# -- Song: tempo, transport, scenes, locators ------------------------------
+
+
+def _get_song(rf):
+    song = rf.song()
+    return {
+        "tempo": song.tempo,
+        "is_playing": song.is_playing,
+        "numerator": song.signature_numerator,
+        "denominator": song.signature_denominator,
+    }
+
+
+def _set_tempo(rf, bpm):
+    song = rf.song()
+    song.tempo = float(bpm)
+    return {"tempo": song.tempo}
+
+
+def _play(rf):
+    rf.song().start_playing()
+    return {"is_playing": True}
+
+
+def _stop(rf):
+    rf.song().stop_playing()
+    return {"is_playing": False}
+
+
+def _scene_row(i, scene):
+    row = {"index": i, "name": scene.name, "tempo": None}
+    # Scene.tempo arrived in Live 11; tolerate its absence.
+    if getattr(scene, "tempo_enabled", False):
+        row["tempo"] = scene.tempo
+    return row
+
+
+def _list_scenes(rf):
+    return [_scene_row(i, s) for i, s in enumerate(rf.song().scenes)]
+
+
+def _create_scene(rf, name=None, bpm=None):
+    song = rf.song()
+    song.create_scene(-1)
+    index = len(song.scenes) - 1
+    scene = song.scenes[index]
+    if name:
+        scene.name = name
+    if bpm is not None:
+        scene.tempo = float(bpm)
+        scene.tempo_enabled = True
+    return _scene_row(index, scene)
+
+
+def _set_scene(rf, scene_index, name=None, bpm=None):
+    scene = rf.song().scenes[scene_index]
+    if name is not None:
+        scene.name = name
+    if bpm is not None:
+        scene.tempo = float(bpm)
+        scene.tempo_enabled = True
+    return _scene_row(scene_index, scene)
+
+
+def _delete_scene(rf, scene_index):
+    rf.song().delete_scene(scene_index)
+    return {"index": scene_index}
+
+
+def _fire_scene(rf, scene_index):
+    rf.song().scenes[scene_index].fire()
+    return {"index": scene_index}
+
+
+def _cues_by_time(song):
+    return sorted(song.cue_points, key=lambda c: c.time)
+
+
+def _list_locators(rf):
+    return [
+        {"index": i, "name": c.name, "time": c.time}
+        for i, c in enumerate(_cues_by_time(rf.song()))
+    ]
+
+
+def _add_locator(rf, time, name=None):
+    """Add a locator at `time` beats. set_or_delete_cue toggles at the playhead."""
+    song = rf.song()
+    time = float(time)
+    if any(abs(c.time - time) < 1e-6 for c in song.cue_points):
+        raise ValueError("there's already a locator at that position")
+    song.current_song_time = time
+    song.set_or_delete_cue()
+    for c in song.cue_points:
+        if abs(c.time - time) < 1e-6:
+            if name:
+                c.name = name
+            return {"name": c.name, "time": c.time}
+    raise LookupError("Live didn't create the locator")
+
+
+def _delete_locator(rf, locator_index):
+    song = rf.song()
+    cue = _cues_by_time(song)[locator_index]
+    name = cue.name
+    song.current_song_time = cue.time
+    song.set_or_delete_cue()
+    return {"name": name}
+
+
+def _jump_to_locator(rf, locator_index):
+    cue = _cues_by_time(rf.song())[locator_index]
+    cue.jump()
+    return {"name": cue.name, "time": cue.time}
 
 
 COMMANDS = {
     "ping": _ping,
     "list_tracks": _list_tracks,
+    "list_returns": _list_returns,
     "create_audio_track": _create_audio_track,
     "create_midi_track": _create_midi_track,
+    "create_return_track": _create_return_track,
     "set_track_name": _set_track_name,
+    "delete_track": _delete_track,
+    "get_routing": _get_routing,
+    "set_routing": _set_routing,
+    "get_mixer": _get_mixer,
+    "set_volume": _set_volume,
+    "set_pan": _set_pan,
+    "set_mute": _set_mute,
+    "set_solo": _set_solo,
+    "set_send": _set_send,
+    "list_presets": _list_presets,
     "load_device": _load_device,
+    "list_devices": _list_devices,
+    "delete_device": _delete_device,
+    "get_song": _get_song,
+    "set_tempo": _set_tempo,
+    "play": _play,
+    "stop": _stop,
+    "list_scenes": _list_scenes,
+    "create_scene": _create_scene,
+    "set_scene": _set_scene,
+    "delete_scene": _delete_scene,
+    "fire_scene": _fire_scene,
+    "list_locators": _list_locators,
+    "add_locator": _add_locator,
+    "delete_locator": _delete_locator,
+    "jump_to_locator": _jump_to_locator,
 }
