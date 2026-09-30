@@ -1,0 +1,380 @@
+"""Holy Sound's web app: chat on one side, the live set on the other.
+
+    uv run python -m app                 # this computer only
+    uv run python -m app --lan           # also phones/tablets on the same Wi-Fi
+    uv run python -m app --fake-live     # no Ableton? use a pretend Live Set
+
+Standard library HTTP only. The page is static files in app/static; everything
+else is a small JSON API over Live (app/live.py) and the conversation
+(app/assistant.py).
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import mimetypes
+import os
+import re
+import secrets
+import socket
+import threading
+import webbrowser
+from http import HTTPStatus
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from app.actions import run_all, to_rigspec
+from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
+from app.live import LiveLink, LiveUnavailable
+from runtime import RigLinkError
+
+ROOT = Path(__file__).resolve().parent.parent
+STATIC = Path(__file__).resolve().parent / "static"
+TEMPLATE = ROOT / "templates" / "test.als"
+DEFAULT_PORT = 8765
+
+# What the mixer panel may do directly, without going through the assistant.
+# Everything here is undoable in Live with Cmd+Z.
+DIRECT_COMMANDS = {
+    "set_volume", "set_pan", "set_mute", "set_solo", "set_send", "set_tempo",
+    "play", "stop", "fire_scene", "load_device", "delete_device", "set_track_name",
+    "create_scene", "set_scene", "set_routing", "create_audio_track", "create_midi_track",
+    "create_return_track", "get_routing",
+}
+
+
+class App:
+    def __init__(self, live, conversation, key=None):
+        self.live = live
+        self.chat = conversation
+        self.key = key  # None: only this computer can connect
+        self._apply_lock = threading.Lock()  # a laptop and a phone may both press Apply
+
+    # -- state ----------------------------------------------------------
+
+    def live_state(self):
+        try:
+            return {"connected": True, "snapshot": self.live.snapshot(), "message": None}
+        except LiveUnavailable as e:
+            return {"connected": False, "snapshot": None, "message": str(e)}
+        except RigLinkError as e:
+            return {"connected": False, "snapshot": None, "message": f"Live reported a problem: {e}"}
+
+    def ai_state(self):
+        try:
+            self.chat.client()
+        except AssistantUnavailable as e:
+            return {"ready": False, "message": str(e)}
+        if self.chat.setup_error:
+            return {"ready": False, "message": self.chat.setup_error}
+        return {"ready": True, "message": None}
+
+    def transcript(self):
+        out = []
+        for entry in self.chat.transcript:
+            entry = dict(entry)
+            pid = entry.pop("proposal_id", None)
+            if pid:
+                entry["proposal"] = describe_proposal(self.chat.proposal(pid))
+            out.append(entry)
+        return out
+
+    def state(self):
+        return {
+            "live": self.live_state(),
+            "ai": self.ai_state(),
+            "chat": self.transcript(),
+            "busy": self.chat.busy,
+        }
+
+    # -- actions --------------------------------------------------------
+
+    def send_message(self, text):
+        live = self.live_state()
+        stock = self.live.stock_devices() if live["connected"] else None
+        notes = session_notes(live["snapshot"], stock, live["message"])
+        self.chat.send(text, notes)
+
+    def apply(self, pid):
+        with self._apply_lock:
+            p = self._pending(pid)
+            results = run_all(self.live, p["actions"])
+            self.chat.record_outcome(pid, "applied", results)
+            return results
+
+    def dismiss(self, pid):
+        self._pending(pid)
+        self.chat.record_outcome(pid, "dismissed")
+
+    def export(self, pid):
+        """Render a proposal's new tracks to .als bytes. Returns (bytes, notes)."""
+        p = self.chat.proposal(pid)
+        if p is None:
+            raise UserError("That suggestion isn't available any more.")
+        spec, notes = to_rigspec(p["actions"])
+        if spec is None:
+            raise UserError("There are no new tracks in that suggestion to put in a session file.")
+        try:
+            from write_als import render
+
+            data = render(spec, TEMPLATE)
+        except LookupError as e:
+            raise UserError(
+                f"Couldn't build the session file: {e}. The session file needs Ableton Live 12 "
+                "installed on this computer, because it copies Live's own effects."
+            ) from e
+        if p["status"] == "pending":
+            self.chat.record_outcome(pid, "exported")
+        return data, notes
+
+    def _pending(self, pid):
+        p = self.chat.proposal(pid)
+        if p is None:
+            raise UserError("That suggestion isn't available any more.")
+        if p["status"] != "pending":
+            raise UserError("That suggestion has already been dealt with.")
+        return p
+
+
+class UserError(Exception):
+    """A problem to show the volunteer as-is."""
+
+
+def make_handler(app):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "HolySound"
+
+        def log_message(self, fmt, *args):  # quieter than the default
+            if not self.path.startswith("/api/state"):
+                super().log_message(fmt, *args)
+
+        # -- access ------------------------------------------------------
+
+        def _local(self):
+            return ipaddress.ip_address(self.client_address[0]).is_loopback
+
+        def _authorised(self):
+            if self._local():
+                return True
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            return app.key is not None and cookie.get("hs_key") is not None and \
+                secrets.compare_digest(cookie["hs_key"].value, app.key)
+
+        def _same_origin(self):
+            # Browsers send Origin on cross-site POSTs; refuse other sites.
+            origin = self.headers.get("Origin")
+            return origin is None or urlparse(origin).netloc == self.headers.get("Host")
+
+        # -- responses ---------------------------------------------------
+
+        def _json(self, payload, status=HTTPStatus.OK):
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _error(self, message, status=HTTPStatus.BAD_REQUEST):
+            self._json({"error": message}, status)
+
+        def _body(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 64_000:
+                raise UserError("That message is too long.")
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw)
+            except ValueError as e:
+                raise UserError("The page sent something the app couldn't read.") from e
+            if not isinstance(data, dict):
+                raise UserError("The page sent something the app couldn't read.")
+            return data
+
+        # -- routes ------------------------------------------------------
+
+        def do_GET(self):
+            url = urlparse(self.path)
+            if url.path == "/" and not self._authorised():
+                key = parse_qs(url.query).get("key", [None])[0]
+                if app.key and key and secrets.compare_digest(key, app.key):
+                    self.send_response(HTTPStatus.SEE_OTHER)
+                    self.send_header("Set-Cookie", f"hs_key={app.key}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+                    self.send_header("Location", "/")
+                    self.end_headers()
+                    return
+                return self._text(HTTPStatus.FORBIDDEN, "Open the link Holy Sound printed on the computer running it.")
+            if not self._authorised():
+                return self._error("Not allowed.", HTTPStatus.FORBIDDEN)
+
+            try:
+                if url.path == "/api/state":
+                    return self._json(app.state())
+                if url.path == "/api/presets":
+                    device = parse_qs(url.query).get("device", [""])[0]
+                    return self._json({"presets": app.live.presets(device)})
+                if url.path == "/api/devices":
+                    return self._json({"devices": app.live.stock_devices()})
+                match = re.fullmatch(r"/api/proposals/(\d+)/export", url.path)
+                if match:
+                    data, _notes = app.export(match.group(1))
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", 'attachment; filename="Holy Sound.als"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if url.path == "/api/proposals/export-notes":
+                    pid = parse_qs(url.query).get("id", [""])[0]
+                    p = app.chat.proposal(pid)
+                    notes = to_rigspec(p["actions"])[1] if p else []
+                    return self._json({"notes": notes})
+                return self._static(url.path)
+            except (UserError, LiveUnavailable) as e:
+                return self._error(str(e))
+            except RigLinkError as e:
+                return self._error(f"Live couldn't do that: {e}")
+
+        def do_POST(self):
+            if not self._authorised() or not self._same_origin():
+                return self._error("Not allowed.", HTTPStatus.FORBIDDEN)
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                return self._error("Expected JSON.", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            path = urlparse(self.path).path
+            try:
+                body = self._body()
+                if path == "/api/chat":
+                    text = str(body.get("message", "")).strip()
+                    if not text:
+                        raise UserError("Type a message first.")
+                    if app.chat.busy:
+                        raise UserError("Still working on the last message — one moment.")
+                    app.send_message(text)
+                    return self._json(app.state())
+                if path == "/api/reset":
+                    app.chat.reset()
+                    return self._json(app.state())
+                match = re.fullmatch(r"/api/proposals/(\d+)/(apply|dismiss)", path)
+                if match:
+                    pid, verb = match.groups()
+                    if verb == "apply":
+                        app.apply(pid)
+                    else:
+                        app.dismiss(pid)
+                    return self._json(app.state())
+                if path == "/api/live":
+                    cmd = body.get("cmd")
+                    if cmd not in DIRECT_COMMANDS:
+                        raise UserError("The app can't do that from here.")
+                    args = body.get("args") or {}
+                    if not isinstance(args, dict):
+                        raise UserError("The page sent something the app couldn't read.")
+                    result = app.live.call(cmd, **args)
+                    return self._json({"result": result, "live": app.live_state()})
+                return self._error("Not found.", HTTPStatus.NOT_FOUND)
+            except UserError as e:
+                return self._error(str(e))
+            except (LiveUnavailable, AssistantUnavailable) as e:
+                return self._error(str(e), HTTPStatus.SERVICE_UNAVAILABLE)
+            except RigLinkError as e:
+                from app.actions import _sentence
+
+                return self._error(_sentence(e))
+            except TypeError as e:
+                return self._error(f"The page asked Live for something it didn't understand ({e}).")
+
+        def _text(self, status, text):
+            body = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _static(self, path):
+            if path == "/":
+                path = "/index.html"
+            target = (STATIC / path.lstrip("/")).resolve()
+            if STATIC not in target.parents or not target.is_file():
+                return self._text(HTTPStatus.NOT_FOUND, "Not found.")
+            body = target.read_bytes()
+            kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", kind + ("; charset=utf-8" if kind.startswith("text/") or kind.endswith("javascript") else ""))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    return Handler
+
+
+def load_dotenv(path=ROOT / ".env"):
+    """Read KEY=value lines from .env into the environment (no dependency)."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+def lan_address():
+    """This computer's address on the local network (no packets are sent)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Holy Sound — describe your Sunday, get a working Ableton set.")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--lan", action="store_true", help="Let phones and tablets on the same Wi-Fi connect.")
+    parser.add_argument("--fake-live", action="store_true", help="Use a pretend Live Set instead of Ableton.")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open a browser window.")
+    args = parser.parse_args(argv)
+
+    load_dotenv()
+    live_port = 9877
+    if args.fake_live:
+        from app import fake_live
+
+        fake_server, _ = fake_live.serve(port=0)
+        live_port = fake_server.server_address[1]
+
+    key = secrets.token_urlsafe(9) if args.lan else None
+    app = App(LiveLink(port=live_port), Conversation(), key=key)
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    server = ThreadingHTTPServer((host, args.port), make_handler(app))
+    server.daemon_threads = True
+
+    local_url = f"http://127.0.0.1:{args.port}/"
+    print(f"Holy Sound is running: {local_url}")
+    if args.fake_live:
+        print("Using a pretend Live Set (--fake-live). Nothing here touches Ableton.")
+    if args.lan:
+        print(f"On a phone or tablet on the same Wi-Fi, open: http://{lan_address()}:{args.port}/?key={key}")
+    print("Press Ctrl+C to stop.")
+    if not args.no_browser:
+        threading.Timer(0.5, webbrowser.open, (local_url,)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

@@ -162,8 +162,10 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 
 ## Constraints
 
-- Python 3.11+. **lxml, pydantic, typer only.** Nothing else without asking —
-  pytest is not yet approved.
+- Python 3.11+. **lxml, pydantic, typer, anthropic only.** Nothing else
+  without asking — pytest is not yet approved (tests use stdlib unittest).
+  `anthropic` came with the chat (plan.md step 2); the web app itself is
+  stdlib `http.server` plus static files, no framework or build step.
 - Stock Ableton devices only. No third-party plugins.
 - **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop.
 - Golden-file tests must run without Ableton installed.
@@ -178,6 +180,13 @@ spec.py                       RigSpec / TrackSpec — the contract
 write_als.py                  render(spec, template_path) -> bytes
 remote_script/RigLink/        Control Surface: live socket bridge into Live
 runtime.py                    Client for RigLink — the live-edit path
+app/server.py                 Web app: chat + mixer, `uv run python -m app`
+app/assistant.py              Claude conversation → proposed actions
+app/actions.py                Proposable actions (intent only) and how each runs
+app/live.py                   Shared, self-reconnecting RigLink connection
+app/fake_live.py              In-memory stand-in for Live + RigLink, for tests/demo
+app/static/                   The page: HTML/CSS/JS, served as-is
+tests/                        unittest suite; needs neither Live nor an API key
 templates/test.als            Reference Live 12.4.5 set, read-only
 templates/test.reference.xml  Its decompressed XML, for diffing
 templates/probe_noinput.als   Live's own save of a generated set; source of

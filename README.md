@@ -50,14 +50,21 @@ Generated test sessions have opened successfully in Ableton Live 12.4.5 without
 repair warnings. The current implementation has also been round-tripped through
 Live with no structural differences beyond float formatting.
 
+The web app (`app/`, first version) adds:
+
+- A chat where the volunteer describes the service and reviews Claude's
+  suggested changes before pressing **Apply**
+- Live refinement of the open Ableton session through the RigLink control
+  surface: tracks, inputs and outputs, levels, pan, stock effects, sends, and
+  songs as scenes with their own tempos
+- A mixer and song list that follow the open set, usable from a phone or tablet
+- Downloading a suggested set of tracks as a `.als` when Live isn't open
+
 Still in development:
 
-- Plain-English conversation to validated rig specification
-- A volunteer-friendly chat interface
-- Setlists, scenes, and song tempos
-- Hardware output and in-ear monitor routing
-- Live refinement of an open Ableton session
-- Automated regression coverage
+- Remembering a church's room and gear from week to week
+- Hardware output routing in the `.als` renderer (it works live, via RigLink)
+- Automated regression coverage for the renderer
 
 ## Local development
 
@@ -66,6 +73,26 @@ Dependencies are managed with [`uv`](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync
+```
+
+### Running the app
+
+1. Copy `remote_script/RigLink` into Live's Remote Scripts folder
+   (`~/Music/Ableton/User Library/Remote Scripts/`), restart Live, and pick
+   **RigLink** as a Control Surface in Settings → Link, Tempo & MIDI.
+2. Copy `.env.example` to `.env` and add an Anthropic API key.
+3. Start it:
+
+```sh
+uv run python -m app            # opens http://127.0.0.1:8765 in a browser
+uv run python -m app --lan      # also prints a link for phones on the same Wi-Fi
+uv run python -m app --fake-live   # no Ableton: a pretend Live Set for trying the UI
+```
+
+Tests run without Ableton or an API key:
+
+```sh
+uv run python -m unittest discover tests
 ```
 
 The renderer reads Ableton's stock device presets from the local Live
