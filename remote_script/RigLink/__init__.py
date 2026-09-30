@@ -34,6 +34,9 @@ class RigLink(ControlSurface):
         super().__init__(c_instance)
         self._clients = []
         self._buffers = {}
+        # Replies waiting to go out. The sockets are non-blocking, so a large
+        # reply (a long preset list, a snapshot) may take several ticks to send.
+        self._outgoing = {}
         self._server = None
         self._open_server()
 
@@ -50,12 +53,8 @@ class RigLink(ControlSurface):
             self.log_message("RigLink: failed to open socket: %s" % e)
 
     def disconnect(self):
-        for client in self._clients:
-            try:
-                client.close()
-            except OSError:
-                pass
-        self._clients = []
+        for client in list(self._clients):
+            self._drop_client(client)
         if self._server is not None:
             try:
                 self._server.close()
@@ -68,6 +67,7 @@ class RigLink(ControlSurface):
         super().update_display()
         self._accept_new_clients()
         self._service_clients()
+        self._flush_clients()
 
     def _accept_new_clients(self):
         if self._server is None:
@@ -78,34 +78,49 @@ class RigLink(ControlSurface):
                 client.setblocking(False)
                 self._clients.append(client)
                 self._buffers[client] = b""
+                self._outgoing[client] = b""
         except BlockingIOError:
             pass
         except OSError as e:
             self.log_message("RigLink: accept failed: %s" % e)
 
     def _service_clients(self):
-        dead = []
-        for client in self._clients:
+        # Iterate over a copy: handling a line can drop the client.
+        for client in list(self._clients):
             try:
                 chunk = client.recv(4096)
             except BlockingIOError:
                 continue
             except OSError:
-                dead.append(client)
+                self._drop_client(client)
                 continue
 
             if not chunk:
-                dead.append(client)
+                self._drop_client(client)
                 continue
 
             self._buffers[client] += chunk
-            while b"\n" in self._buffers[client]:
+            while client in self._buffers and b"\n" in self._buffers[client]:
                 line, self._buffers[client] = self._buffers[client].split(b"\n", 1)
                 if line.strip():
                     self._handle_line(client, line)
 
-        for client in dead:
+    def _flush_clients(self):
+        for client in list(self._clients):
+            self._flush(client)
+
+    def _flush(self, client):
+        pending = self._outgoing.get(client)
+        if not pending:
+            return
+        try:
+            sent = client.send(pending)
+        except BlockingIOError:
+            return
+        except OSError:
             self._drop_client(client)
+            return
+        self._outgoing[client] = pending[sent:]
 
     def _drop_client(self, client):
         try:
@@ -115,6 +130,7 @@ class RigLink(ControlSurface):
         if client in self._clients:
             self._clients.remove(client)
         self._buffers.pop(client, None)
+        self._outgoing.pop(client, None)
 
     def _handle_line(self, client, line):
         try:
@@ -137,10 +153,10 @@ class RigLink(ControlSurface):
             self._reply(client, {"ok": False, "error": str(e)})
 
     def _reply(self, client, payload):
-        try:
-            client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        except OSError:
-            self._drop_client(client)
+        if client not in self._outgoing:
+            return
+        self._outgoing[client] += (json.dumps(payload) + "\n").encode("utf-8")
+        self._flush(client)
 
 
 # -- Commands --------------------------------------------------------------
@@ -529,6 +545,80 @@ def _jump_to_locator(rf, locator_index):
     return {"name": cue.name, "time": cue.time}
 
 
+# -- Snapshot --------------------------------------------------------------
+# Everything a UI needs to draw the set, in one round trip. Live only services
+# the socket from update_display, so a dozen small calls cost a second or more.
+
+
+def _db_value(param):
+    """A dB display as a number, or None for -inf (JSON has no infinity)."""
+    try:
+        db = _parse_db(_display(param))
+    except ValueError:
+        return None
+    return None if db == float("-inf") else db
+
+
+def _routing_now(track, direction):
+    kind = getattr(track, "%s_routing_type" % direction).display_name
+    channel = getattr(track, "%s_routing_channel" % direction).display_name
+    return {"type": kind, "channel": channel}
+
+
+def _strip(song, i, track, is_return):
+    mixer = track.mixer_device
+    row = {
+        "index": i,
+        "name": track.name,
+        "is_return": is_return,
+        "volume": _display(mixer.volume),
+        "volume_db": _db_value(mixer.volume),
+        "pan": _display(mixer.panning),
+        "pan_value": mixer.panning.value,
+        "mute": track.mute,
+        "solo": track.solo,
+        "sends": [
+            {"return": r.name, "level": _display(s), "level_db": _db_value(s)}
+            for r, s in zip(song.return_tracks, mixer.sends)
+        ],
+        "devices": [d.name for d in track.devices],
+        "output": _routing_now(track, "output"),
+    }
+    if not is_return:
+        row["is_midi"] = track.has_midi_input
+        row["input"] = _routing_now(track, "input")
+    return row
+
+
+def _get_snapshot(rf):
+    song = rf.song()
+    return {
+        "song": _get_song(rf),
+        "tracks": [_strip(song, i, t, False) for i, t in enumerate(song.tracks)],
+        "returns": [_strip(song, i, t, True) for i, t in enumerate(song.return_tracks)],
+        "master": {
+            "volume": _display(song.master_track.mixer_device.volume),
+            "volume_db": _db_value(song.master_track.mixer_device.volume),
+        },
+        "scenes": _list_scenes(rf),
+        "locators": _list_locators(rf),
+    }
+
+
+def _list_stock_devices(rf):
+    """Stock device names by browser category, as this copy of Live has them."""
+    browser = rf.application().browser
+    found = {}
+    for category in DEVICE_CATEGORIES:
+        names = []
+        level = list(getattr(browser, category).children)
+        for _ in range(DEVICE_SEARCH_DEPTH):
+            names.extend(item.name for item in level if item.is_device)
+            level = [c for item in level if item.is_folder for c in item.children]
+        found[category] = sorted(set(names))
+    return found
+
+
 COMMANDS = {
     "ping": _ping,
     "list_tracks": _list_tracks,
@@ -563,4 +653,6 @@ COMMANDS = {
     "add_locator": _add_locator,
     "delete_locator": _delete_locator,
     "jump_to_locator": _jump_to_locator,
+    "get_snapshot": _get_snapshot,
+    "list_stock_devices": _list_stock_devices,
 }

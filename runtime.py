@@ -173,3 +173,9 @@ class LiveConnection:
 
     def jump_to_locator(self, locator_index):
         return self.send("jump_to_locator", locator_index=locator_index)
+
+    def get_snapshot(self):
+        return self.send("get_snapshot")
+
+    def list_stock_devices(self):
+        return self.send("list_stock_devices")
