@@ -14,6 +14,8 @@ picked by name or number.
 
 import re
 import socket
+import time
+from pathlib import Path
 
 import typer
 
@@ -181,6 +183,34 @@ def rename(
     typer.echo(f"Track {target['label']} is now {result['name']}.")
 
 
+TRACK_COLORS = {
+    "red": 0xFF3636,
+    "orange": 0xFF9A00,
+    "yellow": 0xFFE140,
+    "green": 0x3DC300,
+    "teal": 0x00BFAF,
+    "blue": 0x3C82F0,
+    "purple": 0xA67CF0,
+    "pink": 0xFF5FBE,
+    "grey": 0x7A7A7A,
+}
+
+
+@app.command(rich_help_panel="Tracks")
+def color(
+    track: str = typer.Argument(..., help="Track name, number, or return letter."),
+    name: str = typer.Argument(..., help=f"One of: {', '.join(TRACK_COLORS)}."),
+):
+    """Colour a track. Live picks the nearest colour from its own palette."""
+    rgb = TRACK_COLORS.get(name.casefold())
+    if rgb is None:
+        _fail(f"Pick one of these colours: {', '.join(TRACK_COLORS)}.")
+    with _connect() as live:
+        target = _resolve_track(live, track)
+        _run(lambda: live.set_track_color(target["index"], rgb, target["is_return"]))
+    typer.echo(f"Track {target['label']} is now {name.casefold()}.")
+
+
 @app.command("delete-track", rich_help_panel="Tracks")
 def delete_track(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
     """Delete a track or return track. Undo in Live with Cmd+Z."""
@@ -323,6 +353,37 @@ def send(
             _fail(f"{to!r} isn't a return track. Sends only go to returns.")
         result = _run(lambda: live.set_send(target["index"], dest["index"], db, target["is_return"]))
     typer.echo(f"Track {target['label']} send {dest['label']}: {result['level']}")
+
+
+def _meter_label(row):
+    if row["kind"] == "return":
+        return _return_letter(row["index"])
+    if row["kind"] == "master":
+        return "M"
+    return str(row["index"] + 1)
+
+
+@app.command(rich_help_panel="Mixer")
+def levels(seconds: float = typer.Option(5.0, "--seconds", help="How long to listen.")):
+    """Listen for a few seconds and report how loud each track got.
+
+    Meter values run 0 to 1, as Live's track meters show them (after the
+    fader). Their mapping to dB hasn't been checked yet.
+    """
+    with _connect() as live:
+        _run(live.reset_meters)
+        time.sleep(seconds)
+        result = _run(live.get_meters)
+    if result["ticks"] == 0:
+        _fail("Live didn't report any meter readings. Is the set open and not frozen?")
+    for row in result["tracks"]:
+        label = f"{_meter_label(row):>3}  {row['name']}"
+        if not row["has_audio_output"]:
+            typer.echo(f"{label}  (no audio output)")
+        elif row["peak"] == 0:
+            typer.echo(f"{label}  silent")
+        else:
+            typer.echo(f"{label}  peak {row['peak']:.2f}, average {row['average']:.2f}")
 
 
 # -- Devices ---------------------------------------------------------------
@@ -484,6 +545,27 @@ def fire_scene(scene: str = typer.Argument(..., help="Scene name or number.")):
         row = _pick(_run(live.list_scenes), scene, "scene")
         _run(lambda: live.fire_scene(row["index"]))
     typer.echo(f"Launched scene {row['index'] + 1}: {row['name']}")
+
+
+# -- Clips -----------------------------------------------------------------
+
+
+@app.command("import-audio", rich_help_panel="Scenes")
+def import_audio(
+    track: str = typer.Argument(..., help="Audio track name or number."),
+    file: Path = typer.Argument(..., help="Audio file to import, e.g. a stem .wav."),
+    scene: str = typer.Argument(..., help="Scene name or number to put the clip in."),
+):
+    """Put an audio file on a track in a scene. It plays once, at its own speed."""
+    if not file.is_file():
+        _fail(f"There's no file at {file}.")
+    with _connect() as live:
+        target = _resolve_track(live, track)
+        if target["is_return"]:
+            _fail("Audio clips go on regular tracks, not returns.")
+        row = _pick(_run(live.list_scenes), scene, "scene")
+        result = _run(lambda: live.import_audio(target["index"], str(file.resolve()), row["index"], file.stem))
+    typer.echo(f"Put {result['name']} on track {target['label']} in scene {row['index'] + 1}.")
 
 
 # -- Locators --------------------------------------------------------------

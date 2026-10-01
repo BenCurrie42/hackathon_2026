@@ -82,6 +82,15 @@ class LiveConnection:
     def delete_track(self, track_index, is_return=False):
         return self.send("delete_track", track_index=track_index, is_return=is_return)
 
+    def set_track_color(self, track_index, rgb, is_return=False):
+        return self.send("set_track_color", track_index=track_index, rgb=rgb, is_return=is_return)
+
+    def track_contents(self, track_index, is_return=False):
+        return self.send("track_contents", track_index=track_index, is_return=is_return)
+
+    def api_names(self):
+        return self.send("api_names")
+
     def get_routing(self, track_index, is_return=False):
         return self.send("get_routing", track_index=track_index, is_return=is_return)
 
@@ -134,6 +143,25 @@ class LiveConnection:
         return self.send(
             "delete_device", track_index=track_index, device_index=device_index, is_return=is_return
         )
+
+    def reset_meters(self):
+        return self.send("reset_meters")
+
+    def get_meters(self):
+        return self.send("get_meters")
+
+    def import_audio(self, track_index, file_path, scene_index, name=None, gain_db=None):
+        return self.send(
+            "import_audio",
+            track_index=track_index,
+            file_path=file_path,
+            scene_index=scene_index,
+            name=name,
+            gain_db=gain_db,
+        )
+
+    def set_clip_gain(self, track_index, scene_index, db):
+        return self.send("set_clip_gain", track_index=track_index, scene_index=scene_index, db=db)
 
     def get_song(self):
         return self.send("get_song")
