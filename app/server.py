@@ -27,9 +27,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app.actions import run_all, to_rigspec
+from app import audio_files
+from app.actions import Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
+from rigforge import TRACK_COLORS
 from runtime import RigLinkError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,7 +45,7 @@ DIRECT_COMMANDS = {
     "set_volume", "set_pan", "set_mute", "set_solo", "set_send", "set_tempo",
     "play", "stop", "fire_scene", "load_device", "delete_device", "set_track_name",
     "create_scene", "set_scene", "set_routing", "create_audio_track", "create_midi_track",
-    "create_return_track", "get_routing",
+    "create_return_track", "get_routing", "set_track_color", "set_clip_gain",
 }
 
 
@@ -53,6 +55,8 @@ class App:
         self.chat = conversation
         self.key = key  # None: only this computer can connect
         self._apply_lock = threading.Lock()  # a laptop and a phone may both press Apply
+        self.files = {}    # imported file id -> absolute path; import_audio may use only these
+        self.imports = {}  # imported folder name -> number of files
 
     # -- state ----------------------------------------------------------
 
@@ -89,22 +93,54 @@ class App:
             "ai": self.ai_state(),
             "chat": self.transcript(),
             "busy": self.chat.busy,
+            "colors": {name: f"#{rgb:06x}" for name, rgb in TRACK_COLORS.items()},
         }
 
     # -- actions --------------------------------------------------------
 
-    def send_message(self, text):
+    def notes(self):
         live = self.live_state()
         stock = self.live.stock_devices() if live["connected"] else None
-        notes = session_notes(live["snapshot"], stock, live["message"])
-        self.chat.send(text, notes)
+        return session_notes(live["snapshot"], stock, live["message"], self.imports)
+
+    def send_message(self, text, attachment=None):
+        self.chat.send(text, self.notes(), attachment)
+
+    def import_folder(self, path, note=""):
+        """Measure every audio file in a folder and hand the list to the assistant."""
+        try:
+            folder, found = audio_files.scan(path)
+        except audio_files.AudioFileError as e:
+            raise UserError(str(e)) from e
+        if not found:
+            raise UserError(f"There's no audio in {Path(path).name}. Pick the folder with the WAV or AIFF files in it.")
+        measured = audio_files.measure_many([p for _id, p in found])
+        lines = [audio_files.describe(fid, m) for (fid, _p), m in zip(found, measured)]
+        if len(found) >= audio_files.MAX_FILES:
+            lines.append(f"(Only the first {audio_files.MAX_FILES} files are listed.)")
+        self.files.update(dict(found))
+        self.imports[folder.name] = len(found)
+        attachment = (
+            f'<imported_folder name="{folder.name}" files="{len(found)}">\n'
+            + "\n".join(lines) + "\n</imported_folder>"
+        )
+        text = f"Import the audio in “{folder.name}” ({len(found)} files)."
+        if note.strip():
+            text += " " + note.strip()
+        self.send_message(text, attachment)
 
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
-            results = run_all(self.live, p["actions"])
+            results = run_all(self.live, p["actions"], self.files)
             self.chat.record_outcome(pid, "applied", results)
-            return results
+        # A listen step's numbers are only useful once the assistant has read them.
+        if any(isinstance(a, Listen) for a in p["actions"]):
+            try:
+                self.chat.follow_up(self.notes())
+            except AssistantUnavailable:
+                pass  # the results still show; the volunteer can ask about them
+        return results
 
     def dismiss(self, pid):
         self._pending(pid)
@@ -220,6 +256,12 @@ def make_handler(app):
                     return self._json({"presets": app.live.presets(device)})
                 if url.path == "/api/devices":
                     return self._json({"devices": app.live.stock_devices()})
+                if url.path == "/api/folders":
+                    path = parse_qs(url.query).get("path", [None])[0]
+                    try:
+                        return self._json(audio_files.browse(path))
+                    except audio_files.AudioFileError as e:
+                        raise UserError(str(e)) from e
                 match = re.fullmatch(r"/api/proposals/(\d+)/export", url.path)
                 if match:
                     data, _notes = app.export(match.group(1))
@@ -256,6 +298,14 @@ def make_handler(app):
                     if app.chat.busy:
                         raise UserError("Still working on the last message — one moment.")
                     app.send_message(text)
+                    return self._json(app.state())
+                if path == "/api/import":
+                    if app.chat.busy:
+                        raise UserError("Still working on the last message — one moment.")
+                    folder = str(body.get("folder", "")).strip()
+                    if not folder:
+                        raise UserError("Pick a folder first.")
+                    app.import_folder(folder, str(body.get("note", "")))
                     return self._json(app.state())
                 if path == "/api/reset":
                     app.chat.reset()

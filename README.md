@@ -59,6 +59,12 @@ The web app (`app/`, first version) adds:
   songs as scenes with their own tempos
 - A mixer and song list that follow the open set, usable from a phone or tablet
 - Downloading a suggested set of tracks as a `.als` when Live isn't open
+- **Import with AI**: pick a folder of stems and Claude reads every file's
+  levels (peak, how loud it is while sounding, how often it sounds), then
+  suggests tracks, songs, colours and clip gain to balance them
+- **Listening**: a suggested step plays a song and reads Live's meters, and
+  Claude follows up on what it heard; the mixer shows live meters, track
+  colours and each clip's level
 
 Still in development:
 

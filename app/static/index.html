@@ -22,6 +22,7 @@
       <button class="icon-btn" id="play-btn" aria-label="Play">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="play" d="M8 5.5v13l10.5-6.5z"/><rect class="stop" x="6.5" y="6.5" width="11" height="11" rx="1.5"/></svg>
       </button>
+      <div class="master-meter" id="master-meter" title="Master level"><span></span></div>
       <label class="tempo">
         <input id="tempo-input" type="number" inputmode="decimal" min="20" max="999" step="1" aria-label="Tempo in BPM">
         <span>BPM</span>
@@ -40,10 +41,14 @@
             <button class="chip">Four songs this week. Lead vocal on input 1, two backing vocals on 2 and 3, acoustic DI on 4, keys in stereo on 5/6.</button>
             <button class="chip">Add a click and guide track that only goes to the in-ears.</button>
             <button class="chip">Put a little more reverb on the lead vocal.</button>
+            <button class="chip chip-import" type="button" data-action="import">Import a folder of stems with AI</button>
           </div>
         </div>
       </div>
       <form class="composer" id="composer">
+        <button class="attach" type="button" id="import-btn" aria-label="Import audio with AI" title="Import audio with AI">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/></svg>
+        </button>
         <textarea id="message-input" rows="1" placeholder="Tell me what you need…" aria-label="Message"></textarea>
         <button class="send" type="submit" aria-label="Send">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14M13 6l6 6-6 6"/></svg>
@@ -114,12 +119,43 @@
     </form>
   </dialog>
 
+  <dialog id="color-dialog">
+    <form method="dialog" class="sheet">
+      <h2>Colour for <span id="color-track"></span></h2>
+      <div class="swatches" id="swatches"></div>
+      <div class="sheet-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog">
+    <form method="dialog" class="sheet import-sheet">
+      <h2>Import audio with AI</h2>
+      <p class="muted">Pick the folder with your stems or tracks. I’ll listen to every file, then suggest tracks, songs and levels for you to check before anything changes.</p>
+      <div class="roots" id="import-roots"></div>
+      <div class="crumb">
+        <button type="button" class="icon-btn small" id="folder-up" aria-label="Up one folder">↑</button>
+        <span id="folder-path"></span>
+      </div>
+      <ul class="folder-list" id="folder-list"></ul>
+      <p class="folder-files" id="folder-files"></p>
+      <label>Anything I should know? <span class="muted">(optional)</span>
+        <textarea id="import-note" rows="2" placeholder="e.g. “Sunday’s stems. Click and guide go to the in-ears on 3/4.”"></textarea>
+      </label>
+      <div class="sheet-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="btn primary" type="button" id="import-go">Import with AI</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="toasts" id="toasts" aria-live="assertive"></div>
 
   <template id="strip-template">
     <article class="strip">
       <header class="strip-head">
-        <span class="strip-num"></span>
+        <button class="strip-num" type="button" title="Track colour"></button>
         <input class="strip-name" aria-label="Track name">
         <span class="strip-route"></span>
         <div class="strip-toggles">
@@ -127,6 +163,7 @@
           <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
         </div>
       </header>
+      <div class="meter" aria-hidden="true"><span></span></div>
       <div class="control volume">
         <span class="control-label">Level</span>
         <input type="range" min="-70" max="6" step="0.5" aria-label="Level">
@@ -138,9 +175,11 @@
         <output></output>
       </div>
       <div class="devices"></div>
+      <div class="clips"></div>
       <details class="more">
         <summary>Sends &amp; outputs</summary>
         <div class="sends"></div>
+        <div class="clip-gains"></div>
         <div class="route-line"></div>
       </details>
     </article>

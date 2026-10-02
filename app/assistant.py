@@ -16,7 +16,8 @@ import threading
 
 from pydantic import ValidationError
 
-from app.actions import Proposal, is_destructive
+from app.actions import Proposal, is_audible, is_destructive
+from rigforge import TRACK_COLORS
 
 MODEL = os.environ.get("HOLYSOUND_MODEL", "claude-opus-5-5")
 EFFORT = os.environ.get("HOLYSOUND_EFFORT", "medium")
@@ -79,6 +80,34 @@ than putting a reverb on every track.
 ask which outputs if you don't know.
 - Vocals: a gentle EQ and compressor is a good default; send to a shared reverb.
 - Keep levels conservative (0 dB or a little below). Don't boost above +3 dB.
+- Colour related tracks alike so the volunteer can find them at a glance: drums and bass \
+red or orange, keys and pads blue or teal, guitars green, vocals purple or pink, click and \
+guide grey. The colours are: """ + ", ".join(TRACK_COLORS) + """.
+
+## Audio files
+
+When the volunteer imports a folder, their message lists every audio file in it with \
+measurements taken from the file: peak and "loud parts" in dBFS (how loud it is while it's \
+actually sounding), and how much of the time it sounds at all.
+
+- Make one audio track per part (Click, Guide, Pad, Bass, Drums, Keys, BGVs…), shared by \
+every song — not one track per file. Playback tracks have no input.
+- Folder and file names usually say which song a file belongs to. Make one song (scene) per \
+song; use a tempo only if a name states it, otherwise ask.
+- Put each file in its track and song with import_audio, naming the file exactly as listed.
+- Balance the parts with clip gain (gain_db): bring their loud parts roughly in line with \
+each other, and never let a clip's peak plus its gain go above -1 dBFS. Leave faders at \
+0 dB so the volunteer has room to ride them.
+- Say which files are silent or clip, and leave silent ones out.
+
+## Listening
+
+You can't hear the room, but a listen step plays a song and reads Live's level meters. It \
+plays out loud, so say that, and only suggest it when the volunteer is setting up, never \
+mid-service. After it's applied you get each track's meter readings (Live's own 0-1 meter, \
+after the fader). Compare tracks with each other — the 0-1 scale isn't verified as dB, so \
+never quote a reading as dB. Then suggest fader or clip gain changes in small steps \
+(1-3 dB), and offer to listen again.
 
 ## Session notes
 
@@ -152,12 +181,27 @@ class Conversation:
             self._client = self._client_factory()
         return self._client
 
-    def send(self, text, session_notes):
-        """Handle one message from the volunteer. Returns the new transcript entries."""
+    def send(self, text, session_notes, attachment=None):
+        """Handle one message from the volunteer. Returns the new transcript entries.
+
+        attachment goes to Claude with the message but isn't shown in the chat
+        (the measurements of an imported folder, say).
+        """
         with self._lock:
             self.busy = True
             try:
-                return self._send(text, session_notes)
+                return self._send(text, session_notes, attachment)
+            finally:
+                self.busy = False
+
+    def follow_up(self, session_notes):
+        """Let Claude react to applied results without a new message (after listening)."""
+        with self._lock:
+            if self._open_tool_use is None:
+                return []
+            self.busy = True
+            try:
+                return self._send(None, session_notes)
             finally:
                 self.busy = False
 
@@ -178,17 +222,27 @@ class Conversation:
         self.transcript.append(entry)
         return entry
 
-    def _send(self, text, session_notes):
+    def _send(self, text, session_notes, attachment=None):
         client = self.client()
         content = []
         reopen = self._open_tool_use
         if reopen:
             content.append(self._tool_result(*reopen))
             self._open_tool_use = None
-        content.append({"type": "text", "text": f"<session>\n{session_notes}\n</session>\n\n{text}"})
+        body = f"<session>\n{session_notes}\n</session>\n\n"
+        if text is None:
+            body += ("(Automatic: the changes were applied and their results are above. The "
+                     "volunteer hasn't said anything new. Tell them briefly what the results mean, "
+                     "and propose fixes if any are needed.)")
+        else:
+            body += text
+        if attachment:
+            body += f"\n\n{attachment}"
+        content.append({"type": "text", "text": body})
         self.messages.append({"role": "user", "content": content})
         mark = len(self.messages)
-        user_entry = self._entry(role="user", text=text)
+        user_entry = self._entry(role="user", text=text) if text is not None else None
+        shown = [user_entry] if user_entry else []
 
         try:
             for _attempt in range(FIX_ATTEMPTS + 1):
@@ -200,7 +254,7 @@ class Conversation:
                 reply = "\n\n".join(b.text for b in response.content if b.type == "text").strip()
                 call = next((b for b in response.content if b.type == "tool_use"), None)
                 if call is None:
-                    return [user_entry, self._entry(role="assistant", text=reply or "…")]
+                    return shown + [self._entry(role="assistant", text=reply or "…")]
 
                 try:
                     proposal = Proposal.model_validate(call.input)
@@ -223,18 +277,19 @@ class Conversation:
                     if other["id"] != pid and other["status"] == "pending":
                         other["status"] = "superseded"
                 self._open_tool_use = (call.id, pid)
-                return [user_entry, self._entry(role="assistant", text=reply, proposal_id=pid)]
+                return shown + [self._entry(role="assistant", text=reply, proposal_id=pid)]
 
-            return [user_entry, self._entry(
+            return shown + [self._entry(
                 role="assistant",
                 text="Sorry — I couldn't work out the right changes for that. Could you say it another way?",
             )]
         except _Refused:
             self._rewind(mark, reopen)
-            return [user_entry, self._entry(role="assistant", text="Sorry, I can't help with that one.")]
+            return shown + [self._entry(role="assistant", text="Sorry, I can't help with that one.")]
         except Exception:
             self._rewind(mark, reopen)
-            self.transcript.remove(user_entry)
+            if user_entry:
+                self.transcript.remove(user_entry)
             raise
 
     def _rewind(self, mark, reopen):
@@ -245,7 +300,11 @@ class Conversation:
     def _tool_result(self, tool_use_id, proposal_id):
         p = self.proposals[proposal_id]
         if p["status"] == "applied":
-            lines = [("✓ " if r["ok"] else "✗ ") + r["text"] for r in p["results"]]
+            lines = []
+            for r in p["results"]:
+                lines.append(("✓ " if r["ok"] else "✗ ") + r["text"])
+                if r.get("detail"):
+                    lines.append(r["detail"])
             outcome = "The volunteer applied these changes. Results:\n" + "\n".join(lines)
         elif p["status"] == "dismissed":
             outcome = "The volunteer chose not to apply these changes."
@@ -327,8 +386,11 @@ def _errors(error):
 # -- session notes ----------------------------------------------------------
 
 
-def session_notes(snapshot, stock_devices, live_error=None):
-    """The set as Claude sees it at the top of each message."""
+def session_notes(snapshot, stock_devices, live_error=None, imports=None):
+    """The set as Claude sees it at the top of each message.
+
+    imports: {folder name: number of files} for folders imported this session.
+    """
     if snapshot is None:
         devices = FALLBACK_DEVICES
         lines = [
@@ -344,8 +406,9 @@ def session_notes(snapshot, stock_devices, live_error=None):
             "",
             "Tracks:" if snapshot["tracks"] else "Tracks: none yet.",
         ]
+        scene_names = {s["index"]: s["name"] or f"song {s['index'] + 1}" for s in snapshot["scenes"]}
         for t in snapshot["tracks"]:
-            lines.append(f"  {t['index'] + 1}. {_strip_line(t)}")
+            lines.append(f"  {t['index'] + 1}. {_strip_line(t, scene_names)}")
         lines.append("Returns (shared effects):" if snapshot["returns"] else "Returns: none.")
         for r in snapshot["returns"]:
             lines.append(f"  {chr(ord('A') + r['index'])}. {_strip_line(r)}")
@@ -354,6 +417,10 @@ def session_notes(snapshot, stock_devices, live_error=None):
         for s in scenes:
             bpm = f" — {s['tempo']:g} BPM" if s["tempo"] else ""
             lines.append(f"  {s['index'] + 1}. {s['name'] or '(unnamed)'}{bpm}")
+    if imports:
+        lines.append("")
+        lines.append("Imported audio folders (import_audio can use their files): "
+                     + ", ".join(f"{name} ({n} files)" for name, n in imports.items()))
     lines.append("")
     lines.append("Stock devices in this Live:")
     for category, names in devices.items():
@@ -367,8 +434,21 @@ def _routing_text(side):
     return f"{side['type']} {side['channel']}".strip()
 
 
-def _strip_line(t):
+def color_name(rgb):
+    """The nearest named colour to one of Live's track colours."""
+    if rgb is None:
+        return None
+
+    def distance(other):
+        return sum((((rgb >> shift) & 255) - ((other >> shift) & 255)) ** 2 for shift in (16, 8, 0))
+
+    return min(TRACK_COLORS, key=lambda name: distance(TRACK_COLORS[name]))
+
+
+def _strip_line(t, scene_names=None):
     parts = [t["name"]]
+    if t.get("color") is not None:
+        parts.append(f"colour {color_name(t['color'])}")
     if not t["is_return"]:
         parts.append("MIDI" if t.get("is_midi") else "audio")
         parts.append(f"in: {_routing_text(t.get('input'))}")
@@ -384,6 +464,12 @@ def _strip_line(t):
     sends = [f"{s['return']} {s['level']}" for s in t["sends"] if s.get("level_db") is not None]
     if sends:
         parts.append("sends: " + ", ".join(sends))
+    clips = []
+    for c in t.get("clips", []):
+        where = (scene_names or {}).get(c["scene_index"], f"song {c['scene_index'] + 1}")
+        clips.append(f"{where}: {c['name']}" + (f" ({c['gain']})" if c.get("gain") else ""))
+    if clips:
+        parts.append("clips: " + ", ".join(clips))
     return " | ".join(parts)
 
 
@@ -393,6 +479,9 @@ def describe_proposal(p):
         "id": p["id"],
         "status": p["status"],
         "results": p["results"],
-        "steps": [{"text": a.describe(), "destructive": is_destructive(a)} for a in p["actions"]],
+        "steps": [
+            {"text": a.describe(), "destructive": is_destructive(a), "audible": is_audible(a)}
+            for a in p["actions"]
+        ],
         "exportable": any(a.action == "add_track" for a in p["actions"]),
     }

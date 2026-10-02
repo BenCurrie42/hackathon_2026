@@ -9,12 +9,18 @@ pytest isn't an approved dependency yet (CLAUDE.md).
 import copy
 import http.client
 import json
+import math
+import struct
+import tempfile
 import threading
 import unittest
+import wave
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-from app import fake_live
+from app import audio_files, fake_live
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.live import LiveLink, LiveUnavailable
@@ -275,7 +281,7 @@ class ConversationTest(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
-        self.assertIn("1. Lead Vocal | audio | in: Ext. In 1 | out: Master", notes)
+        self.assertIn("1. Lead Vocal | colour orange | audio | in: Ext. In 1 | out: Master", notes)
         self.assertIn("effects: Compressor", notes)
         self.assertIn("A. A-Reverb", notes)
         self.assertIn("audio effects: Auto Filter", notes)
@@ -357,6 +363,204 @@ class ServerTest(FakeLiveCase):
         self.assertTrue(state["live"]["connected"])
         status, _ = self.request("GET", "/../spec.py")
         self.assertEqual(status, 404)
+
+
+def write_stem(folder, name, peak_db=-6.0, seconds=2.0, rate=8000, bits=24):
+    """A WAV whose first half is silence and second half a sine at peak_db."""
+    amp = 10 ** (peak_db / 20)
+    n = int(rate * seconds)
+    scale = 2 ** (bits - 1) - 1
+    frames = b"".join(
+        int(scale * amp * math.sin(2 * math.pi * 220 * i / rate) if i >= n // 2 else 0)
+        .to_bytes(bits // 8, "little", signed=True)
+        for i in range(n)
+    )
+    path = Path(folder) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(bits // 8)
+        w.setframerate(rate)
+        w.writeframes(frames)
+    return path
+
+
+class StemFolderCase(unittest.TestCase):
+    """A folder of stems inside the home folder (the only place imports may look)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(dir=Path.home())
+        self.folder = Path(self._tmp.name) / "Sunday Stems"
+        write_stem(self.folder / "Way Maker", "Click.wav", peak_db=-3)
+        write_stem(self.folder / "Way Maker", "Pad.wav", peak_db=-20, bits=16)
+        (self.folder / "Way Maker" / "Silence.wav").write_bytes(b"")
+        with wave.open(str(self.folder / "Way Maker" / "Silence.wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b"\0\0" * 8000)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+
+class AudioFilesTest(StemFolderCase):
+    def test_measures_peak_and_loud_parts(self):
+        m = audio_files.measure(self.folder / "Way Maker" / "Click.wav")
+        self.assertAlmostEqual(m["peak_dbfs"], -3.0, delta=0.1)
+        self.assertAlmostEqual(m["loud_dbfs"], -6.0, delta=0.2)  # a sine's RMS is 3 dB under its peak
+        self.assertAlmostEqual(m["sounding_pct"], 50, delta=10)  # measured in 0.4 s windows
+        self.assertEqual(m["format"], "WAV 24-bit")
+
+    def test_float_wav_and_aiff(self):
+        rate, n = 8000, 8000
+        samples = [0.5 * math.sin(2 * math.pi * 220 * i / rate) for i in range(n)]
+        data = struct.pack(f"<{n}f", *samples)
+        fmt = struct.pack("<HHIIHH", 3, 1, rate, rate * 4, 4, 32)
+        wav = self.folder / "float.wav"
+        wav.write_bytes(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE" + b"fmt "
+                        + struct.pack("<I", 16) + fmt + b"data" + struct.pack("<I", len(data)) + data)
+        self.assertAlmostEqual(audio_files.measure(wav)["peak_dbfs"], -6.0, delta=0.1)
+
+        pcm = b"".join(int(32767 * v).to_bytes(2, "big", signed=True) for v in samples)
+        rate80 = struct.pack(">H", 16383 + 12) + int(rate / 2 ** 12 * 2 ** 63).to_bytes(8, "big")
+        comm = struct.pack(">hIh", 1, n, 16) + rate80
+        ssnd = struct.pack(">II", 0, 0) + pcm
+        body = b"AIFF" + b"COMM" + struct.pack(">I", len(comm)) + comm + b"SSND" + struct.pack(">I", len(ssnd)) + ssnd
+        aiff = self.folder / "big-endian.aif"
+        aiff.write_bytes(b"FORM" + struct.pack(">I", len(body)) + body)
+        m = audio_files.measure(aiff)
+        self.assertEqual(m["sample_rate"], 8000)
+        self.assertAlmostEqual(m["peak_dbfs"], -6.0, delta=0.1)
+
+    def test_scan_and_describe(self):
+        folder, found = audio_files.scan(self.folder)
+        ids = [fid for fid, _ in found]
+        self.assertEqual(ids, ["Sunday Stems/Way Maker/Click.wav", "Sunday Stems/Way Maker/Pad.wav",
+                               "Sunday Stems/Way Maker/Silence.wav"])
+        lines = [audio_files.describe(fid, m) for (fid, _), m in zip(found, audio_files.measure_many([p for _, p in found]))]
+        self.assertIn("SILENT", lines[2])
+        self.assertIn("peak -20.0 dBFS", lines[1])
+
+    def test_only_home_and_drives(self):
+        with self.assertRaises(audio_files.AudioFileError):
+            audio_files.browse("/etc")
+        listing = audio_files.browse(str(self.folder))
+        self.assertEqual([f["name"] for f in listing["folders"]], ["Way Maker"])
+        self.assertEqual(listing["folders"][0]["audio"], 3)
+
+
+class AudioActionsTest(StemFolderCase):
+    def setUp(self):
+        super().setUp()
+        self.server, self.fake = fake_live.serve(port=0, latency=0)
+        self.live = LiveLink(port=self.server.server_address[1])
+        _, found = audio_files.scan(self.folder)
+        self.files = dict(found)
+
+    def tearDown(self):
+        self.live.close()
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def run_actions(self, *actions):
+        parsed = Proposal.model_validate({"actions": list(actions)}).actions
+        with mock.patch("app.actions.time.sleep"):
+            return run_all(self.live, parsed, self.files)
+
+    def test_import_colour_gain_and_listen(self):
+        results = self.run_actions(
+            {"action": "add_song", "name": "Way Maker", "bpm": 68},
+            {"action": "add_track", "name": "Click", "color": "grey",
+             "output": {"destination": "Ext. Out", "channel": "3/4"}},
+            {"action": "add_track", "name": "Pad", "color": "blue"},
+            {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+             "song": "Way Maker", "gain_db": -6},
+            {"action": "import_audio", "track": "Pad", "file": "sunday stems/way maker/pad.wav", "song": "Way Maker"},
+            {"action": "set_clip_gain", "track": "Pad", "song": "Way Maker", "db": 4},
+            {"action": "set_color", "track": "Pad", "color": "teal"},
+            {"action": "listen", "song": "Way Maker", "seconds": 5},
+        )
+        self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
+        snap = self.live.snapshot(max_age=0)
+        click, pad = snap["tracks"]
+        self.assertEqual(click["color"], 0x7A7A7A)
+        self.assertEqual(pad["color"], 0x00BFAF)
+        self.assertEqual(click["clips"][0]["name"], "Click")
+        self.assertEqual(click["clips"][0]["gain"], "-6.0 dB")
+        self.assertEqual(pad["clips"][0]["gain"], "4.0 dB")
+        listen = results[-1]
+        self.assertIn("Loudest: Click", listen["text"])
+        self.assertIn("1. Click: peak", listen["detail"])
+        self.assertFalse(snap["song"]["is_playing"])  # it stopped what it started
+
+    def test_only_imported_files(self):
+        results = self.run_actions(
+            {"action": "add_track", "name": "Pad"},
+            {"action": "import_audio", "track": "Pad", "file": "/etc/passwd", "song": "1"},
+        )
+        self.assertFalse(results[1]["ok"])
+        self.assertIn("Import its folder first", results[1]["text"])
+
+    def test_listen_needs_something_playing(self):
+        results = self.run_actions({"action": "listen"})
+        self.assertFalse(results[0]["ok"])
+        self.assertIn("Nothing is playing", results[0]["text"])
+
+
+class ImportServerTest(StemFolderCase):
+    def setUp(self):
+        super().setUp()
+        self.server, self.fake = fake_live.serve(port=0, latency=0)
+        self.live = LiveLink(port=self.server.server_address[1])
+        self.claude = ScriptedClaude(
+            reply(text("Here's your stems."), call("tu_1", [
+                {"action": "add_song", "name": "Way Maker"},
+                {"action": "add_track", "name": "Click", "color": "grey"},
+                {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+                 "song": "Way Maker"},
+                {"action": "listen", "song": "Way Maker", "seconds": 3},
+            ])),
+            reply(text("The click is the loudest thing; that's fine for in-ears.")),
+        )
+        self.app = App(self.live, Conversation(client_factory=lambda: self.claude))
+
+    def tearDown(self):
+        self.live.close()
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def test_import_then_apply_then_automatic_follow_up(self):
+        self.app.import_folder(str(self.folder), "Click goes to in-ears.")
+        first = self.claude.requests[0]["messages"][-1]["content"][-1]["text"]
+        self.assertIn('<imported_folder name="Sunday Stems" files="3">', first)
+        self.assertIn('"Sunday Stems/Way Maker/Click.wav"', first)
+        self.assertEqual(self.app.chat.transcript[0]["text"],
+                         "Import the audio in “Sunday Stems” (3 files). Click goes to in-ears.")
+
+        pid = self.app.chat.transcript[-1]["proposal_id"]
+        with mock.patch("app.actions.time.sleep"):
+            results = self.app.apply(pid)
+        self.assertTrue(all(r["ok"] for r in results), results)
+
+        follow = self.claude.requests[1]["messages"][-1]["content"]
+        self.assertEqual(follow[0]["type"], "tool_result")
+        self.assertIn("Meter readings", follow[0]["content"])
+        self.assertIn("(Automatic:", follow[1]["text"])
+        self.assertIn("Imported audio folders", follow[1]["text"])
+        self.assertEqual(self.app.chat.transcript[-1]["text"], "The click is the loudest thing; that's fine for in-ears.")
+        self.assertEqual([e["role"] for e in self.app.chat.transcript], ["user", "assistant", "assistant"])
+
+    def test_empty_folder_is_a_sentence(self):
+        empty = Path(self._tmp.name) / "Nothing"
+        empty.mkdir()
+        from app.server import UserError
+
+        with self.assertRaises(UserError) as ctx:
+            self.app.import_folder(str(empty))
+        self.assertIn("no audio", str(ctx.exception))
 
 
 class AddTrackWordingTest(unittest.TestCase):

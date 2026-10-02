@@ -12,6 +12,8 @@ Live before it goes in CLAUDE.md.
 from __future__ import annotations
 
 import json
+import os
+import random
 import socketserver
 import threading
 import time
@@ -54,6 +56,14 @@ OUTPUTS = {
 }
 
 
+# Live gives new tracks colours from its palette; these are close enough.
+DEFAULT_COLORS = [0xFF94A6, 0xFFA529, 0xCC9927, 0xF7F47C, 0xBFFB00, 0x1AFF2F, 0x25FFA8, 0x5CFFE8, 0x8BC5FF, 0x5480E4]
+
+
+def _gain(db):
+    return 0.0 if db is None else 10 ** (db / 20)
+
+
 def _db_text(db):
     return "-inf dB" if db is None else "%.1f dB" % db
 
@@ -93,6 +103,8 @@ class FakeSet:
         self.returns = []
         self.scenes = [{"name": "", "tempo": None}]
         self.cues = []
+        self.playing_scene = None
+        self.meters_since = time.monotonic()
         self.create_return_track("A-Reverb")
         self.create_return_track("B-Delay")
 
@@ -101,6 +113,8 @@ class FakeSet:
     def _new_track(self, name, is_midi=False, is_return=False):
         track = {
             "name": name,
+            "color": DEFAULT_COLORS[(len(self.tracks) + len(self.returns)) % len(DEFAULT_COLORS)],
+            "clips": {},  # scene index -> clip
             "is_midi": is_midi,
             "volume_db": 0.0,
             "pan": 0.0,
@@ -124,11 +138,13 @@ class FakeSet:
             raise IndexError("list index out of range")
         return tracks[track_index]
 
-    def _strip(self, i, t, is_return):
+    def _strip(self, i, t, is_return, since=True):
         row = {
             "index": i,
             "name": t["name"],
             "is_return": is_return,
+            "color": t["color"],
+            "meter": None if t["is_midi"] and not t["devices"] else self._meter(t, since),
             "volume": _db_text(t["volume_db"]),
             "volume_db": t["volume_db"],
             "pan": _pan_text(t["pan"]),
@@ -145,7 +161,95 @@ class FakeSet:
         if not is_return:
             row["is_midi"] = t["is_midi"]
             row["input"] = dict(t["input"])
+            row["clips"] = [
+                {
+                    "scene_index": si,
+                    "name": c["name"],
+                    "is_audio": True,
+                    "is_playing": self.is_playing and self.playing_scene == si,
+                    "length": c["length"],
+                    "gain": _db_text(c["gain_db"]),
+                    "gain_db": c["gain_db"],
+                }
+                for si, c in sorted(t["clips"].items())
+            ]
         return row
+
+    def _level(self, t):
+        """A pretend meter reading (0-1) for one track right now."""
+        if not self.is_playing or t["mute"]:
+            return 0.0
+        clip = t["clips"].get(self.playing_scene)
+        if clip is not None:
+            source = clip["loudness"] * _gain(clip["gain_db"])
+        elif not t.get("is_return") and t.get("input", {}).get("type") == "Ext. In":
+            source = 0.25  # someone singing into a mic
+        else:
+            source = 0.0
+        return min(1.0, source * _gain(t["volume_db"]) * random.uniform(0.85, 1.0))
+
+    def _meter(self, t, since):
+        level = self._level(t)
+        return {"peak": min(1.0, level * 1.15), "average": level * 0.7} if since else {"peak": level, "average": level}
+
+    def set_track_color(self, track_index, rgb, is_return=False):
+        track = self._track(track_index, is_return)
+        track["color"] = int(rgb)
+        return {"index": track_index, "color": track["color"], "clips": len(track["clips"])}
+
+    def track_contents(self, track_index, is_return=False):
+        track = self._track(track_index, is_return)
+        return {"devices": len(track["devices"]), "session_clips": len(track["clips"]), "arrangement_clips": 0}
+
+    def reset_meters(self):
+        self.meters_since = time.monotonic()
+        return {"reset": True}
+
+    def get_meters(self):
+        ticks = int((time.monotonic() - self.meters_since) * 10)
+        rows = []
+        for kind, tracks in (("track", self.tracks), ("return", self.returns)):
+            for i, t in enumerate(tracks):
+                audio = not t["is_midi"] or bool(t["devices"])
+                m = self._meter(t, ticks) if audio else {"peak": 0.0, "average": 0.0}
+                rows.append({"kind": kind, "index": i, "name": t["name"], "has_audio_output": audio,
+                             "peak": m["peak"], "average": m["average"], "samples": ticks})
+        master = min(1.0, sum(r["peak"] for r in rows) * 0.6)
+        rows.append({"kind": "master", "index": 0, "name": "Master", "has_audio_output": True,
+                     "peak": master, "average": master * 0.7, "samples": ticks})
+        return {"ticks": ticks, "tracks": rows}
+
+    def import_audio(self, track_index, file_path, scene_index, name=None, gain_db=None):
+        track = self._track(track_index)
+        if track["is_midi"]:
+            raise ValueError("audio clips go on audio tracks")
+        if not 0 <= scene_index < len(self.scenes):
+            raise IndexError("list index out of range")
+        if scene_index in track["clips"]:
+            raise ValueError("that slot already has a clip")
+        if not os.path.isfile(file_path):
+            raise OSError("no file at %s" % file_path)
+        from app.audio_files import measure
+
+        m = measure(file_path)
+        loudness = 10 ** (m["loud_dbfs"] / 20) if m.get("loud_dbfs") is not None else 0.3
+        seconds = m.get("seconds") or 180.0
+        clip = {
+            "name": name or os.path.splitext(os.path.basename(file_path))[0],
+            "gain_db": float(gain_db) if gain_db is not None else 0.0,
+            "length": seconds * self.tempo / 60.0,
+            "loudness": loudness,
+        }
+        track["clips"][scene_index] = clip
+        return {"name": clip["name"], "gain": _db_text(clip["gain_db"]), "length": clip["length"],
+                "warping": False, "looping": False}
+
+    def set_clip_gain(self, track_index, scene_index, db):
+        clip = self._track(track_index)["clips"].get(scene_index)
+        if clip is None:
+            raise LookupError("there's no clip in that slot")
+        clip["gain_db"] = max(-70.0, min(24.0, float(db)))
+        return {"gain": _db_text(clip["gain_db"])}
 
     def _routing_options(self, track, direction):
         if direction == "output":
@@ -320,6 +424,7 @@ class FakeSet:
 
     def stop(self):
         self.is_playing = False
+        self.playing_scene = None
         return {"is_playing": False}
 
     def list_scenes(self):
@@ -339,6 +444,9 @@ class FakeSet:
 
     def delete_scene(self, scene_index):
         del self.scenes[scene_index]
+        for t in self.tracks:
+            t["clips"] = {(i - 1 if i > scene_index else i): c
+                          for i, c in t["clips"].items() if i != scene_index}
         return {"index": scene_index}
 
     def fire_scene(self, scene_index):
@@ -346,6 +454,7 @@ class FakeSet:
         if scene["tempo"] is not None:
             self.tempo = scene["tempo"]
         self.is_playing = True
+        self.playing_scene = scene_index
         return {"index": scene_index}
 
     def list_locators(self):
@@ -370,11 +479,15 @@ class FakeSet:
         return dict(cue)
 
     def get_snapshot(self):
+        tracks = [self._strip(i, t, False) for i, t in enumerate(self.tracks)]
+        returns = [self._strip(i, t, True) for i, t in enumerate(self.returns)]
+        master = min(1.0, sum((t["meter"] or {}).get("peak", 0) for t in tracks) * 0.6)
         return {
             "song": self.get_song(),
-            "tracks": [self._strip(i, t, False) for i, t in enumerate(self.tracks)],
-            "returns": [self._strip(i, t, True) for i, t in enumerate(self.returns)],
-            "master": {"volume": _db_text(0.0), "volume_db": 0.0},
+            "tracks": tracks,
+            "returns": returns,
+            "master": {"volume": _db_text(0.0), "volume_db": 0.0,
+                       "meter": {"peak": master, "average": master * 0.7}},
             "scenes": self.list_scenes(),
             "locators": self.list_locators(),
         }

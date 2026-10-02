@@ -3,6 +3,7 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const POLL_MS = 1500;
+const POLL_PLAYING_MS = 600;   // meters move while a song plays
 const POLL_HIDDEN_MS = 5000;
 
 let state = null;
@@ -57,7 +58,8 @@ async function poll() {
   } catch (e) {
     setStatus("bad", e.message);
   }
-  pollTimer = setTimeout(poll, document.hidden ? POLL_HIDDEN_MS : POLL_MS);
+  const playing = state?.live.snapshot?.song.is_playing;
+  pollTimer = setTimeout(poll, document.hidden ? POLL_HIDDEN_MS : playing ? POLL_PLAYING_MS : POLL_MS);
 }
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
@@ -95,6 +97,7 @@ function renderLive() {
     play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
     const tempo = $("#tempo-input");
     if (document.activeElement !== tempo) tempo.value = Math.round(snap.song.tempo * 100) / 100;
+    paintMeter($("#master-meter"), snap.master?.meter);
   }
 
   $("#offline").hidden = live.connected;
@@ -156,6 +159,7 @@ function renderChat() {
   }
   if (nearBottom || sending !== null) box.scrollTop = box.scrollHeight;
   $("#composer .send").disabled = sending !== null || state.busy;
+  $("#import-btn").disabled = sending !== null || state.busy;
 }
 
 function bubble(role, text) {
@@ -194,12 +198,8 @@ function proposalCard(p) {
     const result = p.results?.[i];
     li.textContent = result ? result.text : step.text;
     if (result) li.className = !result.ok ? "fail" : result.partial ? "partial" : "ok";
-    if (!result && step.destructive) {
-      const tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = "removes";
-      li.append(tag);
-    }
+    if (!result && step.destructive) li.append(tag("removes", "tag"));
+    if (!result && step.audible) li.append(tag("plays out loud", "tag audible"));
     list.append(li);
   });
   card.append(list);
@@ -230,6 +230,13 @@ function proposalCard(p) {
     }
   }
   return card;
+}
+
+function tag(text, className) {
+  const el = document.createElement("span");
+  el.className = className;
+  el.textContent = text;
+  return el;
 }
 
 function button(label, className, onClick) {
@@ -323,7 +330,9 @@ $("#message-input").addEventListener("input", autosize);
 
 $("#chips").addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
-  if (chip) send(chip.textContent);
+  if (!chip) return;
+  if (chip.dataset.action === "import") openImportDialog();
+  else send(chip.textContent);
 });
 
 $("#reset-btn").addEventListener("click", async () => {
@@ -395,6 +404,7 @@ function createStrip() {
   });
   name.addEventListener("keydown", (e) => { if (e.key === "Enter") name.blur(); });
 
+  $(".strip-num", el).addEventListener("click", () => openColorDialog(el));
   $(".mute", el).addEventListener("click", () => liveCmd("set_mute", { ...target(el), on: !el._row.mute }).catch(() => {}));
   $(".solo", el).addEventListener("click", () => liveCmd("set_solo", { ...target(el), on: !el._row.solo }).catch(() => {}));
 
@@ -460,6 +470,9 @@ function routeLabel(side, isInput) {
 function updateStrip(el, row, snap) {
   el._row = row;
   el.classList.toggle("is-return", row.is_return);
+  if (row.color != null) el.style.setProperty("--track-color", "#" + row.color.toString(16).padStart(6, "0"));
+  $(".strip-num", el).setAttribute("aria-label", `Colour for ${row.name}`);
+  paintMeter($(".meter", el), row.meter);
   el.classList.toggle("muted-track", row.mute);
   $(".strip-num", el).textContent = row.is_return ? String.fromCharCode(65 + row.index) : row.index + 1;
 
@@ -509,7 +522,70 @@ function updateStrip(el, row, snap) {
       $("output", control).textContent = s.level.replace("-", "−");
     }
   });
-  $(".more summary", el).textContent = row.sends.length ? "Sends & outputs" : "Outputs";
+  updateClips(el, row, snap);
+  const extras = [row.sends.length && "sends", row.clips?.length && "clip levels", "outputs"].filter(Boolean);
+  $(".more summary", el).textContent = extras.join(", ").replace(/^./, (c) => c.toUpperCase()).replace(/, ([^,]*)$/, " & $1");
+}
+
+/* Live's meters run 0-1 (after the fader). Peak since the last poll. */
+function paintMeter(meter, reading) {
+  if (!meter) return;
+  meter.hidden = reading == null;
+  const peak = reading?.peak ?? 0;
+  const bar = meter.firstElementChild;
+  bar.style[meter.classList.contains("master-meter") ? "height" : "width"] = Math.min(100, peak * 100) + "%";
+  meter.classList.toggle("warm", peak >= 0.8 && peak < 0.95);
+  meter.classList.toggle("hot", peak >= 0.95);
+}
+
+function songName(snap, sceneIndex) {
+  const scene = snap.scenes.find((s) => s.index === sceneIndex);
+  return scene?.name || `Song ${sceneIndex + 1}`;
+}
+
+function updateClips(el, row, snap) {
+  const clips = row.clips || [];
+  const box = $(".clips", el);
+  const sig = JSON.stringify(clips.map((c) => [c.scene_index, c.name, c.is_playing, songName(snap, c.scene_index)]));
+  if (box._sig !== sig) {
+    box._sig = sig;
+    box.replaceChildren(...clips.map((c) => {
+      const chip = document.createElement("span");
+      chip.className = "clip" + (c.is_playing ? " playing" : "");
+      chip.textContent = songName(snap, c.scene_index);
+      chip.title = c.name;
+      return chip;
+    }));
+  }
+
+  const gains = $(".clip-gains", el);
+  const gainSig = JSON.stringify(clips.filter((c) => c.is_audio).map((c) => [c.scene_index, songName(snap, c.scene_index)]));
+  if (gains._sig !== gainSig) {
+    gains._sig = gainSig;
+    gains.replaceChildren(...clips.filter((c) => c.is_audio).map((c) => clipGainControl(el, c, snap)));
+  }
+  for (const control of gains.children) {
+    const clip = clips.find((c) => c.scene_index === control._scene);
+    const input = $("input", control);
+    if (!clip || holding.has(input)) continue;
+    input.value = clip.gain_db ?? -24;
+    paintFill(input);
+    $("output", control).textContent = (clip.gain || "").replace("-", "−");
+  }
+}
+
+function clipGainControl(el, clip, snap) {
+  const control = document.createElement("div");
+  control.className = "control clip-gain";
+  control._scene = clip.scene_index;
+  control.innerHTML = `<span class="control-label"></span><input type="range" min="-24" max="12" step="0.5"><output></output>`;
+  const label = $(".control-label", control);
+  label.textContent = songName(snap, clip.scene_index);
+  label.title = `Clip level: ${clip.name}`;
+  $("input", control).setAttribute("aria-label", `Clip level in ${songName(snap, clip.scene_index)}`);
+  slider($("input", control), $("output", control),
+    (db) => ({ cmd: "set_clip_gain", args: { track_index: el._row.index, scene_index: clip.scene_index, db } }), dbText);
+  return control;
 }
 
 function deviceChip(el, name, index) {
@@ -646,6 +722,102 @@ $("#device-dialog").addEventListener("close", async () => {
     toast(`Added ${preset ? `${device} (${preset})` : device} to ${trackName}.`);
   } catch {
     /* liveCmd already said why */
+  }
+});
+
+// -- colour picker -------------------------------------------------------------
+
+let colorStrip = null;
+
+function openColorDialog(el) {
+  colorStrip = el;
+  $("#color-track").textContent = el._row.name;
+  const box = $("#swatches");
+  box.replaceChildren(...Object.entries(state.colors).map(([name, hex]) => {
+    const swatch = button("", "swatch", async () => {
+      $("#color-dialog").close();
+      const rgb = parseInt(hex.slice(1), 16);
+      await liveCmd("set_track_color", { ...target(colorStrip), rgb }).catch(() => {});
+    });
+    swatch.style.setProperty("--swatch", hex);
+    swatch.setAttribute("aria-label", name);
+    swatch.title = name;
+    return swatch;
+  }));
+  $("#color-dialog").showModal();
+}
+
+// -- import with AI -------------------------------------------------------------
+
+let importPath = null;
+
+async function openImportDialog() {
+  if (sending !== null || state?.busy) {
+    toast("Still working on the last message — one moment.");
+    return;
+  }
+  $("#import-dialog").showModal();
+  await showFolder(importPath);
+}
+
+async function showFolder(path) {
+  const list = $("#folder-list");
+  list.replaceChildren(tag("Looking…", "muted"));
+  let folder;
+  try {
+    folder = await api("/api/folders" + (path ? "?path=" + encodeURIComponent(path) : ""));
+  } catch (e) {
+    list.replaceChildren(tag(e.message, "muted"));
+    return;
+  }
+  importPath = folder.path;
+  $("#folder-path").textContent = folder.display;
+  $("#folder-path").title = folder.path;
+  $("#folder-up").disabled = !folder.parent;
+  $("#folder-up").onclick = () => showFolder(folder.parent);
+
+  $("#import-roots").replaceChildren(...folder.roots.map((r) =>
+    button(r.name, "root" + (r.path === folder.path ? " active" : ""), () => showFolder(r.path))));
+
+  list.replaceChildren(...folder.folders.map((f) => {
+    const li = document.createElement("li");
+    const b = button("", "folder", () => showFolder(f.path));
+    b.append(tag(f.name, "folder-name"));
+    if (f.audio) b.append(tag(`${f.audio} audio`, "folder-count"));
+    li.append(b);
+    return li;
+  }));
+  if (!folder.folders.length) list.replaceChildren(tag("No folders in here.", "muted"));
+
+  const n = folder.audio.length;
+  $("#folder-files").textContent = n
+    ? `${n} audio file${n === 1 ? "" : "s"} here: ${folder.audio.slice(0, 6).join(", ")}${n > 6 ? "…" : ""}`
+    : "No audio files directly in this folder (folders inside it are included).";
+}
+
+$("#import-btn").addEventListener("click", openImportDialog);
+
+$("#import-go").addEventListener("click", async () => {
+  if (!importPath) return;
+  const go = $("#import-go");
+  go.disabled = true;
+  go.textContent = "Listening to your files…";
+  const note = $("#import-note").value;
+  const name = importPath.split("/").pop();
+  sending = `Import the audio in “${name}”.` + (note.trim() ? " " + note.trim() : "");
+  renderChat();
+  $("#import-dialog").close();
+  try {
+    render(await api("/api/import", { folder: importPath, note }));
+    $("#import-note").value = "";
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    sending = null;
+    chatSig = "";
+    if (state) renderChat();
+    go.disabled = false;
+    go.textContent = "Import with AI";
   }
 });
 

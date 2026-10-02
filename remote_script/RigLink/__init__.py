@@ -39,6 +39,9 @@ class RigLink(ControlSurface):
         self._outgoing = {}
         self._server = None
         self._meters = MeterWindow()
+        # A second window for the UI's meters: each snapshot reads and clears
+        # it, so drawing meters never resets a measurement in progress.
+        self._display_meters = MeterWindow()
         self._open_server()
 
     def _open_server(self):
@@ -66,7 +69,9 @@ class RigLink(ControlSurface):
 
     def update_display(self):
         super().update_display()
-        self._meters.sample(self.song())
+        layout, levels = _read_levels(self.song())
+        self._meters.add(layout, levels)
+        self._display_meters.add(layout, levels)
         self._accept_new_clients()
         self._service_clients()
         self._flush_clients()
@@ -174,6 +179,16 @@ def _metered_tracks(song):
     yield "master", [song.master_track]
 
 
+def _read_levels(song):
+    """Every audio track's meter right now. Read once per tick: meters cost Live CPU."""
+    levels = {}
+    for kind, tracks in _metered_tracks(song):
+        for i, track in enumerate(tracks):
+            if track.has_audio_output:
+                levels[(kind, i)] = max(track.output_meter_left, track.output_meter_right)
+    return (len(song.tracks), len(song.return_tracks)), levels
+
+
 class MeterWindow:
     def __init__(self):
         self.reset()
@@ -183,20 +198,20 @@ class MeterWindow:
         self._layout = None
         self.ticks = 0
 
-    def sample(self, song):
-        layout = (len(song.tracks), len(song.return_tracks))
+    def add(self, layout, levels):
         if layout != self._layout:
             # Indices shifted under us; old stats would land on the wrong track.
             self.reset()
             self._layout = layout
         self.ticks += 1
-        for kind, tracks in _metered_tracks(song):
-            for i, track in enumerate(tracks):
-                if not track.has_audio_output:
-                    continue
-                level = max(track.output_meter_left, track.output_meter_right)
-                peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
-                self._stats[(kind, i)] = (max(peak, level), total + level, count + 1)
+        for key, level in levels.items():
+            peak, total, count = self._stats.get(key, (0.0, 0.0, 0))
+            self._stats[key] = (max(peak, level), total + level, count + 1)
+
+    def stats(self, kind, i):
+        """(peak, average) for one track since the last reset, or None if unheard."""
+        peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
+        return (peak, total / count) if count else None
 
     def rows(self, song):
         rows = []
@@ -713,11 +728,45 @@ def _jump_to_locator(rf, locator_index):
 
 def _db_value(param):
     """A dB display as a number, or None for -inf (JSON has no infinity)."""
+    return _db_from_text(_display(param))
+
+
+def _db_from_text(text):
     try:
-        db = _parse_db(_display(param))
-    except ValueError:
+        db = _parse_db(text)
+    except (ValueError, IndexError):
         return None
     return None if db == float("-inf") else db
+
+
+def _clip_rows(track):
+    """Session clips on a track, by the scene (song) they sit in."""
+    rows = []
+    for i, slot in enumerate(track.clip_slots):
+        if not slot.has_clip:
+            continue
+        clip = slot.clip
+        row = {
+            "scene_index": i,
+            "name": clip.name,
+            "is_audio": clip.is_audio_clip,
+            "is_playing": clip.is_playing,
+            "length": clip.length,
+        }
+        if clip.is_audio_clip:
+            row["gain"] = clip.gain_display_string
+            row["gain_db"] = _db_from_text(clip.gain_display_string)
+        rows.append(row)
+    return rows
+
+
+def _meter_row(window, kind, i, track):
+    if not track.has_audio_output:
+        return None
+    heard = window.stats(kind, i)
+    if heard is None:
+        return {"peak": 0.0, "average": 0.0}
+    return {"peak": heard[0], "average": heard[1]}
 
 
 def _routing_now(track, direction):
@@ -726,12 +775,14 @@ def _routing_now(track, direction):
     return {"type": kind, "channel": channel}
 
 
-def _strip(song, i, track, is_return):
+def _strip(song, i, track, is_return, meters):
     mixer = track.mixer_device
     row = {
         "index": i,
         "name": track.name,
         "is_return": is_return,
+        "color": track.color,
+        "meter": _meter_row(meters, "return" if is_return else "track", i, track),
         "volume": _display(mixer.volume),
         "volume_db": _db_value(mixer.volume),
         "pan": _display(mixer.panning),
@@ -748,22 +799,29 @@ def _strip(song, i, track, is_return):
     if not is_return:
         row["is_midi"] = track.has_midi_input
         row["input"] = _routing_now(track, "input")
+        row["clips"] = _clip_rows(track)
     return row
 
 
 def _get_snapshot(rf):
+    """The whole set. Meters are the peak/average since the previous snapshot."""
     song = rf.song()
-    return {
+    meters = rf._display_meters
+    master = song.master_track
+    snapshot = {
         "song": _get_song(rf),
-        "tracks": [_strip(song, i, t, False) for i, t in enumerate(song.tracks)],
-        "returns": [_strip(song, i, t, True) for i, t in enumerate(song.return_tracks)],
+        "tracks": [_strip(song, i, t, False, meters) for i, t in enumerate(song.tracks)],
+        "returns": [_strip(song, i, t, True, meters) for i, t in enumerate(song.return_tracks)],
         "master": {
-            "volume": _display(song.master_track.mixer_device.volume),
-            "volume_db": _db_value(song.master_track.mixer_device.volume),
+            "volume": _display(master.mixer_device.volume),
+            "volume_db": _db_value(master.mixer_device.volume),
+            "meter": _meter_row(meters, "master", 0, master),
         },
         "scenes": _list_scenes(rf),
         "locators": _list_locators(rf),
     }
+    meters.reset()
+    return snapshot
 
 
 def _list_stock_devices(rf):

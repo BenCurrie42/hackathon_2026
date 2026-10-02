@@ -13,13 +13,21 @@ can refer to a track an earlier action in the same batch created.
 from __future__ import annotations
 
 import re
+import time
+from pathlib import Path
 from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import BaseModel, Field
 
 from app.live import LiveUnavailable
+from rigforge import TRACK_COLORS
 from runtime import RigLinkError
 from spec import RigSpec, TrackSpec
+
+ColorName = Literal[tuple(TRACK_COLORS)]
+
+# How long to let a launched scene settle (launch quantisation) before measuring.
+LISTEN_SETTLE_SECONDS = 1.0
 
 TrackRef = Annotated[
     str,
@@ -75,6 +83,7 @@ class AddTrack(BaseModel):
     volume_db: float | None = Field(default=None, ge=-70, le=6)
     pan: float | None = Field(default=None, ge=-1, le=1, description="-1 hard left, 0 centre, 1 hard right.")
     devices: list[Device] = Field(default_factory=list, description="Effects in chain order.")
+    color: ColorName | None = Field(default=None, description="Track colour, to group related tracks.")
 
     def describe(self):
         parts = [f"Add {'a MIDI' if self.kind == 'midi' else 'an audio'} track “{self.name}”"]
@@ -90,6 +99,8 @@ class AddTrack(BaseModel):
             extras.append(f"at {_db(self.volume_db)}")
         if self.pan:
             extras.append(f"panned {_pan(self.pan)}")
+        if self.color:
+            extras.append(f"coloured {self.color}")
         return text + (", " + ", ".join(extras) if extras else "")
 
     def run(self, ex):
@@ -114,6 +125,9 @@ class AddTrack(BaseModel):
             ex.try_step(problems, "set its volume", "set_volume", **target, db=self.volume_db)
         if self.pan:
             ex.try_step(problems, "pan it", "set_pan", **target, pan=self.pan)
+        if self.color:
+            ex.try_step(problems, f"colour it {self.color}", "set_track_color", **target,
+                        rgb=TRACK_COLORS[self.color])
         for device in self.devices:
             note = ex.load_device(problems, index, False, device)
             if note:
@@ -409,10 +423,106 @@ class Transport(BaseModel):
         return "Playing." if self.playing else "Stopped."
 
 
+class SetColor(BaseModel):
+    action: Literal["set_color"]
+    track: TrackRef
+    color: ColorName
+
+    def describe(self):
+        return f"Colour “{self.track}” {self.color}"
+
+    def run(self, ex):
+        t = ex.track(self.track)
+        ex.call("set_track_color", track_index=t.index, is_return=t.is_return, rgb=TRACK_COLORS[self.color])
+        return f"{t.name} is {self.color} now."
+
+
+class ImportAudio(BaseModel):
+    action: Literal["import_audio"]
+    track: TrackRef = Field(description="An audio track. Create it first in the same batch if needed.")
+    file: str = Field(description='An imported file exactly as listed, e.g. "Sunday Stems/Way Maker/Click.wav".')
+    song: SongRef = Field(description="The song (scene) the clip belongs to.")
+    gain_db: float | None = Field(
+        default=None, ge=-70, le=24,
+        description="Clip gain in dB, to balance stems against each other. Null leaves it at 0 dB.",
+    )
+
+    def describe(self):
+        text = f"Put {Path(self.file).name} on “{self.track}” in “{self.song}”"
+        return text + (f", clip gain {_db(self.gain_db)}" if self.gain_db else "")
+
+    def run(self, ex):
+        path = ex.file(self.file)
+        t = ex.track(self.track, allow_return=False)
+        s = ex.song(self.song)
+        result = ex.call("import_audio", track_index=t.index, file_path=str(path),
+                         scene_index=s["index"], name=path.stem, gain_db=self.gain_db)
+        gain = f" at {result['gain']}" if self.gain_db else ""
+        return f"Put {result['name']} on {t.name} in {_song_name(s)}{gain}."
+
+
+class SetClipGain(BaseModel):
+    action: Literal["set_clip_gain"]
+    track: TrackRef
+    song: SongRef
+    db: float = Field(ge=-70, le=24, description="Clip gain in dB. Changes the clip, not the fader.")
+
+    def describe(self):
+        return f"Set the clip on “{self.track}” in “{self.song}” to {_db(self.db)}"
+
+    def run(self, ex):
+        t = ex.track(self.track, allow_return=False)
+        s = ex.song(self.song)
+        result = ex.call("set_clip_gain", track_index=t.index, scene_index=s["index"], db=self.db)
+        return f"The {t.name} clip in {_song_name(s)} is at {result['gain']}."
+
+
+class Listen(BaseModel):
+    action: Literal["listen"]
+    song: SongRef | None = Field(
+        default=None, description="A song to start and measure. Null to measure whatever is already playing.",
+    )
+    seconds: int = Field(default=10, ge=3, le=30)
+    audible: ClassVar[bool] = True
+
+    def describe(self):
+        if self.song:
+            return f"Play “{self.song}” for {self.seconds} seconds and measure how loud each track is"
+        return f"Measure how loud each track is for {self.seconds} seconds"
+
+    def run(self, ex):
+        s = ex.song(self.song) if self.song else None
+        was_playing = ex.call("get_song")["is_playing"]
+        if s is None and not was_playing:
+            raise ActionFailed("Nothing is playing, so there's nothing to measure. Start a song first.")
+        if s is not None:
+            ex.call("fire_scene", scene_index=s["index"])
+            time.sleep(LISTEN_SETTLE_SECONDS)
+        ex.call("reset_meters")
+        time.sleep(self.seconds)
+        meters = ex.call("get_meters")
+        if s is not None and not was_playing:
+            ex.call("stop")
+
+        heard = [r for r in meters["tracks"] if r["has_audio_output"]]
+        loud = [r for r in heard if r["peak"] > 0 and r["kind"] != "master"]
+        what = _song_name(s) if s else "the set"
+        if not loud:
+            text = f"Listened to {what} for {self.seconds} seconds, but no track made a sound."
+        else:
+            loudest = max(loud, key=lambda r: r["peak"])
+            quietest = min(loud, key=lambda r: r["peak"])
+            text = f"Listened to {what} for {self.seconds} seconds. Loudest: {loudest['name']}."
+            if quietest is not loudest:
+                text = text[:-1] + f"; quietest: {quietest['name']}."
+        ex.detail = _meter_report(heard, meters["ticks"])
+        return text
+
+
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    DeleteSong, StartSong, Transport,
+    DeleteSong, StartSong, Transport, SetColor, ImportAudio, SetClipGain, Listen,
 ]
 
 
@@ -435,9 +545,19 @@ class Target:
 class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
-    def __init__(self, live):
+    def __init__(self, live, files=None):
         self._live = live
+        self._files = files or {}
         self._tracks = None
+        self.detail = None  # extra facts for the assistant from the last action
+
+    def file(self, file_id):
+        """An imported file by the id the assistant saw. Only those, never any path."""
+        wanted = file_id.strip().casefold()
+        for known, path in self._files.items():
+            if known.casefold() == wanted:
+                return path
+        raise ActionFailed(f"I don't have a file called {file_id}. Import its folder first.")
 
     def call(self, cmd, **args):
         try:
@@ -518,14 +638,17 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
-def run_all(live, actions):
+def run_all(live, actions, files=None):
     """Run actions in order. One failure doesn't stop the rest."""
-    ex = Executor(live)
+    ex = Executor(live, files)
     results = []
     for n, action in enumerate(actions):
         try:
+            ex.detail = None
             text = action.run(ex)
             results.append({"ok": True, "partial": " But " in text, "text": text})
+            if ex.detail:
+                results[-1]["detail"] = ex.detail
         except ActionFailed as e:
             results.append({"ok": False, "text": f"{action.describe()}: {e}"})
             ex.tracks_changed()
@@ -541,6 +664,11 @@ def run_all(live, actions):
 
 def is_destructive(action):
     return getattr(type(action), "destructive", False)
+
+
+def is_audible(action):
+    """Plays sound through the speakers when applied."""
+    return getattr(type(action), "audible", False)
 
 
 # -- exporting to a .als ------------------------------------------------------
@@ -564,6 +692,8 @@ def to_rigspec(actions):
             notes.append(f"{action.name}: stereo inputs can't go in a session file yet, so it has no input.")
         if action.output and action.output.destination.casefold() != "master":
             notes.append(f"{action.name}: only the Master output can go in a session file yet.")
+        if action.color:
+            notes.append(f"{action.name}: colours only apply in Live, not in a session file.")
         for d in action.devices:
             if d.preset:
                 notes.append(f"{action.name}: {d.device} uses its default settings in a session file, not “{d.preset}”.")
@@ -596,6 +726,25 @@ def _pan(pan):
     if amount == 0:
         return "centre"
     return f"{amount}{'L' if pan < 0 else 'R'}"
+
+
+def _song_name(s):
+    return s["name"] or f"song {s['index'] + 1}"
+
+
+def _meter_report(rows, ticks):
+    """Meter readings for the assistant. Values are Live's own meter scale."""
+    lines = [
+        f"Meter readings over {ticks} samples (Live's output meters, 0-1, after the fader; "
+        "compare tracks with each other -- how 0-1 maps to dB isn't verified):"
+    ]
+    for r in rows:
+        label = {"track": str(r["index"] + 1), "return": chr(ord("A") + r["index"]), "master": "Master"}[r["kind"]]
+        if r["peak"] == 0:
+            lines.append(f"  {label}. {r['name']}: silent")
+        else:
+            lines.append(f"  {label}. {r['name']}: peak {r['peak']:.2f}, average {r['average']:.2f}")
+    return "\n".join(lines)
 
 
 def _loose(name):
