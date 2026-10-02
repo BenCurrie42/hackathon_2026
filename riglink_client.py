@@ -184,6 +184,9 @@ class LiveConnection:
     def set_scene(self, scene_index, name=None, bpm=None):
         return self.send("set_scene", scene_index=scene_index, name=name, bpm=bpm)
 
+    def count_scene_clips(self, scene_index):
+        return self.send("count_scene_clips", scene_index=scene_index)
+
     def delete_scene(self, scene_index):
         return self.send("delete_scene", scene_index=scene_index)
 

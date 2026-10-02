@@ -177,7 +177,9 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 spec.py                       RigSpec / TrackSpec — the contract
 write_als.py                  render(spec, template_path) -> bytes
 remote_script/RigLink/        Control Surface: live socket bridge into Live
-runtime.py                    Client for RigLink — the live-edit path
+riglink_client.py             Client for RigLink — the live-edit path
+rig.py                        CLI over RigLink: track, mix, route, effect,
+                              song (= scene), marker
 templates/test.als            Reference Live 12.4.5 set, read-only
 templates/test.reference.xml  Its decompressed XML, for diffing
 templates/probe_noinput.als   Live's own save of a generated set; source of
