@@ -6,7 +6,7 @@ executing them against the currently open Live Set.
 
 Command vocabulary matches RigSpec, not Live's full API surface: tracks,
 routing, mixer, stock devices and presets, returns and sends, tempo, scenes,
-locators, transport. Nothing here writes raw device parameters.
+locators, transport, output meters. Nothing here writes raw device parameters.
 
 Volume and send levels are set in dB without a dB-to-value formula: we
 binary-search the parameter's own str_for_value() display text, so Live's
@@ -35,6 +35,7 @@ class RigLink(ControlSurface):
         self._clients = []
         self._buffers = {}
         self._server = None
+        self._meters = MeterWindow()
         self._open_server()
 
     def _open_server(self):
@@ -66,6 +67,7 @@ class RigLink(ControlSurface):
 
     def update_display(self):
         super().update_display()
+        self._meters.sample(self.song())
         self._accept_new_clients()
         self._service_clients()
 
@@ -143,6 +145,60 @@ class RigLink(ControlSurface):
             self._drop_client(client)
 
 
+# -- Meters ----------------------------------------------------------------
+# The Live API exposes each track's output meter (0.0-1.0, post-fader), not
+# audio. Sampled once per update_display tick and folded into peak/average
+# since the last reset, so a read never blocks Live's thread waiting for audio.
+# How the 0-1 meter value maps to dBFS is unverified.
+
+
+def _metered_tracks(song):
+    yield "track", song.tracks
+    yield "return", song.return_tracks
+    yield "master", [song.master_track]
+
+
+class MeterWindow:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._stats = {}
+        self._layout = None
+        self.ticks = 0
+
+    def sample(self, song):
+        layout = (len(song.tracks), len(song.return_tracks))
+        if layout != self._layout:
+            # Indices shifted under us; old stats would land on the wrong track.
+            self.reset()
+            self._layout = layout
+        self.ticks += 1
+        for kind, tracks in _metered_tracks(song):
+            for i, track in enumerate(tracks):
+                if not track.has_audio_output:
+                    continue
+                level = max(track.output_meter_left, track.output_meter_right)
+                peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
+                self._stats[(kind, i)] = (max(peak, level), total + level, count + 1)
+
+    def rows(self, song):
+        rows = []
+        for kind, tracks in _metered_tracks(song):
+            for i, track in enumerate(tracks):
+                peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
+                rows.append({
+                    "kind": kind,
+                    "index": i,
+                    "name": track.name,
+                    "has_audio_output": track.has_audio_output,
+                    "peak": peak,
+                    "average": total / count if count else 0.0,
+                    "samples": count,
+                })
+        return rows
+
+
 # -- Commands --------------------------------------------------------------
 # Each takes the RigLink instance plus keyword args from the request's
 # "args" object, and returns a JSON-serializable result.
@@ -216,6 +272,42 @@ def _set_track_name(rf, track_index, name, is_return=False):
     track = _track(rf, track_index, is_return)
     track.name = name
     return {"index": track_index, "name": track.name}
+
+
+def _track_clips(track):
+    session = [s.clip for s in track.clip_slots if s.has_clip]
+    return session + list(getattr(track, "arrangement_clips", ()))
+
+
+def _set_track_color(rf, track_index, rgb, is_return=False):
+    """Colour a track and every clip on it.
+
+    Clips carry their own colour, fixed when they're created, so recolouring
+    only the track leaves older clips in whatever colour the track had then.
+    Live snaps an RGB value to the nearest colour in its palette.
+    """
+    track = _track(rf, track_index, is_return)
+    track.color = int(rgb)
+    clips = [] if is_return else _track_clips(track)
+    for clip in clips:
+        clip.color = track.color
+    return {"index": track_index, "color": track.color, "clips": len(clips)}
+
+
+def _track_contents(rf, track_index, is_return=False):
+    track = _track(rf, track_index, is_return)
+    return {
+        "devices": len(track.devices),
+        "session_clips": sum(1 for s in track.clip_slots if s.has_clip),
+        "arrangement_clips": len(getattr(track, "arrangement_clips", ())),
+    }
+
+
+def _api_names(rf):
+    """Public attribute names on Song and Track, for checking what this Live exposes."""
+    public = lambda obj: sorted(n for n in dir(obj) if not n.startswith("_"))
+    song = rf.song()
+    return {"song": public(song), "track": public(song.tracks[0]) if song.tracks else []}
 
 
 def _delete_track(rf, track_index, is_return=False):
@@ -374,6 +466,11 @@ def _presets_under(item):
         stack.extend(child.children)
 
 
+def _preset_key(name):
+    name = name.casefold()
+    return name[: -len(".adv")] if name.endswith(".adv") else name
+
+
 def _list_presets(rf, device_name):
     device = _find_device_item(rf.application().browser, device_name)
     return sorted(p.name for p in _presets_under(device))
@@ -386,10 +483,9 @@ def _load_device(rf, track_index, device_name, preset=None, is_return=False):
     browser = rf.application().browser
     item = _find_device_item(browser, device_name)
     if preset:
-        wanted = preset.casefold()
-        if wanted.endswith(".adv"):
-            wanted = wanted[: -len(".adv")]
-        matches = [p for p in _presets_under(item) if p.name.casefold() == wanted]
+        # Browser items are named with the file extension ("Gentle Squeeze.adv").
+        wanted = _preset_key(preset)
+        matches = [p for p in _presets_under(item) if _preset_key(p.name) == wanted]
         if not matches:
             raise LookupError("%s has no preset called %r" % (item.name, preset))
         item = matches[0]
@@ -411,6 +507,71 @@ def _delete_device(rf, track_index, device_index, is_return=False):
     name = track.devices[device_index].name
     track.delete_device(device_index)
     return {"index": device_index, "name": name}
+
+
+# -- Meters ----------------------------------------------------------------
+
+
+def _reset_meters(rf):
+    rf._meters.reset()
+    return {"reset": True}
+
+
+def _get_meters(rf):
+    return {"ticks": rf._meters.ticks, "tracks": rf._meters.rows(rf.song())}
+
+
+# -- Audio clips -----------------------------------------------------------
+
+
+def _set_clip_gain_db(clip, db):
+    """Clip gain is 0-1 with no public dB formula; search its own display text."""
+    lo, hi = 0.0, 1.0
+    for _ in range(30):
+        clip.gain = (lo + hi) / 2.0
+        if _parse_db(clip.gain_display_string) < db:
+            lo = clip.gain
+        else:
+            hi = clip.gain
+    clip.gain = hi
+    return clip.gain_display_string
+
+
+def _set_clip_gain(rf, track_index, scene_index, db):
+    clip = _track(rf, track_index).clip_slots[scene_index].clip
+    if clip is None:
+        raise LookupError("there's no clip in that slot")
+    return {"gain": _set_clip_gain_db(clip, float(db))}
+
+
+def _import_audio(rf, track_index, file_path, scene_index, name=None, gain_db=None):
+    """Put an audio file in a Session slot, unwarped and playing once.
+
+    Unwarped so stems from one session stay sample-locked to each other
+    instead of each being stretched by Live's own tempo guess.
+    """
+    track = _track(rf, track_index)
+    slot = track.clip_slots[scene_index]
+    if slot.has_clip:
+        raise ValueError("that slot already has a clip")
+    if not hasattr(slot, "create_audio_clip"):
+        raise NotImplementedError("this version of Live can't import audio from a script")
+    slot.create_audio_clip(file_path)
+    clip = slot.clip
+    clip.warping = False
+    clip.looping = False
+    clip.color = track.color
+    if name:
+        clip.name = name
+    if gain_db is not None:
+        _set_clip_gain_db(clip, float(gain_db))
+    return {
+        "name": clip.name,
+        "gain": clip.gain_display_string,
+        "length": clip.length,
+        "warping": clip.warping,
+        "looping": clip.looping,
+    }
 
 
 # -- Song: tempo, transport, scenes, locators ------------------------------
@@ -538,6 +699,9 @@ COMMANDS = {
     "create_return_track": _create_return_track,
     "set_track_name": _set_track_name,
     "delete_track": _delete_track,
+    "set_track_color": _set_track_color,
+    "track_contents": _track_contents,
+    "api_names": _api_names,
     "get_routing": _get_routing,
     "set_routing": _set_routing,
     "get_mixer": _get_mixer,
@@ -550,6 +714,10 @@ COMMANDS = {
     "load_device": _load_device,
     "list_devices": _list_devices,
     "delete_device": _delete_device,
+    "reset_meters": _reset_meters,
+    "get_meters": _get_meters,
+    "import_audio": _import_audio,
+    "set_clip_gain": _set_clip_gain,
     "get_song": _get_song,
     "set_tempo": _set_tempo,
     "play": _play,
