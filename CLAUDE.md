@@ -187,6 +187,7 @@ app/assistant.py              Claude conversation → proposed actions
 app/actions.py                Proposable actions (intent only) and how each runs
 app/live.py                   Shared, self-reconnecting RigLink connection
 app/audio_files.py            Folder browsing + stdlib WAV/AIFF level measurement
+app/room.py                   Week-to-week room memory (~/.holysound/room.json)
 app/fake_live.py              In-memory stand-in for Live + RigLink, for tests/demo
 app/static/                   The page: HTML/CSS/JS, served as-is
 tests/                        unittest suite; needs neither Live nor an API key

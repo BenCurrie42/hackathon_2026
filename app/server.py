@@ -31,6 +31,7 @@ from app import audio_files
 from app.actions import Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
+from app.room import RoomMemory
 from rig import TRACK_COLORS
 from riglink_client import RigLinkError
 
@@ -51,6 +52,7 @@ DIRECT_COMMANDS = {
 
 class App:
     def __init__(self, live, conversation, key=None):
+        self.room = conversation.room
         self.live = live
         self.chat = conversation
         self.key = key  # None: only this computer can connect
@@ -94,6 +96,7 @@ class App:
             "chat": self.transcript(),
             "busy": self.chat.busy,
             "colors": {name: f"#{rgb:06x}" for name, rgb in TRACK_COLORS.items()},
+            "room": self.room.facts() if self.room else [],
         }
 
     # -- actions --------------------------------------------------------
@@ -101,7 +104,7 @@ class App:
     def notes(self):
         live = self.live_state()
         stock = self.live.stock_devices() if live["connected"] else None
-        return session_notes(live["snapshot"], stock, live["message"], self.imports)
+        return session_notes(live["snapshot"], stock, live["message"], self.imports, self.room)
 
     def send_message(self, text, attachment=None):
         self.chat.send(text, self.notes(), attachment)
@@ -307,6 +310,14 @@ def make_handler(app):
                         raise UserError("Pick a folder first.")
                     app.import_folder(folder, str(body.get("note", "")))
                     return self._json(app.state())
+                if path == "/api/room":
+                    if app.room is None:
+                        raise UserError("Memory isn't available.")
+                    if body.get("add"):
+                        app.room.add([str(body["add"])])
+                    if body.get("remove") is not None:
+                        app.room.remove([int(body["remove"])])
+                    return self._json(app.state())
                 if path == "/api/reset":
                     app.chat.reset()
                     return self._json(app.state())
@@ -404,7 +415,7 @@ def main(argv=None):
         live_port = fake_server.server_address[1]
 
     key = secrets.token_urlsafe(9) if args.lan else None
-    app = App(LiveLink(port=live_port), Conversation(), key=key)
+    app = App(LiveLink(port=live_port), Conversation(room=RoomMemory()), key=key)
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), make_handler(app))
     server.daemon_threads = True

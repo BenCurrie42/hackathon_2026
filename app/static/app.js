@@ -100,12 +100,14 @@ function renderLive() {
     paintMeter($("#master-meter"), snap.master?.meter);
   }
 
-  $("#offline").hidden = live.connected;
+  renderRoom();
+  $("#offline").hidden = live.connected || currentTab === "room";
   // The standard "can't reach Live" message just repeats the steps below it.
   const reason = live.message || "";
   $("#offline-reason").textContent = reason.includes("Control Surface") ? "" : reason;
   $("#panel-mixer").hidden = !live.connected || currentTab !== "mixer";
   $("#panel-songs").hidden = !live.connected || currentTab !== "songs";
+  $("#panel-room").hidden = currentTab !== "room";
   if (snap) {
     renderMixer(snap);
     renderSongs(snap);
@@ -165,7 +167,12 @@ function renderChat() {
 function bubble(role, text) {
   const el = document.createElement("div");
   el.className = "msg " + role;
-  if (role === "assistant") el.innerHTML = markdownLite(text);
+  if (role === "note") {
+    el.textContent = text;
+    el.setAttribute("role", "status");
+    el.addEventListener("click", () => setView("room"));
+    el.title = "See everything Holy Sound remembers";
+  } else if (role === "assistant") el.innerHTML = markdownLite(text);
   else el.textContent = text;
   return el;
 }
@@ -865,6 +872,47 @@ $("#add-song").addEventListener("submit", async (e) => {
     poll();
   } catch {
     /* liveCmd already said why */
+  }
+});
+
+// -- room memory ---------------------------------------------------------------
+
+let roomSig = "";
+
+function renderRoom() {
+  const facts = state.room || [];
+  const list = $("#facts");
+  const sig = JSON.stringify(facts);
+  if (sig === roomSig) return;
+  roomSig = sig;
+  $("#facts-empty").hidden = facts.length > 0;
+  list.replaceChildren(...facts.map((f) => {
+    const li = document.createElement("li");
+    li.className = "fact";
+    li.append(tag(f.text, "fact-text"));
+    li.append(tag(f.added, "fact-date"));
+    const remove = button("×", "fact-remove", async () => {
+      try {
+        render(await api("/api/room", { remove: f.id }));
+      } catch (e) {
+        toast(e.message, "error");
+      }
+    });
+    remove.setAttribute("aria-label", `Forget: ${f.text}`);
+    li.append(remove);
+    return li;
+  }));
+}
+
+$("#add-fact").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("#fact-text").value.trim();
+  if (!text) return;
+  try {
+    render(await api("/api/room", { add: text }));
+    $("#fact-text").value = "";
+  } catch (err) {
+    toast(err.message, "error");
   }
 });
 

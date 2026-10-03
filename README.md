@@ -66,9 +66,13 @@ The web app (`app/`, first version) adds:
   Claude follows up on what it heard; the mixer shows live meters, track
   colours and each clip's level
 
+- **Remembers your room**: Claude saves lasting facts (the interface, who's
+  on which input, which outputs feed the in-ears) to `~/.holysound/room.json`
+  and uses them next week instead of asking again; the Room tab shows every
+  fact and lets the volunteer add or delete them
+
 Still in development:
 
-- Remembering a church's room and gear from week to week
 - Hardware output routing in the `.als` renderer (it works live, via RigLink)
 - Automated regression coverage for the renderer
 

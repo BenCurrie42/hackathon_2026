@@ -63,6 +63,7 @@
       <div class="tabs" role="tablist">
         <button role="tab" class="tab" data-tab="mixer" aria-selected="true">Mixer</button>
         <button role="tab" class="tab" data-tab="songs" aria-selected="false">Songs</button>
+        <button role="tab" class="tab" data-tab="room" aria-selected="false">Room</button>
       </div>
       <div class="offline" id="offline" hidden>
         <h2>Live isn’t connected</h2>
@@ -88,6 +89,18 @@
           <button class="btn" type="submit">Add song</button>
         </form>
       </div>
+      <div class="tab-panel" id="panel-room" hidden>
+        <div class="room-intro">
+          <h2>Your room</h2>
+          <p class="muted">What Holy Sound remembers about your church from week to week — your gear, who’s on which input, where the in-ears go. Say it once in the chat and it’s saved here. Delete anything that’s wrong.</p>
+        </div>
+        <ul class="facts" id="facts"></ul>
+        <p class="empty" id="facts-empty" hidden>Nothing yet. Tell the chat about your setup, e.g. “We have a Scarlett 18i20. Sarah sings lead on input 1.”</p>
+        <form class="add-fact" id="add-fact">
+          <input id="fact-text" maxlength="200" placeholder="Add something to remember…" aria-label="Something to remember" required>
+          <button class="btn" type="submit">Save</button>
+        </form>
+      </div>
     </section>
   </main>
 
@@ -100,6 +113,9 @@
     </button>
     <button data-view="songs">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Songs
+    </button>
+    <button data-view="room">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/></svg>Room
     </button>
   </nav>
 

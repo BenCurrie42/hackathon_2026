@@ -8,6 +8,7 @@ pytest isn't an approved dependency yet (CLAUDE.md).
 
 import copy
 import http.client
+import http.client as http_client
 import json
 import math
 import struct
@@ -24,6 +25,7 @@ from app import audio_files, fake_live
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.live import LiveLink, LiveUnavailable
+from app.room import RoomMemory
 from app.server import App, make_handler
 
 
@@ -561,6 +563,79 @@ class ImportServerTest(StemFolderCase):
         with self.assertRaises(UserError) as ctx:
             self.app.import_folder(str(empty))
         self.assertIn("no audio", str(ctx.exception))
+
+
+class RoomMemoryTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "room.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_saves_survive_a_restart(self):
+        room = RoomMemory(self.path)
+        added = room.add(["Interface: Scarlett 18i20.", "  Sarah sings lead on input 1. ", "interface: scarlett 18i20."])
+        self.assertEqual([f["text"] for f in added], ["Interface: Scarlett 18i20.", "Sarah sings lead on input 1."])
+        again = RoomMemory(self.path)
+        self.assertEqual([f["text"] for f in again.facts()], ["Interface: Scarlett 18i20.", "Sarah sings lead on input 1."])
+        again.remove([1])
+        self.assertEqual(again.add(["Drummer in-ears on outputs 3/4."])[0]["id"], 3)
+        self.assertIn("#2. Sarah sings lead on input 1.", RoomMemory(self.path).notes())
+
+    def test_remember_tool_then_answer_in_one_turn(self):
+        room = RoomMemory(self.path)
+        room.add(["Lead vocal is on input 2."])
+        claude = ScriptedClaude(
+            reply(text("Got it."), Block(type="tool_use", id="tu_mem", name="remember",
+                                          input={"facts": ["Lead vocal (Sarah) is on input 1."], "forget": [1]})),
+            reply(text("Sarah is on input 1 from now on."), call("tu_p", [
+                {"action": "set_input", "track": "Lead Vocal", "input": "1"},
+            ])),
+        )
+        chat = Conversation(client_factory=lambda: claude, room=room)
+        chat.send("Sarah moved to input 1", session_notes(None, None, room=room))
+
+        self.assertEqual([f["text"] for f in room.facts()], ["Lead vocal (Sarah) is on input 1."])
+        roles = [e["role"] for e in chat.transcript]
+        self.assertEqual(roles, ["user", "assistant", "note", "assistant"])
+        self.assertIn("Remembered: Lead vocal (Sarah) is on input 1.", chat.transcript[2]["text"])
+        self.assertIn("Forgot: Lead vocal is on input 2.", chat.transcript[2]["text"])
+        result = claude.requests[1]["messages"][-1]["content"][0]
+        self.assertEqual((result["type"], result["tool_use_id"]), ("tool_result", "tu_mem"))
+        self.assertIn("#1. Lead vocal is on input 2.", claude.requests[0]["messages"][0]["content"][-1]["text"])
+        self.assertEqual([t["name"] for t in claude.requests[0]["tools"]], ["propose_changes", "remember"])
+
+    def test_giving_up_leaves_history_valid(self):
+        bad = {"action": "set_volume", "track": "Vox", "db": 99}
+        claude = ScriptedClaude(*[reply(call(f"tu_{i}", [bad])) for i in range(3)], reply(text("OK")))
+        chat = Conversation(client_factory=lambda: claude, room=RoomMemory(self.path))
+        chat.send("Make it loud", "notes")
+        self.assertIn("couldn't work out", chat.transcript[-1]["text"])
+        self.assertEqual(chat.messages[-1]["content"][0]["tool_use_id"], "tu_2")
+        chat.send("Never mind", "notes")
+        self.assertEqual([m["role"] for m in chat.messages][-2:], ["user", "assistant"])
+
+    def test_room_endpoint(self):
+        app = App(None, Conversation(client_factory=lambda: None, room=RoomMemory(self.path)))
+        http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.addCleanup(http.server_close)
+        self.addCleanup(http.shutdown)
+
+        def post(body):
+            c = http_client.HTTPConnection(*http.server_address)
+            c.request("POST", "/api/room", json.dumps(body), {"Content-Type": "application/json"})
+            r = c.getresponse()
+            data = json.loads(r.read())
+            c.close()
+            return data
+
+        app.live_state = lambda: {"connected": False, "snapshot": None, "message": "closed"}
+        state = post({"add": "Keys are stereo on 5/6."})
+        self.assertEqual(state["room"][0]["text"], "Keys are stereo on 5/6.")
+        state = post({"remove": state["room"][0]["id"]})
+        self.assertEqual(state["room"], [])
 
 
 class AddTrackWordingTest(unittest.TestCase):

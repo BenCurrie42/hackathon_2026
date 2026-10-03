@@ -424,3 +424,27 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 .folder-count { font-size: 12px; color: var(--accent); white-space: nowrap; }
 .folder-files { margin: 0; font-size: 13px; color: var(--muted); }
 .sheet textarea { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); resize: vertical; color: var(--text); font-size: 15px; }
+
+/* -- room memory ---------------------------------------------------------- */
+
+.msg.note {
+  align-self: center; max-width: 92%; padding: 7px 14px; border-radius: 999px; cursor: pointer;
+  font-size: 13.5px; color: var(--accent); background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); white-space: pre-line; text-align: center;
+}
+.msg.note::before { content: "✓ "; font-weight: 700; }
+
+.room-intro h2 { margin: 0 0 4px; font-size: 20px; }
+.room-intro p { margin: 0 0 16px; max-width: 60ch; }
+.facts { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.fact {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px;
+  padding: 10px 8px 10px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line);
+}
+.fact-text { font-size: 15px; }
+.fact-date { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fact-remove { width: 36px; height: 36px; border: 0; border-radius: 50%; background: none; color: var(--muted); font-size: 20px; }
+.fact-remove:hover { background: var(--danger-soft); color: var(--danger); }
+.add-fact { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.add-fact input { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); min-height: 44px; }
+@media (max-width: 480px) { .fact-date { display: none; } .fact { grid-template-columns: 1fr auto; } }

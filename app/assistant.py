@@ -14,7 +14,7 @@ import itertools
 import os
 import threading
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.actions import Proposal, is_audible, is_destructive
 from rig import TRACK_COLORS
@@ -23,6 +23,7 @@ MODEL = os.environ.get("HOLYSOUND_MODEL", "claude-opus-5-5")
 EFFORT = os.environ.get("HOLYSOUND_EFFORT", "medium")
 MAX_TOKENS = 16000
 FIX_ATTEMPTS = 2
+MAX_STEPS = 6  # model calls per message: remembering, fixing, then answering
 
 # Common stock devices, used when Live isn't connected to tell us its own list.
 FALLBACK_DEVICES = {
@@ -109,6 +110,17 @@ after the fader). Compare tracks with each other — the 0-1 scale isn't verifie
 never quote a reading as dB. Then suggest fader or clip gain changes in small steps \
 (1-3 dB), and offer to listen again.
 
+## Remembering their church
+
+You have a memory of this church that lasts from week to week; it's at the end of the \
+session notes. Use the remember tool to save lasting facts the volunteer tells or confirms: \
+their audio interface and how many inputs it has, who sings or plays on which input, which \
+outputs feed whose in-ears, how they like things set up. Save each fact as one short, \
+self-contained sentence ("Lead vocal (Sarah) is on input 1."). Don't save one-off requests \
+or anything about this week's songs. When a fact changes, forget the old one and save the \
+new one. Rely on what you remember instead of asking again, and mention it briefly when it \
+saves the volunteer a step ("Using input 1 for Sarah like last week").
+
 ## Session notes
 
 Each message from the volunteer starts with <session> notes showing the set as it is right \
@@ -119,15 +131,35 @@ download it as a session file instead of applying it.
 """
 
 
-def _tool():
-    return {
-        "name": "propose_changes",
-        "description": (
-            "Propose a batch of changes to the open Live set. The volunteer reviews the list "
-            "and applies it with one button. Include every change for this request, in order."
-        ),
-        "input_schema": _inline_refs(Proposal.model_json_schema()),
-    }
+class Remember(BaseModel):
+    """What the remember tool takes."""
+
+    facts: list[str] = Field(default_factory=list, max_length=20, description=(
+        "New lasting facts about the church's room, gear or team, each one short sentence."))
+    forget: list[int] = Field(default_factory=list, description=(
+        "Numbers (#) of remembered facts that are no longer true."))
+
+
+def _tools():
+    return [
+        {
+            "name": "propose_changes",
+            "description": (
+                "Propose a batch of changes to the open Live set. The volunteer reviews the list "
+                "and applies it with one button. Include every change for this request, in order."
+            ),
+            "input_schema": _inline_refs(Proposal.model_json_schema()),
+        },
+        {
+            "name": "remember",
+            "description": (
+                "Save or forget lasting facts about this church's room, gear and team, so next week "
+                "you don't need to ask again. Takes effect immediately; the volunteer can see and "
+                "delete every fact in the Room tab."
+            ),
+            "input_schema": _inline_refs(Remember.model_json_schema()),
+        },
+    ]
 
 
 def _inline_refs(schema):
@@ -159,8 +191,9 @@ class AssistantUnavailable(RuntimeError):
 class Conversation:
     """One shared conversation. The laptop and the phone see the same one."""
 
-    def __init__(self, client_factory=None):
+    def __init__(self, client_factory=None, room=None):
         self._client_factory = client_factory or _default_client
+        self.room = room
         self._client = None
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
@@ -245,7 +278,9 @@ class Conversation:
         shown = [user_entry] if user_entry else []
 
         try:
-            for _attempt in range(FIX_ATTEMPTS + 1):
+            fixes = 0
+            unanswered = None  # a tool call we gave up on without a tool_result
+            for _step in range(MAX_STEPS):
                 response = self._create(client)
                 if response.stop_reason == "refusal":
                     raise _Refused()
@@ -256,9 +291,24 @@ class Conversation:
                 if call is None:
                     return shown + [self._entry(role="assistant", text=reply or "…")]
 
+                if call.name == "remember":
+                    if reply:
+                        shown.append(self._entry(role="assistant", text=reply))
+                    outcome, note = self._remember(call.input)
+                    if note:
+                        shown.append(self._entry(role="note", text=note))
+                    self.messages.append({"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": call.id, "content": outcome},
+                    ]})
+                    continue
+
                 try:
                     proposal = Proposal.model_validate(call.input)
                 except ValidationError as e:
+                    fixes += 1
+                    if fixes > FIX_ATTEMPTS:
+                        unanswered = call
+                        break
                     self.messages.append({"role": "user", "content": [{
                         "type": "tool_result", "tool_use_id": call.id, "is_error": True,
                         "content": "The changes didn't validate, so the volunteer hasn't seen them. "
@@ -279,6 +329,12 @@ class Conversation:
                 self._open_tool_use = (call.id, pid)
                 return shown + [self._entry(role="assistant", text=reply, proposal_id=pid)]
 
+            # Gave up. Answer the dangling tool call, or the history stops being valid.
+            if unanswered is not None:
+                self.messages.append({"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": unanswered.id, "is_error": True,
+                    "content": "Stopped here; the volunteer saw an apology instead.",
+                }]})
             return shown + [self._entry(
                 role="assistant",
                 text="Sorry — I couldn't work out the right changes for that. Could you say it another way?",
@@ -291,6 +347,25 @@ class Conversation:
             if user_entry:
                 self.transcript.remove(user_entry)
             raise
+
+    def _remember(self, data):
+        """Run the remember tool. Returns (tool result text, note for the chat or None)."""
+        if self.room is None:
+            return "Memory isn't available in this session.", None
+        try:
+            request = Remember.model_validate(data)
+        except ValidationError as e:
+            return f"Nothing saved; fix these and try again:\n{_errors(e)}", None
+        removed = self.room.remove(request.forget)
+        added = self.room.add(request.facts)
+        parts = []
+        if added:
+            parts.append("Remembered: " + " · ".join(f["text"] for f in added))
+        if removed:
+            parts.append("Forgot: " + " · ".join(f["text"] for f in removed))
+        outcome = (f"Saved {len(added)} fact(s), forgot {len(removed)}. "
+                   "Now answer the volunteer.") if parts else "Nothing new to save."
+        return outcome, "\n".join(parts) or None
 
     def _rewind(self, mark, reopen):
         """Forget a turn that never got an answer, so the history stays valid."""
@@ -323,7 +398,7 @@ class Conversation:
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
-                tools=[_tool()],
+                tools=_tools(),
                 tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 messages=self.messages,
                 output_config={"effort": EFFORT},
@@ -386,10 +461,11 @@ def _errors(error):
 # -- session notes ----------------------------------------------------------
 
 
-def session_notes(snapshot, stock_devices, live_error=None, imports=None):
+def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=None):
     """The set as Claude sees it at the top of each message.
 
     imports: {folder name: number of files} for folders imported this session.
+    room: the RoomMemory, whose facts go last.
     """
     if snapshot is None:
         devices = FALLBACK_DEVICES
@@ -425,6 +501,9 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None):
     lines.append("Stock devices in this Live:")
     for category, names in devices.items():
         lines.append(f"  {category.replace('_', ' ')}: {', '.join(names)}")
+    if room is not None:
+        lines.append("")
+        lines.append(room.notes())
     return "\n".join(lines)
 
 
