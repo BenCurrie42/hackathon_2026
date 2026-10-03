@@ -1,14 +1,19 @@
 """Command line for editing a running Live Set through RigLink.
 
-    uv run rigforge.py status
-    uv run rigforge.py tracks
-    uv run rigforge.py add-track "Click"
-    uv run rigforge.py output Click "Ext. Out" "3/4"
-    uv run rigforge.py volume Click -6
-    uv run rigforge.py add-device "Lead Vocal" Compressor --preset "Gentle Squeeze"
+    uv run rig.py status
+    uv run rig.py track list
+    uv run rig.py track add "Click"
+    uv run rig.py route out Click "Ext. Out" 1
+    uv run rig.py mix volume Click -6
+    uv run rig.py effect add "Lead Vocal" Compressor --preset "Gentle Squeeze"
+    uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170
+    uv run rig.py song play "Let's Have Church"
+
+Commands are grouped by what they act on: track, mix, route, effect, song,
+marker. A song is one scene in Live's Session view.
 
 Tracks are picked by name, by the number Live shows beside them (1-based), or
-for return tracks by their letter (A, B, ...). Scenes, locators and devices are
+for return tracks by their letter (A, B, ...). Songs, markers and effects are
 picked by name or number.
 """
 
@@ -19,7 +24,7 @@ from pathlib import Path
 
 import typer
 
-from runtime import LiveConnection, RigLinkError
+from riglink_client import LiveConnection, RigLinkError
 
 # Loading a device walks Live's browser tree, which can take a while.
 TIMEOUT_SECONDS = 30.0
@@ -27,7 +32,22 @@ TIMEOUT_SECONDS = 30.0
 # Lets negative numbers like -6 through as arguments instead of options.
 NEGATIVE_NUMBERS = {"ignore_unknown_options": True}
 
+# File types Live imports as audio clips.
+AUDIO_SUFFIXES = {".wav", ".aif", ".aiff", ".flac", ".mp3"}
+
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+track_app = typer.Typer(no_args_is_help=True, help="Add, rename, colour and delete tracks.")
+mix_app = typer.Typer(no_args_is_help=True, help="Volume, pan, mute, solo, sends and levels.")
+route_app = typer.Typer(no_args_is_help=True, help="Where a track's audio comes from and goes to.")
+effect_app = typer.Typer(no_args_is_help=True, help="Stock Live effects and their presets.")
+song_app = typer.Typer(no_args_is_help=True, help="Songs in the set. Each song is one scene.")
+marker_app = typer.Typer(no_args_is_help=True, help="Named markers on the Arrangement timeline.")
+app.add_typer(track_app, name="track")
+app.add_typer(mix_app, name="mix")
+app.add_typer(route_app, name="route")
+app.add_typer(effect_app, name="effect")
+app.add_typer(song_app, name="song")
+app.add_typer(marker_app, name="marker")
 
 
 def _connect():
@@ -125,19 +145,47 @@ def _beats_per_bar(song):
     return song["numerator"] * 4 / song["denominator"]
 
 
-# -- Tracks ----------------------------------------------------------------
+# -- Top level: connection and transport -----------------------------------
 
 
-@app.command(rich_help_panel="Tracks")
+@app.command()
 def status():
-    """Check that Live and RigLink are connected."""
+    """Check the connection to Live and show tempo and playback."""
     with _connect() as live:
-        _run(live.ping)
-    typer.echo("Connected to Live.")
+        s = _run(live.get_song)
+    state = "playing" if s["is_playing"] else "stopped"
+    typer.echo(f"Connected to Live. {s['tempo']:g} BPM, {s['numerator']}/{s['denominator']}, {state}.")
 
 
-@app.command(rich_help_panel="Tracks")
-def tracks():
+@app.command()
+def play():
+    """Start playback."""
+    with _connect() as live:
+        _run(live.play)
+    typer.echo("Playing.")
+
+
+@app.command()
+def stop():
+    """Stop playback."""
+    with _connect() as live:
+        _run(live.stop)
+    typer.echo("Stopped.")
+
+
+@app.command()
+def tempo(bpm: float = typer.Argument(..., help="Beats per minute, e.g. 72.")):
+    """Set the tempo right now. For a song's own tempo, use `song tempo`."""
+    with _connect() as live:
+        result = _run(lambda: live.set_tempo(bpm))
+    typer.echo(f"Tempo: {result['tempo']:g} BPM")
+
+
+# -- track -----------------------------------------------------------------
+
+
+@track_app.command("list")
+def track_list():
     """List the tracks and return tracks in the open set."""
     with _connect() as live:
         rows = _run(live.list_tracks)
@@ -151,28 +199,27 @@ def tracks():
         typer.echo(f"{_return_letter(r['index']):>3}  {r['name']}  (Return)")
 
 
-@app.command("add-track", rich_help_panel="Tracks")
-def add_track(
+@track_app.command("add")
+def track_add(
     name: str = typer.Argument(None, help="Name for the new track."),
     midi: bool = typer.Option(False, "--midi", help="Make a MIDI track instead of audio."),
+    is_return: bool = typer.Option(False, "--return", help="Make a return track (for shared reverb or delay)."),
 ):
     """Add a track to the end of the set."""
+    if midi and is_return:
+        _fail("A track can be MIDI or a return, not both.")
     with _connect() as live:
+        if is_return:
+            result = _run(lambda: live.create_return_track(name=name))
+            typer.echo(f"Added return {_return_letter(result['index'])}: {result['name']}")
+            return
         create = live.create_midi_track if midi else live.create_audio_track
         result = _run(lambda: create(name=name))
     typer.echo(f"Added track {result['index'] + 1}: {result['name']}")
 
 
-@app.command("add-return", rich_help_panel="Tracks")
-def add_return(name: str = typer.Argument(None, help="Name for the new return track.")):
-    """Add a return track (for shared reverb or delay)."""
-    with _connect() as live:
-        result = _run(lambda: live.create_return_track(name=name))
-    typer.echo(f"Added return {_return_letter(result['index'])}: {result['name']}")
-
-
-@app.command(rich_help_panel="Tracks")
-def rename(
+@track_app.command("rename")
+def track_rename(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     name: str = typer.Argument(..., help="New name."),
 ):
@@ -196,12 +243,12 @@ TRACK_COLORS = {
 }
 
 
-@app.command(rich_help_panel="Tracks")
-def color(
+@track_app.command("color")
+def track_color(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     name: str = typer.Argument(..., help=f"One of: {', '.join(TRACK_COLORS)}."),
 ):
-    """Colour a track. Live picks the nearest colour from its own palette."""
+    """Colour a track and its clips. Live picks the nearest colour from its own palette."""
     rgb = TRACK_COLORS.get(name.casefold())
     if rgb is None:
         _fail(f"Pick one of these colours: {', '.join(TRACK_COLORS)}.")
@@ -211,8 +258,8 @@ def color(
     typer.echo(f"Track {target['label']} is now {name.casefold()}.")
 
 
-@app.command("delete-track", rich_help_panel="Tracks")
-def delete_track(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
+@track_app.command("delete")
+def track_delete(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
     """Delete a track or return track. Undo in Live with Cmd+Z."""
     with _connect() as live:
         target = _resolve_track(live, track)
@@ -220,7 +267,7 @@ def delete_track(track: str = typer.Argument(..., help="Track name, number, or r
     typer.echo(f"Deleted track {target['label']}.")
 
 
-# -- Routing ---------------------------------------------------------------
+# -- route -----------------------------------------------------------------
 
 
 def _routing_text(side):
@@ -235,8 +282,8 @@ def _echo_routing_side(label, options_label, side):
         typer.echo(f"        channels: {', '.join(channels)}")
 
 
-@app.command(rich_help_panel="Routing")
-def routing(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
+@route_app.command("show")
+def route_show(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
     """Show a track's input and output, and what they can be set to."""
     with _connect() as live:
         target = _resolve_track(live, track)
@@ -255,8 +302,8 @@ def _set_routing(track, direction, source, channel):
     typer.echo(f"Track {target['label']} {direction}: {_routing_text(result)}")
 
 
-@app.command("input", rich_help_panel="Routing")
-def set_input(
+@route_app.command("in")
+def route_in(
     track: str = typer.Argument(..., help="Track name or number."),
     source: str = typer.Argument(..., help='Input type as Live shows it, e.g. "Ext. In" or "No Input".'),
     channel: str = typer.Argument(None, help='Channel as Live shows it, e.g. "1" or "1/2".'),
@@ -265,21 +312,21 @@ def set_input(
     _set_routing(track, "input", source, channel)
 
 
-@app.command("output", rich_help_panel="Routing")
-def set_output(
+@route_app.command("out")
+def route_out(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
-    destination: str = typer.Argument(..., help='Output type as Live shows it, e.g. "Ext. Out" or "Master".'),
-    channel: str = typer.Argument(None, help='Channel as Live shows it, e.g. "3/4".'),
+    destination: str = typer.Argument(..., help='Output type as Live shows it, e.g. "Ext. Out" or "Main".'),
+    channel: str = typer.Argument(None, help='Channel as Live shows it, e.g. "1" or "3/4".'),
 ):
     """Set where a track sends its audio, e.g. click to the drummer's outputs."""
     _set_routing(track, "output", destination, channel)
 
 
-# -- Mixer -----------------------------------------------------------------
+# -- mix -------------------------------------------------------------------
 
 
-@app.command(rich_help_panel="Mixer")
-def mixer(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
+@mix_app.command("show")
+def mix_show(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
     """Show a track's volume, pan, mute, solo and sends."""
     with _connect() as live:
         target = _resolve_track(live, track)
@@ -290,8 +337,8 @@ def mixer(track: str = typer.Argument(..., help="Track name, number, or return l
         typer.echo(f"  Send {_return_letter(i)} ({s['return']}): {s['level']}")
 
 
-@app.command(context_settings=NEGATIVE_NUMBERS, rich_help_panel="Mixer")
-def volume(
+@mix_app.command("volume", context_settings=NEGATIVE_NUMBERS)
+def mix_volume(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     db: float = typer.Argument(..., help="Level in dB, e.g. -6 or 0. Use -inf for silent."),
 ):
@@ -302,8 +349,8 @@ def volume(
     typer.echo(f"Track {target['label']} volume: {result['volume']}")
 
 
-@app.command(rich_help_panel="Mixer")
-def pan(
+@mix_app.command("pan")
+def mix_pan(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     position: str = typer.Argument(..., help="C for center, or 25L / 25R (up to 50)."),
 ):
@@ -315,8 +362,8 @@ def pan(
     typer.echo(f"Track {target['label']} pan: {result['pan']}")
 
 
-@app.command(rich_help_panel="Mixer")
-def mute(
+@mix_app.command("mute")
+def mix_mute(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     off: bool = typer.Option(False, "--off", help="Unmute instead."),
 ):
@@ -327,8 +374,8 @@ def mute(
     typer.echo(f"Track {target['label']} is {'muted' if result['mute'] else 'unmuted'}.")
 
 
-@app.command(rich_help_panel="Mixer")
-def solo(
+@mix_app.command("solo")
+def mix_solo(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
     off: bool = typer.Option(False, "--off", help="Unsolo instead."),
 ):
@@ -339,8 +386,8 @@ def solo(
     typer.echo(f"Track {target['label']} is {'soloed' if result['solo'] else 'not soloed'}.")
 
 
-@app.command(context_settings=NEGATIVE_NUMBERS, rich_help_panel="Mixer")
-def send(
+@mix_app.command("send", context_settings=NEGATIVE_NUMBERS)
+def mix_send(
     track: str = typer.Argument(..., help="Track sending the audio."),
     to: str = typer.Argument(..., help="Return track name or letter."),
     db: float = typer.Argument(..., help="Send level in dB, e.g. -12. Use -inf for none."),
@@ -363,12 +410,12 @@ def _meter_label(row):
     return str(row["index"] + 1)
 
 
-@app.command(rich_help_panel="Mixer")
-def levels(seconds: float = typer.Option(5.0, "--seconds", help="How long to listen.")):
+@mix_app.command("levels")
+def mix_levels(seconds: float = typer.Option(5.0, "--seconds", help="How long to listen.")):
     """Listen for a few seconds and report how loud each track got.
 
     Meter values run 0 to 1, as Live's track meters show them (after the
-    fader). Their mapping to dB hasn't been checked yet.
+    fader, before mute). Their mapping to dB hasn't been checked yet.
     """
     with _connect() as live:
         _run(live.reset_meters)
@@ -386,29 +433,29 @@ def levels(seconds: float = typer.Option(5.0, "--seconds", help="How long to lis
             typer.echo(f"{label}  peak {row['peak']:.2f}, average {row['average']:.2f}")
 
 
-# -- Devices ---------------------------------------------------------------
+# -- effect ----------------------------------------------------------------
 
 
-@app.command(rich_help_panel="Devices")
-def devices(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
-    """List the devices on a track, in order."""
+@effect_app.command("list")
+def effect_list(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
+    """List the effects on a track, in order."""
     with _connect() as live:
         target = _resolve_track(live, track)
         rows = _run(lambda: live.list_devices(target["index"], target["is_return"]))
     if not rows:
-        typer.echo(f"Track {target['label']} has no devices.")
+        typer.echo(f"Track {target['label']} has no effects.")
     for d in rows:
         rack = ", rack" if d["is_rack"] else ""
         typer.echo(f"{d['index'] + 1:>3}  {d['name']}  ({d['class_name']}{rack})")
 
 
-@app.command("add-device", rich_help_panel="Devices")
-def add_device(
+@effect_app.command("add")
+def effect_add(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
-    device: str = typer.Argument(..., help="Stock device name as Live's browser shows it, e.g. Reverb."),
-    preset: str = typer.Option(None, "--preset", help="A stock preset of that device, e.g. \"Gentle Squeeze\"."),
+    device: str = typer.Argument(..., help="Stock effect name as Live's browser shows it, e.g. Reverb."),
+    preset: str = typer.Option(None, "--preset", help="A stock preset of that effect, e.g. \"Gentle Squeeze\"."),
 ):
-    """Load a stock Live device, or one of its presets, onto a track."""
+    """Load a stock Live effect, or one of its presets, onto a track."""
     with _connect() as live:
         target = _resolve_track(live, track)
         _run(lambda: live.load_device(target["index"], device, preset, target["is_return"]))
@@ -416,201 +463,203 @@ def add_device(
     typer.echo(f"Loaded {loaded} on track {target['label']}.")
 
 
-@app.command("remove-device", rich_help_panel="Devices")
-def remove_device(
+@effect_app.command("remove")
+def effect_remove(
     track: str = typer.Argument(..., help="Track name, number, or return letter."),
-    device: str = typer.Argument(..., help="Device name or its number from `devices`."),
+    device: str = typer.Argument(..., help="Effect name or its number from `effect list`."),
 ):
-    """Remove a device from a track."""
+    """Remove an effect from a track."""
     with _connect() as live:
         target = _resolve_track(live, track)
         rows = _run(lambda: live.list_devices(target["index"], target["is_return"]))
-        row = _pick(rows, device, "device")
+        row = _pick(rows, device, "effect")
         result = _run(lambda: live.delete_device(target["index"], row["index"], target["is_return"]))
     typer.echo(f"Removed {result['name']} from track {target['label']}.")
 
 
-@app.command(rich_help_panel="Devices")
-def presets(device: str = typer.Argument(..., help="Stock device name, e.g. Compressor.")):
-    """List the stock presets for a device."""
+@effect_app.command("presets")
+def effect_presets(device: str = typer.Argument(..., help="Stock effect name, e.g. Compressor.")):
+    """List the stock presets for an effect."""
     with _connect() as live:
         names = _run(lambda: live.list_presets(device))
     if not names:
         typer.echo(f"{device} has no stock presets.")
     for name in names:
-        typer.echo(name)
+        typer.echo(name.removesuffix(".adv"))
 
 
-# -- Song: tempo and transport ---------------------------------------------
+# -- song ------------------------------------------------------------------
+# A song is a scene in Session view: one row of clips that launch together,
+# optionally with its own tempo.
 
 
-@app.command(rich_help_panel="Song")
-def song():
-    """Show tempo, time signature, and whether Live is playing."""
-    with _connect() as live:
-        s = _run(live.get_song)
-    state = "playing" if s["is_playing"] else "stopped"
-    typer.echo(f"{s['tempo']:g} BPM, {s['numerator']}/{s['denominator']}, {state}.")
-
-
-@app.command(rich_help_panel="Song")
-def tempo(bpm: float = typer.Argument(..., help="Beats per minute, e.g. 72.")):
-    """Set the song tempo."""
-    with _connect() as live:
-        result = _run(lambda: live.set_tempo(bpm))
-    typer.echo(f"Tempo: {result['tempo']:g} BPM")
-
-
-@app.command(rich_help_panel="Song")
-def play():
-    """Start playback."""
-    with _connect() as live:
-        _run(live.play)
-    typer.echo("Playing.")
-
-
-@app.command(rich_help_panel="Song")
-def stop():
-    """Stop playback."""
-    with _connect() as live:
-        _run(live.stop)
-    typer.echo("Stopped.")
-
-
-# -- Scenes ----------------------------------------------------------------
-
-
-def _scene_line(s):
+def _song_line(s):
     bpm = f"  ({s['tempo']:g} BPM)" if s["tempo"] is not None else ""
     return f"{s['index'] + 1:>3}  {s['name']}{bpm}"
 
 
-@app.command(rich_help_panel="Scenes")
-def scenes():
-    """List the scenes (one per song, usually)."""
+@song_app.command("list")
+def song_list():
+    """List the songs (scenes) in the set."""
     with _connect() as live:
         rows = _run(live.list_scenes)
     for s in rows:
-        typer.echo(_scene_line(s))
+        typer.echo(_song_line(s))
 
 
-@app.command("add-scene", rich_help_panel="Scenes")
-def add_scene(
-    name: str = typer.Argument(None, help="Scene name, e.g. the song title."),
-    bpm: float = typer.Option(None, "--bpm", help="Tempo Live switches to when this scene starts."),
+@song_app.command("add")
+def song_add(
+    name: str = typer.Argument(None, help="Song title."),
+    bpm: float = typer.Option(None, "--bpm", help="Tempo Live switches to when this song starts."),
 ):
-    """Add a scene at the end."""
+    """Add an empty song at the end."""
     with _connect() as live:
         result = _run(lambda: live.create_scene(name, bpm))
-    typer.echo("Added scene: " + _scene_line(result).strip())
+    typer.echo("Added song: " + _song_line(result).strip())
 
 
-@app.command("rename-scene", rich_help_panel="Scenes")
-def rename_scene(
-    scene: str = typer.Argument(..., help="Scene name or number."),
+@song_app.command("rename")
+def song_rename(
+    song: str = typer.Argument(..., help="Song name or number."),
     name: str = typer.Argument(..., help="New name."),
 ):
-    """Rename a scene."""
+    """Rename a song."""
     with _connect() as live:
-        row = _pick(_run(live.list_scenes), scene, "scene")
+        row = _pick(_run(live.list_scenes), song, "song")
         result = _run(lambda: live.set_scene(row["index"], name=name))
-    typer.echo("Scene " + _scene_line(result).strip())
+    typer.echo("Song " + _song_line(result).strip())
 
 
-@app.command("scene-tempo", rich_help_panel="Scenes")
-def scene_tempo(
-    scene: str = typer.Argument(..., help="Scene name or number."),
-    bpm: float = typer.Argument(..., help="Tempo Live switches to when this scene starts."),
+@song_app.command("tempo")
+def song_tempo(
+    song: str = typer.Argument(..., help="Song name or number."),
+    bpm: float = typer.Argument(..., help="Tempo Live switches to when this song starts."),
 ):
-    """Give a scene its own tempo."""
+    """Give a song its own tempo."""
     with _connect() as live:
-        row = _pick(_run(live.list_scenes), scene, "scene")
+        row = _pick(_run(live.list_scenes), song, "song")
         result = _run(lambda: live.set_scene(row["index"], bpm=bpm))
-    typer.echo("Scene " + _scene_line(result).strip())
+    typer.echo("Song " + _song_line(result).strip())
 
 
-@app.command("delete-scene", rich_help_panel="Scenes")
-def delete_scene(scene: str = typer.Argument(..., help="Scene name or number.")):
-    """Delete a scene. Undo in Live with Cmd+Z."""
+@song_app.command("delete")
+def song_delete(song: str = typer.Argument(..., help="Song name or number.")):
+    """Delete a song and its clips. Undo in Live with Cmd+Z."""
     with _connect() as live:
-        row = _pick(_run(live.list_scenes), scene, "scene")
+        row = _pick(_run(live.list_scenes), song, "song")
         _run(lambda: live.delete_scene(row["index"]))
-    typer.echo(f"Deleted scene {row['index'] + 1}: {row['name']}")
+    typer.echo(f"Deleted song {row['index'] + 1}: {row['name']}")
 
 
-@app.command("fire-scene", rich_help_panel="Scenes")
-def fire_scene(scene: str = typer.Argument(..., help="Scene name or number.")):
-    """Launch a scene."""
+@song_app.command("play")
+def song_play(song: str = typer.Argument(..., help="Song name or number.")):
+    """Start a song from the top."""
     with _connect() as live:
-        row = _pick(_run(live.list_scenes), scene, "scene")
+        row = _pick(_run(live.list_scenes), song, "song")
         _run(lambda: live.fire_scene(row["index"]))
-    typer.echo(f"Launched scene {row['index'] + 1}: {row['name']}")
+    typer.echo(f"Playing song {row['index'] + 1}: {row['name']}")
 
 
-# -- Clips -----------------------------------------------------------------
+def _song_title(name):
+    """Scene name without a trailing tempo tag, e.g. "Song [170]" -> "song"."""
+    return re.sub(r"\s*\[\d+(\.\d+)?\]\s*$", "", name).casefold()
 
 
-@app.command("import-audio", rich_help_panel="Scenes")
-def import_audio(
-    track: str = typer.Argument(..., help="Audio track name or number."),
-    file: Path = typer.Argument(..., help="Audio file to import, e.g. a stem .wav."),
-    scene: str = typer.Argument(..., help="Scene name or number to put the clip in."),
+def _empty_song_slot(live, scenes):
+    """First unnamed scene with no clips, so a fresh set's blank rows get used."""
+    for s in scenes:
+        if not s["name"] and _run(lambda: live.count_scene_clips(s["index"])) == 0:
+            return s
+    return None
+
+
+@song_app.command("import")
+def song_import(
+    folder: Path = typer.Argument(..., help="Folder of stems, one audio file per track."),
+    name: str = typer.Option(None, "--name", help="Song title. Defaults to the folder name."),
+    bpm: float = typer.Option(None, "--bpm", help="Tempo Live switches to when this song starts."),
 ):
-    """Put an audio file on a track in a scene. It plays once, at its own speed."""
-    if not file.is_file():
-        _fail(f"There's no file at {file}.")
+    """Add a song from a folder of stems.
+
+    Each stem goes on the track with the same name, or a new track if there
+    isn't one. Stems play once at their own speed, so they stay in sync.
+    """
+    if not folder.is_dir():
+        _fail(f"There's no folder at {folder}.")
+    stems = sorted(p for p in folder.iterdir() if p.suffix.casefold() in AUDIO_SUFFIXES)
+    if not stems:
+        _fail(f"There are no audio files in {folder}.")
+    name = name or folder.name
+
     with _connect() as live:
-        target = _resolve_track(live, track)
-        if target["is_return"]:
-            _fail("Audio clips go on regular tracks, not returns.")
-        row = _pick(_run(live.list_scenes), scene, "scene")
-        result = _run(lambda: live.import_audio(target["index"], str(file.resolve()), row["index"], file.stem))
-    typer.echo(f"Put {result['name']} on track {target['label']} in scene {row['index'] + 1}.")
+        scenes = _run(live.list_scenes)
+        if any(_song_title(s["name"]) == _song_title(name) for s in scenes):
+            _fail(f"There's already a song called {name!r}.")
+        slot = _empty_song_slot(live, scenes)
+        if slot is None:
+            slot = _run(lambda: live.create_scene(name, bpm))
+        else:
+            _run(lambda: live.set_scene(slot["index"], name=name, bpm=bpm))
+        scene = slot["index"]
+
+        tracks = {t["name"].casefold(): t["index"] for t in _run(live.list_tracks)}
+        added = []
+        for stem in stems:
+            index = tracks.get(stem.stem.casefold())
+            if index is None:
+                index = _run(lambda: live.create_audio_track(name=stem.stem))["index"]
+                tracks[stem.stem.casefold()] = index
+                added.append(stem.stem)
+            _run(lambda: live.import_audio(index, str(stem.resolve()), scene, stem.stem))
+
+    typer.echo(f"Added song {scene + 1}: {name} ({len(stems)} stems).")
+    if added:
+        typer.echo(f"New tracks: {', '.join(added)}.")
 
 
-# -- Locators --------------------------------------------------------------
+# -- marker ----------------------------------------------------------------
 
 
-@app.command(rich_help_panel="Locators")
-def locators():
-    """List Arrangement locators, in time order."""
+@marker_app.command("list")
+def marker_list():
+    """List markers, in time order."""
     with _connect() as live:
         per_bar = _beats_per_bar(_run(live.get_song))
         rows = _run(live.list_locators)
     if not rows:
-        typer.echo("No locators.")
+        typer.echo("No markers.")
     for c in rows:
         typer.echo(f"{c['index'] + 1:>3}  bar {c['time'] / per_bar + 1:g}  {c['name']}")
 
 
-@app.command("add-locator", rich_help_panel="Locators")
-def add_locator(
+@marker_app.command("add")
+def marker_add(
     bar: float = typer.Argument(..., help="Bar number, starting at 1."),
-    name: str = typer.Argument(None, help="Locator name, e.g. the song title."),
+    name: str = typer.Argument(None, help="Marker name, e.g. the song title."),
 ):
-    """Add an Arrangement locator at a bar."""
+    """Add a marker at a bar."""
     if bar < 1:
         _fail("Bars start at 1.")
     with _connect() as live:
         per_bar = _beats_per_bar(_run(live.get_song))
         result = _run(lambda: live.add_locator((bar - 1) * per_bar, name))
-    typer.echo(f"Added locator {result['name']!r} at bar {bar:g}.")
+    typer.echo(f"Added marker {result['name']!r} at bar {bar:g}.")
 
 
-@app.command("delete-locator", rich_help_panel="Locators")
-def delete_locator(locator: str = typer.Argument(..., help="Locator name or number.")):
-    """Delete an Arrangement locator."""
+@marker_app.command("delete")
+def marker_delete(marker: str = typer.Argument(..., help="Marker name or number.")):
+    """Delete a marker."""
     with _connect() as live:
-        row = _pick(_run(live.list_locators), locator, "locator")
+        row = _pick(_run(live.list_locators), marker, "marker")
         _run(lambda: live.delete_locator(row["index"]))
-    typer.echo(f"Deleted locator {row['name']!r}.")
+    typer.echo(f"Deleted marker {row['name']!r}.")
 
 
-@app.command(rich_help_panel="Locators")
-def jump(locator: str = typer.Argument(..., help="Locator name or number.")):
-    """Move the playhead to a locator."""
+@marker_app.command("jump")
+def marker_jump(marker: str = typer.Argument(..., help="Marker name or number.")):
+    """Move the playhead to a marker."""
     with _connect() as live:
-        row = _pick(_run(live.list_locators), locator, "locator")
+        row = _pick(_run(live.list_locators), marker, "marker")
         _run(lambda: live.jump_to_locator(row["index"]))
     typer.echo(f"Jumped to {row['name']!r}.")
 

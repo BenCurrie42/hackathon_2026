@@ -12,7 +12,7 @@ import socket
 import threading
 import time
 
-from runtime import LiveConnection, RigLinkError
+from riglink_client import LiveConnection, RigLinkError
 
 # Loading a device walks Live's browser tree, which can take a while.
 TIMEOUT_SECONDS = 30.0

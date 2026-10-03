@@ -31,8 +31,8 @@ from app import audio_files
 from app.actions import Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
-from rigforge import TRACK_COLORS
-from runtime import RigLinkError
+from rig import TRACK_COLORS
+from riglink_client import RigLinkError
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"

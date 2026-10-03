@@ -179,7 +179,9 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 spec.py                       RigSpec / TrackSpec — the contract
 write_als.py                  render(spec, template_path) -> bytes
 remote_script/RigLink/        Control Surface: live socket bridge into Live
-runtime.py                    Client for RigLink — the live-edit path
+riglink_client.py             Client for RigLink — the live-edit path
+rig.py                        CLI over RigLink: track, mix, route, effect,
+                              song (= scene), marker
 app/server.py                 Web app: chat + mixer, `uv run python -m app`
 app/assistant.py              Claude conversation → proposed actions
 app/actions.py                Proposable actions (intent only) and how each runs

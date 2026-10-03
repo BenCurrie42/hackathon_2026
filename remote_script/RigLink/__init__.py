@@ -1,7 +1,7 @@
 """RigLink Control Surface.
 
 Loaded by Live as a Control Surface (Preferences -> Link/MIDI). Opens a local
-TCP socket and accepts newline-delimited JSON commands from runtime.py,
+TCP socket and accepts newline-delimited JSON commands from riglink_client.py,
 executing them against the currently open Live Set.
 
 Command vocabulary matches RigSpec, not Live's full API surface: tracks,
@@ -669,6 +669,10 @@ def _set_scene(rf, scene_index, name=None, bpm=None):
     return _scene_row(scene_index, scene)
 
 
+def _count_scene_clips(rf, scene_index):
+    return sum(1 for t in rf.song().tracks if t.clip_slots[scene_index].has_clip)
+
+
 def _delete_scene(rf, scene_index):
     rf.song().delete_scene(scene_index)
     return {"index": scene_index}
@@ -873,6 +877,7 @@ COMMANDS = {
     "list_scenes": _list_scenes,
     "create_scene": _create_scene,
     "set_scene": _set_scene,
+    "count_scene_clips": _count_scene_clips,
     "delete_scene": _delete_scene,
     "fire_scene": _fire_scene,
     "list_locators": _list_locators,

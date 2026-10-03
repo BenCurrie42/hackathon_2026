@@ -20,8 +20,8 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import BaseModel, Field
 
 from app.live import LiveUnavailable
-from rigforge import TRACK_COLORS
-from runtime import RigLinkError
+from rig import TRACK_COLORS
+from riglink_client import RigLinkError
 from spec import RigSpec, TrackSpec
 
 ColorName = Literal[tuple(TRACK_COLORS)]

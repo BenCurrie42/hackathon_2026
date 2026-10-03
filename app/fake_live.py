@@ -442,6 +442,9 @@ class FakeSet:
             scene["tempo"] = float(bpm)
         return self._scene_row(scene_index)
 
+    def count_scene_clips(self, scene_index):
+        return sum(1 for t in self.tracks if scene_index in t["clips"])
+
     def delete_scene(self, scene_index):
         del self.scenes[scene_index]
         for t in self.tracks:

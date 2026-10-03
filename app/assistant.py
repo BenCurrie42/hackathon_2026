@@ -17,7 +17,7 @@ import threading
 from pydantic import ValidationError
 
 from app.actions import Proposal, is_audible, is_destructive
-from rigforge import TRACK_COLORS
+from rig import TRACK_COLORS
 
 MODEL = os.environ.get("HOLYSOUND_MODEL", "claude-opus-5-5")
 EFFORT = os.environ.get("HOLYSOUND_EFFORT", "medium")
