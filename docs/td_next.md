@@ -111,7 +111,7 @@ ask for it by name.
 
 ## 9. File renderer gaps
 
-The `.als` renderer (`write_als.py`) lags behind RigLink:
+The `.als` renderer (`file_builder/write_als.py`) lags behind RigLink:
 
 - **Hardware output routing.** Only `AudioOut/Main` is known. Click to the
   drummer and guide to the band (the point of a click/pad/guide rig) needs

@@ -55,7 +55,7 @@ Live 12.
 
 ```sh
 uv sync
-ln -s "$PWD/remote_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink
+ln -s "$PWD/ableton_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink
 ```
 
 Then in Live, open Preferences → Link/MIDI, pick **RigLink** as a Control

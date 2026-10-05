@@ -25,8 +25,8 @@ from pathlib import Path
 
 import typer
 
-from riglink_client import LiveConnection, RigLinkError
-from stem_level import stem_level
+from live_control.live_connection import LiveConnection, RigLinkError
+from live_control.stem_level import stem_level
 
 # Loading a device walks Live's browser tree, which can take a while.
 TIMEOUT_SECONDS = 30.0
