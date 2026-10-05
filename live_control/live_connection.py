@@ -1,4 +1,4 @@
-"""Client for the RigLink Control Surface (remote_script/RigLink).
+"""Client for the RigLink Control Surface (ableton_script/RigLink).
 
 Talks to a running Live instance over the local socket the control surface
 opens. This is the live-edit path; write_als.py (closed-file .als generation)

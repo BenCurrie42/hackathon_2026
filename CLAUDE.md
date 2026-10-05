@@ -25,18 +25,18 @@ The **Rig Spec is the product.** It's a Pydantic model describing a session in
 terms a human would use. Everything else is replaceable around it.
 
 ```
-conversation → RigSpec (spec.py) → render() (write_als.py) → .als
+conversation → RigSpec (rig_spec.py) → render() (write_als.py) → .als
                     ↑                        ↑
               model writes it          swappable backend
 ```
 
 Two backends, both built:
 
-1. **File renderer** (`write_als.py`) writes a `.als` with Live closed. Works
+1. **File renderer** (`file_builder/write_als.py`) writes a `.als` with Live closed. Works
    on every Live edition, tests without Ableton installed, produces a file you
    can email. Consumes `RigSpec`.
 2. **Runtime driver** (RigLink) is a Control Surface inside Live, driven over a
-   local socket by `riglink_client.py` and the `rig.py` CLI. Edits appear in the
+   local socket by `live_control/live_connection.py` and the `rig.py` CLI. Edits appear in the
    open set without reopening. Better demo, worse install story. Does **not**
    consume `RigSpec` yet. Its vocabulary (scenes, locators, stem import,
    meters) has run ahead of the spec.
@@ -183,19 +183,25 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 ## Layout
 
 ```
-spec.py                       RigSpec / TrackSpec, the contract
-write_als.py                  render(spec, template_path) -> bytes
-remote_script/RigLink/        Control Surface: live socket bridge into Live
-riglink_client.py             Client for RigLink, the live-edit path
-rig.py                        CLI over RigLink: track, mix, route, effect,
-                              song (= scene), marker
-templates/test.als            Reference Live 12.4.5 set, read-only
-templates/test.reference.xml  Its decompressed XML, for diffing
-stem_level.py                 Active RMS and peak of a WAV stem, stdlib only;
-                              drives level matching on `song import`
-templates/probe_noinput.als   Live's own save of a generated set; source of
-                              truth for AudioIn/None
-docs/td_next.md               What's missing, ranked by Sunday impact
+rig.py                          CLI over RigLink: track, mix, route, effect,
+                                song (= scene), marker
+ableton_script/RigLink/         Control Surface that runs inside Live; socket
+                                bridge for the live-edit path
+live_control/
+    live_connection.py          LiveConnection: client for RigLink
+    stem_level.py               Active RMS and peak of a WAV stem, stdlib only;
+                                drives level matching on `song import`
+file_builder/                   Writes a .als with Live closed
+    rig_spec.py                 RigSpec / TrackSpec, the contract
+    write_als.py                render(spec, template_path) -> bytes
+templates/test.als              Reference Live 12.4.5 set, read-only
+templates/test.reference.xml    Its decompressed XML, for diffing
+templates/probe_noinput.als     Live's own save of a generated set; source of
+                                truth for AudioIn/None
+docs/td_next.md                 What's missing, ranked by Sunday impact
+
+Run everything from the repo root: imports are package-relative to it
+(`from live_control.live_connection import ...`).
 ```
 
 ## How we learn new format facts
@@ -244,7 +250,7 @@ transitions; MIDI mapping; clip editing beyond gain; group tracks.
 - Live 12 Trial at `/Applications/Ableton Live 12 Trial.app`, auto-updated to
   12.4.6. Format facts above were verified on 12.4.5. Trial runs with Suite
   features.
-- RigLink is installed by symlinking `remote_script/RigLink` into
+- RigLink is installed by symlinking `ableton_script/RigLink` into
   `~/Music/Ableton/User Library/Remote Scripts/` and picking it under
   Preferences → Link/MIDI. Socket is `localhost:9877`.
 - Live imports RigLink once at startup. **After editing it, quit and reopen

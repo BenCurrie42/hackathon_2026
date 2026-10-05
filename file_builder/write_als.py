@@ -17,7 +17,7 @@ from pathlib import Path
 
 from lxml import etree
 
-from spec import RigSpec, TrackSpec
+from file_builder.rig_spec import RigSpec, TrackSpec
 
 LIVE_APP = Path("/Applications/Ableton Live 12 Trial.app")
 CORE_LIBRARY = LIVE_APP / "Contents/App-Resources/Core Library"
