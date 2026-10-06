@@ -17,6 +17,7 @@ for return tracks by their letter (A, B, ...). Songs, markers and effects are
 picked by name or number.
 """
 
+import fnmatch
 import re
 import socket
 import time
@@ -24,7 +25,8 @@ from pathlib import Path
 
 import typer
 
-from riglink_client import LiveConnection, RigLinkError
+from live_control.live_connection import LiveConnection, RigLinkError
+from live_control.stem_level import stem_level
 
 # Loading a device walks Live's browser tree, which can take a while.
 TIMEOUT_SECONDS = 30.0
@@ -34,6 +36,13 @@ NEGATIVE_NUMBERS = {"ignore_unknown_options": True}
 
 # File types Live imports as audio clips.
 AUDIO_SUFFIXES = {".wav", ".aif", ".aiff", ".flac", ".mp3"}
+
+# Loudness every imported stem is brought to, as active RMS in dBFS. Leaves
+# headroom for summing a dozen stems onto one output.
+STEM_LEVEL_DB = -20.0
+# Never boost a stem past this peak, or spiky stems like click would clip.
+STEM_PEAK_CEILING_DB = -1.0
+CLIP_GAIN_RANGE_DB = (-24.0, 24.0)
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 track_app = typer.Typer(no_args_is_help=True, help="Add, rename, colour and delete tracks.")
@@ -573,23 +582,61 @@ def _empty_song_slot(live, scenes):
     return None
 
 
+def _select_stems(stems, patterns):
+    """Stems matching any pattern, in pattern order, so --only also sets track order."""
+    if not patterns:
+        return stems
+    chosen = []
+    for pattern in patterns:
+        matches = [p for p in stems if fnmatch.fnmatch(p.stem.casefold(), pattern.casefold())]
+        if not matches:
+            names = ", ".join(p.stem for p in stems)
+            _fail(f"No stem matches {pattern!r}. Stems in that folder: {names}.")
+        chosen += [p for p in matches if p not in chosen]
+    return chosen
+
+
+def _level_match_gain(stem):
+    """Clip gain that brings a stem to STEM_LEVEL_DB, and a note when it can't."""
+    level = stem_level(stem)
+    if level is None:
+        if stem.suffix.casefold() != ".wav":
+            return 0.0, "not a WAV, level not matched"
+        return 0.0, "silent"
+    wanted = STEM_LEVEL_DB - level.active_rms_db
+    headroom = STEM_PEAK_CEILING_DB - level.peak_db
+    low, high = CLIP_GAIN_RANGE_DB
+    gain = max(low, min(high, wanted, headroom))
+    return gain, ("held back to avoid clipping" if headroom < wanted else "")
+
+
 @song_app.command("import")
 def song_import(
     folder: Path = typer.Argument(..., help="Folder of stems, one audio file per track."),
     name: str = typer.Option(None, "--name", help="Song title. Defaults to the folder name."),
     bpm: float = typer.Option(None, "--bpm", help="Tempo Live switches to when this song starts."),
+    only: list[str] = typer.Option(
+        None, "--only", help='Import just these stems, by name or wildcard, e.g. "Loops*". Repeat for more.'
+    ),
+    match_levels: bool = typer.Option(
+        True, "--match-levels/--keep-levels", help="Even out stem levels so one fader setting suits every song."
+    ),
 ):
     """Add a song from a folder of stems.
 
     Each stem goes on the track with the same name, or a new track if there
     isn't one. Stems play once at their own speed, so they stay in sync.
+    With --match-levels (the default), clip gain brings every stem to the same
+    loudness, so the faders set the mix for all songs at once.
     """
     if not folder.is_dir():
         _fail(f"There's no folder at {folder}.")
     stems = sorted(p for p in folder.iterdir() if p.suffix.casefold() in AUDIO_SUFFIXES)
     if not stems:
         _fail(f"There are no audio files in {folder}.")
+    stems = _select_stems(stems, only)
     name = name or folder.name
+    gains = {p: _level_match_gain(p) if match_levels else (None, "") for p in stems}
 
     with _connect() as live:
         scenes = _run(live.list_scenes)
@@ -603,18 +650,18 @@ def song_import(
         scene = slot["index"]
 
         tracks = {t["name"].casefold(): t["index"] for t in _run(live.list_tracks)}
-        added = []
         for stem in stems:
             index = tracks.get(stem.stem.casefold())
-            if index is None:
+            is_new = index is None
+            if is_new:
                 index = _run(lambda: live.create_audio_track(name=stem.stem))["index"]
                 tracks[stem.stem.casefold()] = index
-                added.append(stem.stem)
-            _run(lambda: live.import_audio(index, str(stem.resolve()), scene, stem.stem))
+            gain, note = gains[stem]
+            clip = _run(lambda: live.import_audio(index, str(stem.resolve()), scene, stem.stem, gain))
+            notes = ", ".join(n for n in ("new track" if is_new else "", note) if n)
+            typer.echo(f"{index + 1:>3}  {stem.stem:<20} gain {clip['gain']:>9}" + (f"  ({notes})" if notes else ""))
 
     typer.echo(f"Added song {scene + 1}: {name} ({len(stems)} stems).")
-    if added:
-        typer.echo(f"New tracks: {', '.join(added)}.")
 
 
 # -- marker ----------------------------------------------------------------

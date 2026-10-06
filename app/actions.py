@@ -1,6 +1,6 @@
 """The changes the assistant may propose, and how each one is carried out.
 
-Same rule as spec.py: actions carry intent, never device parameters. A track is
+Same rule as file_builder/rig_spec.py: actions carry intent, never device parameters. A track is
 named, a level is in dB, an effect is a stock device (optionally one of its
 stock presets). Everything Ableton-specific happens in RigLink.
 
@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 
 from app.live import LiveUnavailable
 from rig import TRACK_COLORS
-from riglink_client import RigLinkError
-from spec import RigSpec, TrackSpec
+from live_control.live_connection import RigLinkError
+from file_builder.rig_spec import RigSpec, TrackSpec
 
 ColorName = Literal[tuple(TRACK_COLORS)]
 
@@ -677,7 +677,7 @@ def is_audible(action):
 def to_rigspec(actions):
     """The add_track actions as a RigSpec, plus notes on what a file can't hold.
 
-    The file renderer only knows tracks so far (see plan.md). Everything else
+    The file renderer only knows tracks so far (see docs/td_next.md). Everything else
     in a proposal only works against a running Live.
     """
     tracks, notes = [], []

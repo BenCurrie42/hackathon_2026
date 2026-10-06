@@ -1,7 +1,7 @@
 """RigLink Control Surface.
 
 Loaded by Live as a Control Surface (Preferences -> Link/MIDI). Opens a local
-TCP socket and accepts newline-delimited JSON commands from riglink_client.py,
+TCP socket and accepts newline-delimited JSON commands from live_connection.py,
 executing them against the currently open Live Set.
 
 Command vocabulary matches RigSpec, not Live's full API surface: tracks,

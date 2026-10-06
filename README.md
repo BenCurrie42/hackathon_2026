@@ -2,119 +2,94 @@
 
 **Describe your Sunday. Get a working Ableton session.**
 
-[Watch the Holy Sound introduction (57 seconds)](https://drive.google.com/file/d/1JS_2oy9hb-i6gZmTE7OLHSQjQRqbP8_h/view?usp=sharing)
+[Watch the 57-second intro](https://drive.google.com/file/d/1JS_2oy9hb-i6gZmTE7OLHSQjQRqbP8_h/view?usp=sharing)
 
-Holy Sound helps church worship teams turn a plain-English description of a
-service into a ready-to-open Ableton Live session. A volunteer describes the
-musicians, equipment, inputs, and setlist; Holy Sound prepares the tracks,
-routing, levels, and stock effects that would otherwise take hours to configure
-by hand.
+Most small churches running tracks on Sunday have one volunteer who figured out
+Ableton on their own, and they rebuild the same session every week: name the
+tracks, patch the inputs, send click to the drummer, set each song's tempo. Some
+churches don't have that person at all.
 
-## The problem
+The idea here is that you just say what your Sunday looks like (who's playing,
+what's plugged in, what songs) and get a session that's ready to go.
 
-Church production teams repeat the same setup work every week. Someone must
-name tracks, patch inputs, configure effects, route monitoring, and prepare each
-song at the right tempo. That person is often a volunteer who learned Ableton on
-their own—and many smaller churches have nobody who can do it at all.
-
-Holy Sound is designed to make that setup accessible without requiring Ableton
-expertise, configuration files, or a terminal.
+We're building it for the 2026 Gloo AI Hackathon (Ministry Resourcing track).
+It's a prototype.
 
 ## How it works
 
-1. A volunteer describes the service in everyday language.
-2. AI translates that description into a validated rig specification.
-3. A deterministic renderer converts the specification into an Ableton Live
-   `.als` file.
-4. The volunteer opens the file and finishes any creative adjustments in Live.
+There are two ways it talks to Ableton:
 
-The AI never writes Ableton's undocumented XML or invents device parameters. It
-expresses intent—such as a lead vocal with gentle compression—while the renderer
-owns every Ableton-specific decision. This separation makes generated sessions
-predictable and prevents plausible-looking AI output from corrupting a set.
+- **Build a file.** Write a `.als` from scratch with Live closed. You open it and
+  everything's there. Works without Ableton even installed, which makes it easy
+  to test.
+- **Drive Live directly.** A small script that runs inside Live (RigLink) takes
+  commands over a local connection, so changes show up in the set you already
+  have open. This is the one that feels like magic in a demo.
 
-## Development status
+The AI never touches Ableton's file format or dials in knob values. It says what
+it wants ("lead vocal, gentle compression") and our code picks a real stock
+Ableton preset for that. LLMs are bad at guessing compressor settings and great
+at understanding what a person means, so we let each side do its part.
 
-Holy Sound is an active prototype built for the **2026 Gloo AI Hackathon**, in
-the Ministry Resourcing track. It is not yet ready for production use.
+## What works today
 
-The renderer currently supports:
+**The web app.** You chat with Claude about your Sunday, it suggests changes, and
+nothing happens until you hit Apply. Next to the chat is a mixer and song list
+that follow your open set, and it works from a phone on the same Wi-Fi. It can
+also:
 
-- Audio and MIDI track creation
-- Track names, hardware inputs, volume, and pan
-- Ableton stock-device insertion
-- Safe ID allocation and structural validation
-- Gzip-compressed `.als` output
+- import a folder of stems, read how loud each one is, and suggest tracks,
+  songs, colours and clip gain to balance them
+- play a song, listen to Live's meters, and follow up on what it heard
+- remember your room (interface, who's on which input, which outputs go to the
+  in-ears) so next week you don't have to say it again
+- hand you a `.als` to download when Live isn't open
 
-Generated test sessions have opened successfully in Ableton Live 12.4.5 without
-repair warnings. The current implementation has also been round-tripped through
-Live with no structural differences beyond float formatting.
+**The command line**, `rig.py`, does the same kind of thing by hand:
 
-The web app (`app/`, first version) adds:
+```sh
+uv run rig.py track add "Click"
+uv run rig.py route out Click "Ext. Out" 1
+uv run rig.py mix volume Click -6
+uv run rig.py effect add "Lead Vocal" Compressor --preset "Gentle Squeeze"
+uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170
+uv run rig.py song play "Let's Have Church"
+```
 
-- A chat where the volunteer describes the service and reviews Claude's
-  suggested changes before pressing **Apply**
-- Live refinement of the open Ableton session through the RigLink control
-  surface: tracks, inputs and outputs, levels, pan, stock effects, sends, and
-  songs as scenes with their own tempos
-- A mixer and song list that follow the open set, usable from a phone or tablet
-- Downloading a suggested set of tracks as a `.als` when Live isn't open
-- **Import with AI**: pick a folder of stems and Claude reads every file's
-  levels (peak, how loud it is while sounding, how often it sounds), then
-  suggests tracks, songs, colours and clip gain to balance them
-- **Listening**: a suggested step plays a song and reads Live's meters, and
-  Claude follows up on what it heard; the mixer shows live meters, track
-  colours and each clip's level
+What it can't do yet is in [docs/td_next.md](docs/td_next.md).
 
-- **Remembers your room**: Claude saves lasting facts (the interface, who's
-  on which input, which outputs feed the in-ears) to `~/.holysound/room.json`
-  and uses them next week instead of asking again; the Room tab shows every
-  fact and lets the volunteer add or delete them
+## Running it
 
-Still in development:
-
-- Hardware output routing in the `.als` renderer (it works live, via RigLink)
-- Automated regression coverage for the renderer
-
-## Local development
-
-The prototype currently targets macOS, Python 3.11+, and Ableton Live 12.4.5.
-Dependencies are managed with [`uv`](https://docs.astral.sh/uv/).
+You'll need macOS, Python 3.11+, [uv](https://docs.astral.sh/uv/), Ableton Live
+12, and an Anthropic API key.
 
 ```sh
 uv sync
+ln -s "$PWD/ableton_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink
+cp .env.example .env            # then paste your API key in
 ```
 
-### Running the app
-
-1. Copy `remote_script/RigLink` into Live's Remote Scripts folder
-   (`~/Music/Ableton/User Library/Remote Scripts/`), restart Live, and pick
-   **RigLink** as a Control Surface in Settings → Link, Tempo & MIDI.
-2. Copy `.env.example` to `.env` and add an Anthropic API key.
-3. Start it:
+Then in Live, open Preferences → Link/MIDI, pick **RigLink** as a Control
+Surface, and start the app:
 
 ```sh
-uv run python -m app            # opens http://127.0.0.1:8765 in a browser
-uv run python -m app --lan      # also prints a link for phones on the same Wi-Fi
-uv run python -m app --fake-live   # no Ableton: a pretend Live Set for trying the UI
+uv run python -m app               # opens http://127.0.0.1:8765
+uv run python -m app --lan         # also prints a link for phones on your Wi-Fi
+uv run python -m app --fake-live   # no Ableton needed, a pretend set to play with
 ```
 
-Tests run without Ableton or an API key:
+`uv run rig.py status` checks that Live is connected. If you change RigLink's
+code, quit and reopen Live, because it only loads RigLink at startup.
+
+Tests don't need Ableton or an API key:
 
 ```sh
 uv run python -m unittest discover tests
 ```
 
-The renderer reads Ableton's stock device presets from the local Live
-installation, so it is not yet portable across editions or installation paths.
-See [CLAUDE.md](CLAUDE.md) for the verified file-format findings and
-[plan.md](plan.md) for the current build order.
-
-## Scope
-
-The first release is focused on creating new worship sessions with Ableton stock
-devices. Editing arbitrary existing sessions, third-party plugins, and MainStage
-are outside the initial scope.
+[CLAUDE.md](CLAUDE.md) has the deep stuff if you're into that: what we've figured
+out about Ableton's file format and the rules that keep generated sets from
+breaking.
 
 ## License
 

@@ -33,7 +33,7 @@ from app.assistant import AssistantUnavailable, Conversation, describe_proposal,
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
 from rig import TRACK_COLORS
-from riglink_client import RigLinkError
+from live_control.live_connection import RigLinkError
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -158,7 +158,7 @@ class App:
         if spec is None:
             raise UserError("There are no new tracks in that suggestion to put in a session file.")
         try:
-            from write_als import render
+            from file_builder.write_als import render
 
             data = render(spec, TEMPLATE)
         except LookupError as e:

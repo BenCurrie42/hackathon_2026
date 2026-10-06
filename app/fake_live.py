@@ -1,7 +1,7 @@
 """A stand-in for Ableton Live + RigLink, for building and testing without Live.
 
 Speaks the same newline-delimited JSON protocol on the same port as
-remote_script/RigLink, and keeps a small in-memory Live Set. Display strings
+ableton_script/RigLink, and keeps a small in-memory Live Set. Display strings
 imitate Live's ("-6.0 dB", "25L", "C") closely enough for the UI, but this is
 not a model of Live's behaviour -- anything learned here must be confirmed in
 Live before it goes in CLAUDE.md.

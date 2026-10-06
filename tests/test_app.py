@@ -363,7 +363,7 @@ class ServerTest(FakeLiveCase):
         self.assertIn(b"Holy Sound", page)
         status, state = self.request("GET", "/api/state")
         self.assertTrue(state["live"]["connected"])
-        status, _ = self.request("GET", "/../spec.py")
+        status, _ = self.request("GET", "/../rig.py")
         self.assertEqual(status, 404)
 
 

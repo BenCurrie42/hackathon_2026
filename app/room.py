@@ -1,6 +1,6 @@
 """What Holy Sound remembers about a church's room, gear and team.
 
-The second Sunday should take one sentence (docs/idea.md): which interface,
+The second Sunday should take one sentence: which interface,
 who sings on which input, which outputs feed the in-ears. The assistant saves
 facts like these with its remember tool; the volunteer sees them in the Room
 tab and can add or delete any of them.
