@@ -8,6 +8,7 @@ const POLL_HIDDEN_MS = 5000;
 
 let state = null;
 let sending = null;           // text of the message in flight, shown optimistically
+let sendingFrom = 0;          // how many chat entries there were when it was sent
 let chatSig = "";
 let songsSig = "";
 let stockDevices = null;
@@ -146,8 +147,25 @@ function tokens(n) {
   return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
 }
 
+/* The server saves a message to the chat the moment it arrives, but only
+   answers /api/chat once the whole reply is written. Until then the page shows
+   its own copy of the message; once the server's copy turns up in the chat
+   (a poll, or the end of the stream, can bring it in first) that copy is
+   dropped so the message never shows twice. */
+function pendingMessage() {
+  if (sending === null) return null;
+  const saved = state.chat.slice(sendingFrom).some((entry) => entry.role === "user");
+  return saved ? null : sending;
+}
+
+function startSending(text) {
+  sending = text;
+  sendingFrom = state ? state.chat.length : 0;
+}
+
 function renderChat() {
-  const sig = JSON.stringify([state.chat, state.busy, sending, state.live.connected, reply !== null]);
+  const pendingText = pendingMessage();
+  const sig = JSON.stringify([state.chat, state.busy, sending, pendingText, state.live.connected, reply !== null]);
   if (sig === chatSig) return;
   chatSig = sig;
 
@@ -165,8 +183,8 @@ function renderChat() {
     }
     if (entry.proposal) box.append(proposalCard(entry.proposal));
   }
-  if (sending !== null) {
-    const pending = bubble("user", sending);
+  if (pendingText !== null) {
+    const pending = bubble("user", pendingText);
     pending.classList.add("pending");
     box.append(pending);
   }
@@ -398,7 +416,7 @@ async function exportProposal(id, btn) {
 async function send(text) {
   text = text.trim();
   if (!text || sending !== null) return;
-  sending = text;
+  startSending(text);
   $("#message-input").value = "";
   autosize();
   renderChat();
@@ -1123,7 +1141,7 @@ $("#import-go").addEventListener("click", async () => {
   go.textContent = "Listening to your files…";
   const note = $("#import-note").value;
   const name = importPath.split("/").pop();
-  sending = `Import the audio in “${name}”.` + (note.trim() ? " " + note.trim() : "");
+  startSending(`Import the audio in “${name}”.` + (note.trim() ? " " + note.trim() : ""));
   renderChat();
   $("#import-dialog").close();
   try {
