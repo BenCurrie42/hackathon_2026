@@ -722,7 +722,10 @@ function createStrip() {
   slider($(".volume input", el), $(".volume output", el), (db) => ({ cmd: "set_volume", args: { ...target(el), db } }), dbText);
   slider($(".pan input", el), $(".pan output", el), (pan) => ({ cmd: "set_pan", args: { ...target(el), pan } }), panText);
 
-  $(".more", el).addEventListener("toggle", (e) => { if (e.target.open) loadRouting(el); });
+  $(".more", el).addEventListener("toggle", (e) => {
+    el.classList.toggle("is-open", e.target.open);
+    if (e.target.open) loadRouting(el);
+  });
 
   // Moving a track between folders: drag the grip (computers), or pick from the list (phones).
   const grip = $(".strip-grip", el);
@@ -820,6 +823,7 @@ function updateStrip(el, row, snap) {
     ? `→ ${routeLabel(row.output)}`
     : `${row.is_midi ? "MIDI · " : ""}${routeLabel(row.input, true)} → ${routeLabel(row.output)}`;
   $(".strip-route", el).textContent = route;
+  $(".strip-route", el).title = route;
 
   $(".mute", el).setAttribute("aria-pressed", row.mute);
   $(".solo", el).setAttribute("aria-pressed", row.solo);
@@ -861,7 +865,9 @@ function updateStrip(el, row, snap) {
   });
   updateClips(el, row, snap);
   const extras = [row.sends.length && "sends", row.clips?.length && "clip levels", "outputs"].filter(Boolean);
-  $(".more summary", el).textContent = extras.join(", ").replace(/^./, (c) => c.toUpperCase()).replace(/, ([^,]*)$/, " & $1");
+  const summary = $(".more summary", el);
+  summary.textContent = row.devices.length ? `More · ${row.devices.length} fx` : "More";
+  summary.title = "Effects, " + extras.join(", ").replace(/, ([^,]*)$/, " & $1") + " and folder";
 }
 
 /* Live's meters run 0-1 (after the fader). Peak since the last poll. */
@@ -870,7 +876,7 @@ function paintMeter(meter, reading) {
   meter.hidden = reading == null;
   const peak = reading?.peak ?? 0;
   const bar = meter.firstElementChild;
-  bar.style[meter.classList.contains("master-meter") ? "height" : "width"] = Math.min(100, peak * 100) + "%";
+  bar.style.height = Math.min(100, peak * 100) + "%";
   meter.classList.toggle("warm", peak >= 0.8 && peak < 0.95);
   meter.classList.toggle("hot", peak >= 0.95);
 }

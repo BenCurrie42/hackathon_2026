@@ -275,13 +275,12 @@ svg { width: 1em; height: 1em; }
 .empty { color: var(--muted); text-align: center; padding: 32px 12px; }
 
 .mixer-tools { display: flex; justify-content: flex-end; margin: -6px 0 4px; }
-.groups { display: flex; flex-direction: column; }
+.groups { display: flex; flex-flow: row wrap; gap: 16px 22px; align-items: flex-start; }
 
 /* Folders group related strips (by colour) instead of one long flat list.
    Each folder's header sticks under the tab bar while its strips scroll by,
    like a grouped contacts list -- so you always know which folder you're in. */
-.track-group { margin-top: 22px; }
-.track-group:first-child { margin-top: 0; }
+.track-group { min-width: 150px; max-width: 100%; }
 
 .group-header {
   position: sticky; top: var(--tabs-h, 48px); z-index: 2;
@@ -331,35 +330,60 @@ svg { width: 1em; height: 1em; }
   background: var(--panel-2); min-height: 40px;
 }
 
-.strips { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+/* Channel strips: narrow and upright, like a console. Pan, meter and fader
+   are what you reach for; effects, sends, outputs and the folder open up
+   under "More". */
+.strips { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
 
 .strip {
   --track-color: var(--muted);
-  padding: 12px 14px; border-radius: var(--radius); background: var(--panel);
-  border: 1px solid var(--line); border-top: 4px solid var(--track-color);
+  --fader-h: 128px;
+  width: 80px; padding: 8px 6px 6px; border-radius: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-top: 3px solid var(--track-color);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
 }
-.strip.muted-track .control, .strip.muted-track .devices, .strip.muted-track .strip-name, .strip.muted-track .strip-route { opacity: 0.5; }
-.strip-head { display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center; }
+.strip.is-open { width: 268px; }
+.strip.muted-track .pan, .strip.muted-track .fader, .strip.muted-track .strip-name, .strip.muted-track .strip-route { opacity: 0.5; }
+.strip-head { width: 100%; display: flex; align-items: center; justify-content: space-between; min-height: 26px; }
 .strip-num {
-  grid-row: span 2; width: 34px; height: 34px; border-radius: 10px; border: 0; padding: 0;
-  display: grid; place-items: center; font-weight: 800; font-size: 14px;
+  width: 26px; height: 26px; border-radius: 8px; border: 0; padding: 0;
+  display: grid; place-items: center; font-weight: 800; font-size: 12px;
   background: var(--track-color); color: #15130f;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
 }
 .strip-num:hover { filter: brightness(1.1); }
 .strip-name {
-  min-width: 0; border: 0; background: none; font-weight: 650; font-size: 16px; padding: 2px 0;
-  border-bottom: 1px solid transparent; border-radius: 0;
+  width: 100%; min-width: 0; border: 0; border-bottom: 1px solid transparent; border-radius: 0; background: none;
+  text-align: center; font-weight: 650; font-size: 13px; padding: 2px 0; text-overflow: ellipsis;
 }
-.strip-name:focus { outline: none; border-bottom-color: var(--accent); }
-.strip-route { grid-column: 2; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strip-toggles { grid-column: 3; grid-row: 1 / span 2; display: flex; gap: 6px; }
+.strip-name:focus { outline: none; border-bottom-color: var(--accent); text-overflow: clip; }
+.strip:not(.is-open) .strip-route { display: none; }
+.strip-route { max-width: 100%; font-size: 10.5px; line-height: 1.2; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip-toggles { display: flex; gap: 4px; }
 .toggle {
-  width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line);
-  background: var(--panel-2); font-weight: 700; font-size: 14px; color: var(--muted);
+  width: 34px; height: 30px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel-2); font-weight: 700; font-size: 13px; color: var(--muted);
 }
 .toggle.mute[aria-pressed="true"] { background: var(--warn); color: #231a00; border-color: var(--warn); }
 .toggle.solo[aria-pressed="true"] { background: #6aa6ff; color: #04162f; border-color: #6aa6ff; }
+
+.strip .pan { display: flex; flex-direction: column; align-items: center; gap: 0; width: 100%; margin: 0; }
+.strip .pan input[type="range"] { height: 20px; }
+.strip .pan input[type="range"]::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: -4px; border-width: 2px; }
+.strip .pan input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-width: 2px; }
+.strip .pan output { font-size: 11px; color: var(--muted); text-align: center; }
+
+.fader { display: flex; align-items: flex-start; gap: 6px; }
+.strip .volume { display: flex; flex-direction: column; align-items: center; gap: 2px; margin: 0; }
+.strip .volume output { font-size: 11px; color: var(--text); text-align: center; min-width: 46px; }
+.strip .volume input[type="range"] { writing-mode: vertical-lr; direction: rtl; width: 28px; height: var(--fader-h); }
+.strip .volume input[type="range"]::-webkit-slider-runnable-track {
+  width: 6px; height: 100%;
+  background: linear-gradient(to top, var(--accent) var(--fill, 50%), var(--panel-2) var(--fill, 50%));
+}
+.strip .volume input[type="range"]::-webkit-slider-thumb { width: 26px; height: 14px; margin-top: 0; margin-left: -10px; border-radius: 4px; border-width: 2px; }
+.strip .volume input[type="range"]::-moz-range-track { width: 6px; height: 100%; }
+.strip .volume input[type="range"]::-moz-range-thumb { width: 24px; height: 12px; border-radius: 4px; border-width: 2px; }
 
 .control { display: grid; grid-template-columns: 44px 1fr 72px; align-items: center; gap: 10px; margin-top: 10px; }
 .control-label { font-size: 13px; color: var(--muted); }
@@ -384,9 +408,16 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
 .add-device { padding: 5px 12px; border-radius: 999px; border: 1px dashed var(--line); background: none; color: var(--muted); font-size: 13px; min-height: 34px; }
 .add-device:hover { border-color: var(--accent); color: var(--accent); }
 
-.more { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
-.more summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 4px 0; min-height: 32px; display: flex; align-items: center; }
-.more .control { grid-template-columns: 80px 1fr 72px; }
+.more { width: 100%; margin-top: 2px; border-top: 1px solid var(--line); padding-top: 4px; text-align: left; }
+.more summary {
+  cursor: pointer; font-size: 11.5px; color: var(--muted); padding: 2px 0; min-height: 30px;
+  display: flex; align-items: center; justify-content: center; list-style: none; white-space: nowrap;
+}
+.more summary::-webkit-details-marker { display: none; }
+.more summary::after { content: "\25BE"; margin-left: 4px; }
+.more[open] summary::after { content: "\25B4"; }
+.strip.is-open .more summary { justify-content: flex-start; }
+.more .control { grid-template-columns: 64px 1fr 58px; gap: 8px; }
 .more .control-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .route-line { margin-top: 10px; display: grid; grid-template-columns: 80px 1fr; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }
 .route-line select, .sheet select {
@@ -438,10 +469,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 
 /* -- meters, clips, colours ---------------------------------------------- */
 
-.meter { height: 6px; margin-top: 10px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.meter { width: 6px; height: var(--fader-h, 150px); border-radius: 3px; background: var(--panel-2); overflow: hidden; display: flex; align-items: flex-end; }
 .meter span {
-  display: block; height: 100%; width: 0; border-radius: 3px;
-  background: var(--ok); transition: width 0.25s ease-out, background 0.25s;
+  display: block; width: 100%; height: 0; border-radius: 3px;
+  background: var(--ok); transition: height 0.25s ease-out, background 0.25s;
 }
 .meter.warm span { background: var(--warn); }
 .meter.hot span { background: var(--danger); }

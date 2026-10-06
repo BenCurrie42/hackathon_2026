@@ -174,31 +174,31 @@
     <article class="strip">
       <header class="strip-head">
         <button class="strip-num" type="button" title="Track colour"></button>
-        <input class="strip-name" aria-label="Track name">
-        <span class="strip-route"></span>
-        <div class="strip-toggles">
-          <span class="strip-grip" draggable="true" title="Drag to another folder" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
-          </span>
-          <button class="toggle mute" aria-pressed="false" title="Mute">M</button>
-          <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
-        </div>
+        <span class="strip-grip" draggable="true" title="Drag to another folder" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
+        </span>
       </header>
-      <div class="meter" aria-hidden="true"><span></span></div>
-      <div class="control volume">
-        <span class="control-label">Level</span>
-        <input type="range" min="-70" max="6" step="0.5" aria-label="Level">
-        <output></output>
+      <input class="strip-name" aria-label="Track name">
+      <span class="strip-route"></span>
+      <div class="strip-toggles">
+        <button class="toggle mute" aria-pressed="false" title="Mute">M</button>
+        <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
       </div>
       <div class="control pan">
-        <span class="control-label">Pan</span>
         <input type="range" min="-1" max="1" step="0.02" aria-label="Pan">
         <output></output>
       </div>
-      <div class="devices"></div>
-      <div class="clips"></div>
+      <div class="fader">
+        <div class="meter" aria-hidden="true"><span></span></div>
+        <div class="control volume">
+          <input type="range" min="-70" max="6" step="0.5" orient="vertical" aria-label="Level">
+          <output></output>
+        </div>
+      </div>
       <details class="more">
-        <summary>Sends &amp; outputs</summary>
+        <summary>More</summary>
+        <div class="devices"></div>
+        <div class="clips"></div>
         <div class="sends"></div>
         <div class="clip-gains"></div>
         <label class="folder-line">
