@@ -34,8 +34,14 @@ class RigLink(ControlSurface):
         super().__init__(c_instance)
         self._clients = []
         self._buffers = {}
+        # Replies waiting to go out. The sockets are non-blocking, so a large
+        # reply (a long preset list, a snapshot) may take several ticks to send.
+        self._outgoing = {}
         self._server = None
         self._meters = MeterWindow()
+        # A second window for the UI's meters: each snapshot reads and clears
+        # it, so drawing meters never resets a measurement in progress.
+        self._display_meters = MeterWindow()
         self._open_server()
 
     def _open_server(self):
@@ -51,12 +57,8 @@ class RigLink(ControlSurface):
             self.log_message("RigLink: failed to open socket: %s" % e)
 
     def disconnect(self):
-        for client in self._clients:
-            try:
-                client.close()
-            except OSError:
-                pass
-        self._clients = []
+        for client in list(self._clients):
+            self._drop_client(client)
         if self._server is not None:
             try:
                 self._server.close()
@@ -67,9 +69,12 @@ class RigLink(ControlSurface):
 
     def update_display(self):
         super().update_display()
-        self._meters.sample(self.song())
+        layout, levels = _read_levels(self.song())
+        self._meters.add(layout, levels)
+        self._display_meters.add(layout, levels)
         self._accept_new_clients()
         self._service_clients()
+        self._flush_clients()
 
     def _accept_new_clients(self):
         if self._server is None:
@@ -80,34 +85,49 @@ class RigLink(ControlSurface):
                 client.setblocking(False)
                 self._clients.append(client)
                 self._buffers[client] = b""
+                self._outgoing[client] = b""
         except BlockingIOError:
             pass
         except OSError as e:
             self.log_message("RigLink: accept failed: %s" % e)
 
     def _service_clients(self):
-        dead = []
-        for client in self._clients:
+        # Iterate over a copy: handling a line can drop the client.
+        for client in list(self._clients):
             try:
                 chunk = client.recv(4096)
             except BlockingIOError:
                 continue
             except OSError:
-                dead.append(client)
+                self._drop_client(client)
                 continue
 
             if not chunk:
-                dead.append(client)
+                self._drop_client(client)
                 continue
 
             self._buffers[client] += chunk
-            while b"\n" in self._buffers[client]:
+            while client in self._buffers and b"\n" in self._buffers[client]:
                 line, self._buffers[client] = self._buffers[client].split(b"\n", 1)
                 if line.strip():
                     self._handle_line(client, line)
 
-        for client in dead:
+    def _flush_clients(self):
+        for client in list(self._clients):
+            self._flush(client)
+
+    def _flush(self, client):
+        pending = self._outgoing.get(client)
+        if not pending:
+            return
+        try:
+            sent = client.send(pending)
+        except BlockingIOError:
+            return
+        except OSError:
             self._drop_client(client)
+            return
+        self._outgoing[client] = pending[sent:]
 
     def _drop_client(self, client):
         try:
@@ -117,6 +137,7 @@ class RigLink(ControlSurface):
         if client in self._clients:
             self._clients.remove(client)
         self._buffers.pop(client, None)
+        self._outgoing.pop(client, None)
 
     def _handle_line(self, client, line):
         try:
@@ -139,10 +160,10 @@ class RigLink(ControlSurface):
             self._reply(client, {"ok": False, "error": str(e)})
 
     def _reply(self, client, payload):
-        try:
-            client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        except OSError:
-            self._drop_client(client)
+        if client not in self._outgoing:
+            return
+        self._outgoing[client] += (json.dumps(payload) + "\n").encode("utf-8")
+        self._flush(client)
 
 
 # -- Meters ----------------------------------------------------------------
@@ -158,6 +179,16 @@ def _metered_tracks(song):
     yield "master", [song.master_track]
 
 
+def _read_levels(song):
+    """Every audio track's meter right now. Read once per tick: meters cost Live CPU."""
+    levels = {}
+    for kind, tracks in _metered_tracks(song):
+        for i, track in enumerate(tracks):
+            if track.has_audio_output:
+                levels[(kind, i)] = max(track.output_meter_left, track.output_meter_right)
+    return (len(song.tracks), len(song.return_tracks)), levels
+
+
 class MeterWindow:
     def __init__(self):
         self.reset()
@@ -167,20 +198,20 @@ class MeterWindow:
         self._layout = None
         self.ticks = 0
 
-    def sample(self, song):
-        layout = (len(song.tracks), len(song.return_tracks))
+    def add(self, layout, levels):
         if layout != self._layout:
             # Indices shifted under us; old stats would land on the wrong track.
             self.reset()
             self._layout = layout
         self.ticks += 1
-        for kind, tracks in _metered_tracks(song):
-            for i, track in enumerate(tracks):
-                if not track.has_audio_output:
-                    continue
-                level = max(track.output_meter_left, track.output_meter_right)
-                peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
-                self._stats[(kind, i)] = (max(peak, level), total + level, count + 1)
+        for key, level in levels.items():
+            peak, total, count = self._stats.get(key, (0.0, 0.0, 0))
+            self._stats[key] = (max(peak, level), total + level, count + 1)
+
+    def stats(self, kind, i):
+        """(peak, average) for one track since the last reset, or None if unheard."""
+        peak, total, count = self._stats.get((kind, i), (0.0, 0.0, 0))
+        return (peak, total / count) if count else None
 
     def rows(self, song):
         rows = []
@@ -544,6 +575,35 @@ def _set_clip_gain(rf, track_index, scene_index, db):
     return {"gain": _set_clip_gain_db(clip, float(db))}
 
 
+def _play_from_file_start(clip):
+    """Start every stem at sample 0.
+
+    Auto-Warp moves a long sample's start to the first beat it detects, and that
+    guess differs per stem, so turning warping off alone leaves stems offset.
+    """
+    clip.loop_start = 0.0
+    clip.start_marker = 0.0
+
+
+def _clip_markers(rf, scene_index):
+    """Where each clip in a scene starts and ends, for checking stems line up."""
+    rows = []
+    for i, track in enumerate(rf.song().tracks):
+        slots = track.clip_slots
+        if scene_index >= len(slots) or not slots[scene_index].has_clip:
+            continue
+        clip = slots[scene_index].clip
+        row = {"index": i, "name": track.name}
+        for attr in ("start_marker", "end_marker", "loop_start", "loop_end", "length",
+                     "warping", "looping", "sample_length", "sample_rate"):
+            row[attr] = getattr(clip, attr, None)
+        markers = getattr(clip, "warp_markers", None)
+        if markers is not None:
+            row["warp_markers"] = [[m.sample_time, m.beat_time] for m in markers][:4]
+        rows.append(row)
+    return rows
+
+
 def _import_audio(rf, track_index, file_path, scene_index, name=None, gain_db=None):
     """Put an audio file in a Session slot, unwarped and playing once.
 
@@ -560,6 +620,7 @@ def _import_audio(rf, track_index, file_path, scene_index, name=None, gain_db=No
     clip = slot.clip
     clip.warping = False
     clip.looping = False
+    _play_from_file_start(clip)
     clip.color = track.color
     if name:
         clip.name = name
@@ -694,6 +755,153 @@ def _jump_to_locator(rf, locator_index):
     return {"name": cue.name, "time": cue.time}
 
 
+# -- Snapshot --------------------------------------------------------------
+# Everything a UI needs to draw the set, in one round trip. Live only services
+# the socket from update_display, so a dozen small calls cost a second or more.
+
+
+def _db_value(param):
+    """A dB display as a number, or None for -inf (JSON has no infinity)."""
+    return _db_from_text(_display(param))
+
+
+def _db_from_text(text):
+    try:
+        db = _parse_db(text)
+    except (ValueError, IndexError):
+        return None
+    return None if db == float("-inf") else db
+
+
+def _clip_rows(track):
+    """Session clips on a track, by the scene (song) they sit in."""
+    rows = []
+    for i, slot in enumerate(track.clip_slots):
+        if not slot.has_clip:
+            continue
+        clip = slot.clip
+        row = {
+            "scene_index": i,
+            "name": clip.name,
+            "is_audio": clip.is_audio_clip,
+            "is_playing": clip.is_playing,
+            "length": clip.length,
+        }
+        if clip.is_audio_clip:
+            row["gain"] = clip.gain_display_string
+            row["gain_db"] = _db_from_text(clip.gain_display_string)
+        rows.append(row)
+    return rows
+
+
+def _song_files(rf, scene_index):
+    """The audio file behind each audio clip in one scene (song), by track.
+
+    For listening to a song's stems from disk. Kept out of the snapshot: paths
+    are long and the page doesn't need them.
+    """
+    rows = []
+    for i, track in enumerate(rf.song().tracks):
+        slot = track.clip_slots[scene_index]
+        if slot.has_clip and slot.clip.is_audio_clip:
+            rows.append({"track_index": i, "track": track.name, "file_path": slot.clip.file_path})
+    return rows
+
+
+def _meter_row(window, kind, i, track):
+    if not track.has_audio_output:
+        return None
+    heard = window.stats(kind, i)
+    if heard is None:
+        return {"peak": 0.0, "average": 0.0}
+    return {"peak": heard[0], "average": heard[1]}
+
+
+def _routing_now(track, direction):
+    kind = getattr(track, "%s_routing_type" % direction).display_name
+    channel = getattr(track, "%s_routing_channel" % direction).display_name
+    return {"type": kind, "channel": channel}
+
+
+def _strip(song, i, track, is_return, meters):
+    mixer = track.mixer_device
+    row = {
+        "index": i,
+        "name": track.name,
+        "is_return": is_return,
+        "color": track.color,
+        "meter": _meter_row(meters, "return" if is_return else "track", i, track),
+        "volume": _display(mixer.volume),
+        "volume_db": _db_value(mixer.volume),
+        "pan": _display(mixer.panning),
+        "pan_value": mixer.panning.value,
+        "mute": track.mute,
+        "solo": track.solo,
+        "sends": [
+            {"return": r.name, "level": _display(s), "level_db": _db_value(s)}
+            for r, s in zip(song.return_tracks, mixer.sends)
+        ],
+        "devices": [d.name for d in track.devices],
+        "output": _routing_now(track, "output"),
+    }
+    if not is_return:
+        row["is_midi"] = track.has_midi_input
+        row["input"] = _routing_now(track, "input")
+        row["clips"] = _clip_rows(track)
+    return row
+
+
+def _ext_outputs(master):
+    """The interface's output channels ("1/2", "3/4", ...), as the Master sees them.
+
+    A track only lists the channels of its current output type, so a track on
+    Master can't say which Ext. Out channels exist. The Master always goes to
+    Ext. Out, so its list is the whole set, without touching any routing.
+    """
+    try:
+        if master.output_routing_type.display_name != "Ext. Out":
+            return []
+        return [c.display_name for c in master.available_output_routing_channels]
+    except AttributeError:
+        return []
+
+
+def _get_snapshot(rf):
+    """The whole set. Meters are the peak/average since the previous snapshot."""
+    song = rf.song()
+    meters = rf._display_meters
+    master = song.master_track
+    snapshot = {
+        "song": _get_song(rf),
+        "tracks": [_strip(song, i, t, False, meters) for i, t in enumerate(song.tracks)],
+        "returns": [_strip(song, i, t, True, meters) for i, t in enumerate(song.return_tracks)],
+        "master": {
+            "volume": _display(master.mixer_device.volume),
+            "volume_db": _db_value(master.mixer_device.volume),
+            "meter": _meter_row(meters, "master", 0, master),
+        },
+        "scenes": _list_scenes(rf),
+        "locators": _list_locators(rf),
+        "ext_outputs": _ext_outputs(master),
+    }
+    meters.reset()
+    return snapshot
+
+
+def _list_stock_devices(rf):
+    """Stock device names by browser category, as this copy of Live has them."""
+    browser = rf.application().browser
+    found = {}
+    for category in DEVICE_CATEGORIES:
+        names = []
+        level = list(getattr(browser, category).children)
+        for _ in range(DEVICE_SEARCH_DEPTH):
+            names.extend(item.name for item in level if item.is_device)
+            level = [c for item in level if item.is_folder for c in item.children]
+        found[category] = sorted(set(names))
+    return found
+
+
 COMMANDS = {
     "ping": _ping,
     "list_tracks": _list_tracks,
@@ -722,6 +930,8 @@ COMMANDS = {
     "get_meters": _get_meters,
     "import_audio": _import_audio,
     "set_clip_gain": _set_clip_gain,
+    "clip_markers": _clip_markers,
+    "song_files": _song_files,
     "get_song": _get_song,
     "set_tempo": _set_tempo,
     "play": _play,
@@ -736,4 +946,6 @@ COMMANDS = {
     "add_locator": _add_locator,
     "delete_locator": _delete_locator,
     "jump_to_locator": _jump_to_locator,
+    "get_snapshot": _get_snapshot,
+    "list_stock_devices": _list_stock_devices,
 }

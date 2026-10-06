@@ -171,8 +171,11 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 
 ## Constraints
 
-- Python 3.11+. **lxml, pydantic, typer only.** Nothing else without asking;
-  pytest is not yet approved.
+- Python 3.11+. **lxml, pydantic, typer, anthropic only.** Nothing else
+  without asking; pytest is not yet approved (tests use stdlib unittest).
+  `anthropic` is for the chat. The web app itself is stdlib `http.server`
+  plus static files, no framework or build step. OpenCode Go's
+  OpenAI-compatible models go over stdlib `urllib`, not the `openai` package.
 - Stock Ableton devices only. No third-party plugins.
 - **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop.
 - Golden-file tests must run without Ableton installed.
@@ -191,9 +194,29 @@ live_control/
     live_connection.py          LiveConnection: client for RigLink
     stem_level.py               Active RMS and peak of a WAV stem, stdlib only;
                                 drives level matching on `song import`
+    starting_fader.py           Fader for tracks an import creates, so the sum of
+                                every stem doesn't clip
+    timecode.py                 Spots SMPTE/timecode stems, which start muted
+    stereo_pairs.py             Pairs L/R stems so both sides get the same gain
 file_builder/                   Writes a .als with Live closed
     rig_spec.py                 RigSpec / TrackSpec, the contract
     write_als.py                render(spec, template_path) -> bytes
+app/                            Web app: chat + mixer, `uv run python -m app`
+    server.py                   HTTP server and JSON API
+    assistant.py                Claude conversation → proposed actions
+    providers.py                Who answers: Anthropic, or OpenCode Go models
+                                (OpenAI Chat or Anthropic format), and discovery
+    actions.py                  Proposable actions (intent only) and how each runs
+    live.py                     Shared, self-reconnecting RigLink connection
+    audio_files.py              Folder browsing + stdlib WAV/AIFF level measurement
+    room.py                     Week-to-week room memory (~/.holysound/room.json)
+    song_map.py                 Reads a song's stems as text: when each part sounds,
+                                sections, tempo from the click, likely lead vocal
+    folders.py                  Mixer folders (Vocals / Instruments / Click & playback / Other):
+                                sorted by track name, plus moves remembered in ~/.holysound/folders.json
+    fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
+    static/                     The page: HTML/CSS/JS, served as-is
+tests/                          unittest suite; needs neither Live nor an API key
 templates/test.als              Reference Live 12.4.5 set, read-only
 templates/test.reference.xml    Its decompressed XML, for diffing
 templates/probe_noinput.als     Live's own save of a generated set; source of
@@ -229,10 +252,14 @@ output routing, stock effects and their presets (load, list, remove), songs as
 scenes with per-song tempo, Arrangement markers, and `song import` of a stem
 folder with level matching via clip gain.
 
-Missing, in order (detail in `docs/td_next.md`): the conversation layer (nothing
-turns English into a spec or commands yet); record-arm and monitoring; any effect
-parameter control; plugins, User Library presets and rack internals; song-to-song
-transitions; MIDI mapping; clip editing beyond gain; group tracks.
+The web app (`app/`) is the conversation layer. Claude proposes typed actions
+(`app/actions.py`), the volunteer presses Apply, and each action runs through
+RigLink. With Live closed, the `add_track` actions become a `RigSpec` and download
+as a `.als`.
+
+Missing, in order (detail in `docs/td_next.md`): record-arm and monitoring; any
+effect parameter control; plugins, User Library presets and rack internals;
+song-to-song transitions; MIDI mapping; clip editing beyond gain; group tracks.
 
 ## Open questions
 
@@ -242,8 +269,14 @@ transitions; MIDI mapping; clip editing beyond gain; group tracks.
 - **Hardware output routing.** Only `AudioOut/Main` known. A click/pad/guide rig
   is pointless until click reaches the drummer and guide reaches the band. Needs
   one probe.
-- **Should RigLink consume `RigSpec`?** The two backends now speak different
-  vocabularies. Decide before the conversation layer picks one to target.
+- **Should RigLink consume `RigSpec`?** The two backends speak different
+  vocabularies. The app currently targets RigLink through its own actions and
+  only maps `add_track` onto `RigSpec`.
+- **One stem loudness measure.** `app/audio_files.py` (90th percentile of 0.4 s
+  windows) and `live_control/stem_level.py` (active RMS, drives `rig.py song
+  import`) measure differently. Pick one. `app/song_map.py` adds a third use
+  (1 s envelope, "sounding" relative to each stem's own loud level), which only
+  needs relative levels, so it can stay separate.
 
 ## Working notes
 
@@ -257,7 +290,9 @@ transitions; MIDI mapping; clip editing beyond gain; group tracks.
   Live**; the symptom otherwise is `unknown cmd`. `rig.py` and client edits need
   no restart.
 - Stems import unwarped so they stay sample-locked. Song tempo therefore does not
-  stretch them.
+  stretch them. Auto-Warp still moves each clip's start to its guessed first
+  beat (different per stem, up to ~3 s here), so the import resets every clip
+  start to 0. With warping off, clip markers are in seconds.
 - Live reads a `.als` once at open and holds it in memory. Rewriting the file
   underneath a running Live does nothing and gets clobbered on its next save.
   **Never generate over a set that's currently open.**

@@ -8,16 +8,12 @@ mute, solo and sends; route inputs and outputs; load stock effects and their
 presets; add, name, tempo and fire songs (scenes); import a folder of stems;
 add and jump to markers; read output levels.
 
-## 1. Conversation → RigSpec
+## 1. Conversation → RigSpec — done in 1.0.0
 
-The whole product promise is "describe your Sunday, get a session." Nothing
-yet turns plain English into a spec or into RigLink commands. Every capability
-below is only reachable through `rig.py`, which a volunteer will never use.
-
-This is the gap that matters most for the hackathon. Everything else on this
-list makes the session better; this one makes it exist.
-
-==I have my friend working on that part it should be pushed to a pr soon.==
+The web app (`app/`) turns a conversation into intent-only actions that run
+through RigLink on Apply, and into a downloadable `.als` with Live closed.
+What's left of this item is the open question in CLAUDE.md: RigLink still
+doesn't consume `RigSpec`, so the two backends speak different vocabularies.
 
 ## 2. Record-arm and monitoring
 

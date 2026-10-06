@@ -163,6 +163,9 @@ class LiveConnection:
     def set_clip_gain(self, track_index, scene_index, db):
         return self.send("set_clip_gain", track_index=track_index, scene_index=scene_index, db=db)
 
+    def clip_markers(self, scene_index):
+        return self.send("clip_markers", scene_index=scene_index)
+
     def get_song(self):
         return self.send("get_song")
 
@@ -204,3 +207,9 @@ class LiveConnection:
 
     def jump_to_locator(self, locator_index):
         return self.send("jump_to_locator", locator_index=locator_index)
+
+    def get_snapshot(self):
+        return self.send("get_snapshot")
+
+    def list_stock_devices(self):
+        return self.send("list_stock_devices")
