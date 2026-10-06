@@ -352,30 +352,32 @@ svg { width: 1em; height: 1em; }
   display: flex; flex-direction: column; align-items: center; gap: 6px;
 }
 
-/* The edge of each channel: a faint line with a light travelling around it.
-   On hover the light stops and the edge fills with the track's colour. Both
-   layers sit behind the panel, so only the 1px edge (and a soft 2px halo)
-   shows. Adapted from the Aceternity "hover border gradient". */
+/* The edge of each channel is a faint line. While the assistant is changing a
+   channel, a light travels around it; hovering fills the edge with the track's
+   colour. Both layers sit behind the panel, so only the 1px edge and a soft
+   halo show. Adapted from the Aceternity "hover border gradient". */
 @property --orbit { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 @keyframes orbit { to { --orbit: 360deg; } }
 .strip::before, .strip::after {
   content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
   pointer-events: none; filter: blur(2px);
 }
-.strip::before {
+.strip::before { background: var(--line); }
+.strip.ai-active::before {
   background:
-    conic-gradient(from var(--orbit), transparent 0 60%, rgba(255, 255, 255, 0.85) 82%, transparent 100%),
+    conic-gradient(from var(--orbit), transparent 0 40%, var(--accent) 78%, color-mix(in srgb, var(--accent) 60%, white) 92%, transparent 100%),
     linear-gradient(var(--line), var(--line));
-  animation: orbit 3.6s linear infinite;
-  animation-delay: var(--orbit-offset, 0s);
+  animation: orbit 1.5s linear infinite;
 }
+.strip.ai-active { box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 24%, transparent); }
 .strip::after {
   background: linear-gradient(180deg, var(--track-color) 0%, color-mix(in srgb, var(--track-color) 40%, transparent) 100%);
   opacity: 0; transition: opacity 0.5s;
 }
-.strip:hover::before { animation-play-state: paused; }
 .strip:hover::after { opacity: 1; }
-.strip.is-open::before { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .strip.ai-active::before { background: var(--accent); }
+}
 .strip.is-open { width: 268px; }
 .strip.muted-track .pan, .strip.muted-track .fader, .strip.muted-track .strip-name, .strip.muted-track .strip-route { opacity: 0.5; }
 .strip-head { width: 100%; display: flex; align-items: center; justify-content: space-between; min-height: 26px; }

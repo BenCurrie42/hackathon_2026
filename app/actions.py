@@ -113,6 +113,7 @@ class AddTrack(BaseModel):
     def run(self, ex):
         create = "create_midi_track" if self.kind == "midi" else "create_audio_track"
         index = ex.call(create, name=self.name)["index"]
+        ex.touch(self.name)
         ex.tracks_changed()
         target = {"track_index": index, "is_return": False}
         problems = []
@@ -168,7 +169,9 @@ class AddReturn(BaseModel):
         return text
 
     def run(self, ex):
-        index = ex.call("create_return_track", name=self.name)["index"]
+        made = ex.call("create_return_track", name=self.name)
+        index = made["index"]
+        ex.touch(made.get("name") or self.name)
         ex.tracks_changed()
         problems = []
         for device in self.devices:
@@ -190,6 +193,7 @@ class RenameTrack(BaseModel):
     def run(self, ex):
         t = ex.track(self.track)
         ex.call("set_track_name", track_index=t.index, is_return=t.is_return, name=self.new_name)
+        ex.touch(self.new_name)
         ex.tracks_changed()
         return f"Renamed {t.name} to {self.new_name}."
 
@@ -569,9 +573,10 @@ class Target:
 class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
-    def __init__(self, live, files=None):
+    def __init__(self, live, files=None, on_touch=None):
         self._live = live
         self._files = files or {}
+        self._on_touch = on_touch  # called with a track's name whenever an action works on it
         self._tracks = None
         self.detail = None  # extra facts for the assistant from the last action
         self.new_track_fader_db = None  # set when a batch imports audio; see run_all
@@ -592,6 +597,11 @@ class Executor:
 
     def tracks_changed(self):
         self._tracks = None
+
+    def touch(self, name):
+        """Say which track an action is working on, so the page can light it up."""
+        if self._on_touch and name:
+            self._on_touch(name)
 
     def try_step(self, problems, what, cmd, **args):
         try:
@@ -626,6 +636,11 @@ class Executor:
         return self._tracks
 
     def track(self, ref, allow_return=True):
+        target = self._find_track(ref, allow_return)
+        self.touch(target.name)
+        return target
+
+    def _find_track(self, ref, allow_return=True):
         tracks, returns = self._rows()
         ref = ref.strip()
         everything = [Target(t["index"], False, t["name"]) for t in tracks]
@@ -663,9 +678,12 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
-def run_all(live, actions, files=None):
-    """Run actions in order. One failure doesn't stop the rest."""
-    ex = Executor(live, files)
+def run_all(live, actions, files=None, on_touch=None):
+    """Run actions in order. One failure doesn't stop the rest.
+
+    on_touch(name) is called for each track an action works on.
+    """
+    ex = Executor(live, files, on_touch)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
     per_song = {}

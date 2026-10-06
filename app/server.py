@@ -22,6 +22,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -43,6 +44,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 TEMPLATE = ROOT / "templates" / "test.als"
 DEFAULT_PORT = 8765
 KEEP_ALIVE = 15  # seconds between comments on a quiet event stream
+AI_GLOW_SECONDS = 3.0  # how long a track stays lit after the assistant last changed it
 
 # What the mixer panel may do directly, without going through the assistant.
 # Everything here is undoable in Live with Cmd+Z.
@@ -58,6 +60,8 @@ class App:
     def __init__(self, live, conversation, key=None, folders=None):
         self.room = conversation.room
         self.folders = folders or FolderMemory()
+        self.clock = time.monotonic
+        self._touched = {}  # track name (case-folded) -> (lit until, name)
         self.live = live
         self.chat = conversation
         self.key = key  # None: only this computer can connect
@@ -66,6 +70,21 @@ class App:
         self.imports = {}  # imported folder name -> number of files
 
     # -- state ----------------------------------------------------------
+
+    def touch(self, name):
+        """The assistant just changed this track."""
+        self._touched[name.casefold()] = (self.clock() + AI_GLOW_SECONDS, name)
+
+    def activity(self):
+        """Tracks the assistant is changing (or just changed), with how long they stay lit."""
+        now = self.clock()
+        lit = []
+        for key, (until, name) in list(self._touched.items()):
+            if until <= now:
+                self._touched.pop(key, None)
+            else:
+                lit.append({"track": name, "ms": int((until - now) * 1000)})
+        return lit
 
     def with_folders(self, snapshot):
         """The snapshot with each track's mixer folder (instrument family) added."""
@@ -123,6 +142,7 @@ class App:
                 for key, label, colour in FAMILIES
             ],
             "room": self.room.facts() if self.room else [],
+            "activity": self.activity(),
         }
 
     # -- actions --------------------------------------------------------
@@ -161,7 +181,7 @@ class App:
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
-            results = run_all(self.live, p["actions"], self.files)
+            results = run_all(self.live, p["actions"], self.files, on_touch=self.touch)
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):

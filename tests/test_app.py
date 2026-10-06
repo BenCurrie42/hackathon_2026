@@ -484,6 +484,30 @@ class ServerTest(FakeLiveCase):
         self.assertEqual(status, 400)
         self.assertIn("already", body["error"])
 
+    def test_tracks_the_assistant_changes_are_lit_for_a_few_seconds(self):
+        now = [100.0]
+        self.app.clock = lambda: now[0]
+        status, state = self.request("POST", "/api/chat", {"message": "Add a click"})
+        self.assertEqual(state["activity"], [])  # a suggestion nobody applied touches nothing
+
+        pid = state["chat"][-1]["proposal"]["id"]
+        status, state = self.request("POST", f"/api/proposals/{pid}/apply", {})
+        self.assertEqual([a["track"] for a in state["activity"]], ["Click"])
+        self.assertGreater(state["activity"][0]["ms"], 2000)
+
+        now[0] += 1.0
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual([a["track"] for a in state["activity"]], ["Click"])
+        self.assertLess(state["activity"][0]["ms"], 2100)
+
+        now[0] += 10.0
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual(state["activity"], [])
+
+        # Moving a fader by hand isn't the assistant, so it doesn't light anything.
+        self.request("POST", "/api/live", {"cmd": "set_mute", "args": {"track_index": 0, "is_return": False, "on": True}})
+        self.assertEqual(self.request("GET", "/api/state")[1]["activity"], [])
+
     def test_direct_mixer_commands_are_whitelisted(self):
         self.fake.create_audio_track("Vox")
         status, body = self.request("POST", "/api/live", {"cmd": "set_volume", "args": {"track_index": 0, "db": -6}})

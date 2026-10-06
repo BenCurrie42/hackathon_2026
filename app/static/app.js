@@ -68,6 +68,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) poll
 
 function render(next) {
   state = next;
+  noteActivity(next.activity);
   renderLive();
   renderAi();
   renderChat();
@@ -487,6 +488,32 @@ function markdownLite(text) {
   }).join("");
 }
 
+// -- the assistant at work ---------------------------------------------------
+// While the assistant is changing a track, its channel gets a travelling light
+// around the edge. The server says which tracks and for how long (state.activity).
+
+const litUntil = new Map(); // track name (lower case) -> performance.now() when its light goes out
+let litTimer = null;
+
+function noteActivity(activity) {
+  const now = performance.now();
+  for (const { track, ms } of activity || []) litUntil.set(track.toLowerCase(), now + ms);
+}
+
+function paintActivity() {
+  const now = performance.now();
+  let next = Infinity;
+  for (const el of strips.values()) {
+    const until = litUntil.get((el._row?.name || "").toLowerCase());
+    const on = until !== undefined && until > now;
+    el.classList.toggle("ai-active", on);
+    if (on) next = Math.min(next, until);
+  }
+  for (const [key, until] of litUntil) if (until <= now) litUntil.delete(key);
+  clearTimeout(litTimer);
+  if (next !== Infinity) litTimer = setTimeout(paintActivity, next - now + 30);
+}
+
 // -- mixer -------------------------------------------------------------------
 //
 // Strips sit in folders by instrument: Vocals, Drums, Keys and so on. The
@@ -533,6 +560,7 @@ function renderMixer(snap) {
   }
 
   $("#mixer-empty").hidden = snap.tracks.length > 0;
+  paintActivity();
   syncTabsOffset();
 }
 
@@ -707,8 +735,6 @@ function target(el) {
 
 function createStrip() {
   const el = $("#strip-template").content.firstElementChild.cloneNode(true);
-  // Start each channel's travelling light at a different point so they don't move in lockstep.
-  el.style.setProperty("--orbit-offset", -Math.random() * 3.6 + "s");
 
   const name = $(".strip-name", el);
   name.addEventListener("change", () => {
