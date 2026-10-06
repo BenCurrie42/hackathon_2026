@@ -281,12 +281,13 @@ svg { width: 1em; height: 1em; }
 .empty { color: var(--muted); text-align: center; padding: 32px 12px; }
 
 .mixer-tools { display: flex; justify-content: flex-end; margin: -6px 0 4px; }
-.groups { display: flex; flex-flow: row wrap; gap: 16px 22px; align-items: flex-start; }
+/* One row per folder. A row only wraps if a folder has more strips than fit across. */
+.groups { display: flex; flex-direction: column; gap: 14px; }
 
 /* Folders group related strips (by colour) instead of one long flat list.
    Each folder's header sticks under the tab bar while its strips scroll by,
    like a grouped contacts list -- so you always know which folder you're in. */
-.track-group { min-width: 150px; max-width: 100%; }
+.track-group { min-width: 0; }
 
 .group-header {
   position: sticky; top: var(--tabs-h, 48px); z-index: 2;
