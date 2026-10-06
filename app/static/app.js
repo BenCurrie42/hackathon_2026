@@ -227,6 +227,7 @@ function thoughts(text, id) {
 // arrives through /api/state as usual, so on "end" this bubble just goes away.
 
 const TOOL_LABELS = {
+  listen_to_stems: "Listening to the stems…",
   propose_changes: "Writing up the changes…",
   remember: "Saving that for next week…",
 };
@@ -237,6 +238,13 @@ function startReply() {
   const el = document.createElement("div");
   el.className = "msg assistant streaming";
   el.append(thoughts(""), document.createElement("div"), document.createElement("div"));
+  // Opening the thinking while it's written jumps to its newest line; paintReply keeps it there.
+  el.children[0].addEventListener("toggle", (e) => {
+    if (!e.target.open) return;
+    const t = $(".thought-text", e.target);
+    t.scrollTop = t.scrollHeight;
+    e.target.scrollIntoView({ block: "nearest" });
+  });
   el.children[1].className = "reply-text";
   el.children[2].className = "reply-status";
   reply = { el, thinking: "", text: "", tool: null };
@@ -255,7 +263,11 @@ function paintReply() {
     const [think, text, status] = reply.el.children;
     think.hidden = !reply.thinking;
     $("summary", think).textContent = reply.text || reply.tool ? "Thinking" : "Thinking…";
-    $(".thought-text", think).textContent = reply.thinking;
+    // Follow the thinking as it's written, unless the volunteer scrolled up in it to read.
+    const thought = $(".thought-text", think);
+    const following = thought.scrollHeight - thought.scrollTop - thought.clientHeight < 24;
+    thought.textContent = reply.thinking;
+    if (following) thought.scrollTop = thought.scrollHeight;
     text.innerHTML = markdownLite(reply.text);
     text.hidden = !reply.text;
     status.replaceChildren();

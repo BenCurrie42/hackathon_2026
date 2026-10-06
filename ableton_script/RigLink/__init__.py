@@ -794,6 +794,20 @@ def _clip_rows(track):
     return rows
 
 
+def _song_files(rf, scene_index):
+    """The audio file behind each audio clip in one scene (song), by track.
+
+    For listening to a song's stems from disk. Kept out of the snapshot: paths
+    are long and the page doesn't need them.
+    """
+    rows = []
+    for i, track in enumerate(rf.song().tracks):
+        slot = track.clip_slots[scene_index]
+        if slot.has_clip and slot.clip.is_audio_clip:
+            rows.append({"track_index": i, "track": track.name, "file_path": slot.clip.file_path})
+    return rows
+
+
 def _meter_row(window, kind, i, track):
     if not track.has_audio_output:
         return None
@@ -917,6 +931,7 @@ COMMANDS = {
     "import_audio": _import_audio,
     "set_clip_gain": _set_clip_gain,
     "clip_markers": _clip_markers,
+    "song_files": _song_files,
     "get_song": _get_song,
     "set_tempo": _set_tempo,
     "play": _play,

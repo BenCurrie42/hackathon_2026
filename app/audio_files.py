@@ -287,36 +287,106 @@ def _db(linear):
     return 20 * math.log10(linear) if linear > 0 else float("-inf")
 
 
-def _loudness(f, info):
-    channels, rate = info["channels"], info["rate"]
-    if not channels or not rate:
+def _frames(f, info):
+    """How many sample frames the file holds, trusting its size over its header."""
+    if not info["channels"] or not info["rate"]:
         raise AudioFileError("the file doesn't say its format")
-    decode, full_scale = _decoder(info)
-    frame_bytes = channels * info["bits"] // 8
     available = os.fstat(f.fileno()).st_size - info["offset"]
     length = min(info["length"], available) if info["length"] else available
-    frames = length // frame_bytes
-    window_frames = max(1, int(rate * WINDOW_SECONDS))
+    return length // (info["channels"] * info["bits"] // 8)
 
-    peak = 0.0
-    window_db = []
+
+def _windows(f, info, seconds):
+    """The file's samples, decoded, in windows of about this many seconds."""
+    decode, _full_scale = _decoder(info)
+    frame_bytes = info["channels"] * info["bits"] // 8
+    window_frames = max(1, int(info["rate"] * seconds))
     f.seek(info["offset"])
-    remaining = frames
+    remaining = _frames(f, info)
     while remaining > 0:
         take = min(window_frames, remaining)
         raw = f.read(take * frame_bytes)
         if not raw:
             break
         remaining -= take
-        values = decode(raw)
+        yield decode(raw)
+
+
+def _rms(values, full_scale):
+    step = max(1, len(values) // SAMPLES_PER_WINDOW)
+    sample = values[::step]
+    return math.sqrt(sum(map(mul, sample, sample)) / len(sample)) / full_scale
+
+
+def _opened(path):
+    """(file, header info) for a WAV or AIFF, or None if it can't be read."""
+    if path.suffix.lower() not in MEASURABLE:
+        return None
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return None
+    try:
+        info = _wav_header(f) if path.suffix.lower() in (".wav", ".wave") else _aiff_header(f)
+        _decoder(info)  # unsupported formats fail here, before any reading
+        return f, info
+    except (AudioFileError, struct.error, ValueError, OSError):
+        f.close()
+        return None
+
+
+def envelope(path, seconds):
+    """Loudness (dBFS RMS) of each stretch of this many seconds, or None if unreadable."""
+    opened = _opened(Path(path))
+    if opened is None:
+        return None
+    f, info = opened
+    with f:
+        full_scale = _decoder(info)[1]
+        try:
+            return [_db(_rms(v, full_scale)) if v else float("-inf") for v in _windows(f, info, seconds)]
+        except (struct.error, ValueError, OSError):
+            return None
+
+
+ONSET_SECONDS = 0.01
+
+
+def onsets(path):
+    """Times (seconds) where a percussive file, like a click, hits. None if unreadable."""
+    opened = _opened(Path(path))
+    if opened is None:
+        return None
+    f, info = opened
+    with f:
+        try:
+            peaks = [max(max(v), -min(v)) if v else 0 for v in _windows(f, info, ONSET_SECONDS)]
+        except (struct.error, ValueError, OSError):
+            return None
+    if not peaks or not max(peaks):
+        return []
+    threshold = max(peaks) * 0.3
+    hits, last = [], -1.0
+    for i, (before, now) in enumerate(zip([0] + peaks, peaks)):
+        t = i * ONSET_SECONDS
+        if now >= threshold > before and t - last >= 0.1:
+            hits.append(t)
+            last = t
+    return hits
+
+
+def _loudness(f, info):
+    channels, rate = info["channels"], info["rate"]
+    frames = _frames(f, info)
+    _decode, full_scale = _decoder(info)
+
+    peak = 0.0
+    window_db = []
+    for values in _windows(f, info, WINDOW_SECONDS):
         if not values:
             continue
-        loudest = max(max(values), -min(values))
-        peak = max(peak, loudest)
-        step = max(1, len(values) // SAMPLES_PER_WINDOW)
-        sample = values[::step]
-        rms = math.sqrt(sum(map(mul, sample, sample)) / len(sample)) / full_scale
-        window_db.append(_db(rms))
+        peak = max(peak, max(values), -min(values))
+        window_db.append(_db(_rms(values, full_scale)))
 
     peak_db = _db(peak / full_scale)
     sounding = sorted(d for d in window_db if d > SILENT_DB)

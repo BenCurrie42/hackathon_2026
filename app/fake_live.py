@@ -239,10 +239,17 @@ class FakeSet:
             "gain_db": float(gain_db) if gain_db is not None else 0.0,
             "length": seconds * self.tempo / 60.0,
             "loudness": loudness,
+            "file_path": os.path.abspath(file_path),
         }
         track["clips"][scene_index] = clip
         return {"name": clip["name"], "gain": _db_text(clip["gain_db"]), "length": clip["length"],
                 "warping": False, "looping": False}
+
+    def song_files(self, scene_index):
+        if not 0 <= scene_index < len(self.scenes):
+            raise IndexError("list index out of range")
+        return [{"track_index": i, "track": t["name"], "file_path": t["clips"][scene_index]["file_path"]}
+                for i, t in enumerate(self.tracks) if scene_index in t["clips"]]
 
     def set_clip_gain(self, track_index, scene_index, db):
         clip = self._track(track_index)["clips"].get(scene_index)

@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app import audio_files
-from app.actions import Listen, run_all, to_rigspec
+from app.actions import ActionFailed, Executor, Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
 from app.folders import FAMILIES, FolderMemory
@@ -57,7 +57,7 @@ DIRECT_COMMANDS = {
 
 
 class App:
-    def __init__(self, live, conversation, key=None, folders=None, demo=False):
+    def __init__(self, live, conversation, key=None, folders=None, demo=False, imports_path=None):
         self.room = conversation.room
         self.folders = folders or FolderMemory()
         self.demo = demo  # True when the "Live" behind this is the built-in pretend one
@@ -67,8 +67,13 @@ class App:
         self.chat = conversation
         self.key = key  # None: only this computer can connect
         self._apply_lock = threading.Lock()  # a laptop and a phone may both press Apply
-        self.files = {}    # imported file id -> absolute path; import_audio may use only these
+        # Imported file id -> absolute path; import_audio and listen_to_stems may use only these.
+        self.files = conversation.files
         self.imports = {}  # imported folder name -> number of files
+        # Where imports are kept between runs, so last week's folder needn't be imported again.
+        self.imports_path = Path(imports_path) if imports_path else None
+        self._load_imports()
+        conversation.song_stems = self.song_stems
 
     # -- state ----------------------------------------------------------
 
@@ -157,6 +162,41 @@ class App:
     def send_message(self, text, attachment=None):
         self.chat.send(text, self.notes(), attachment)
 
+    def song_stems(self, song):
+        """[(track name, file path)] for each audio clip in a song of the open set."""
+        try:
+            ex = Executor(self.live)
+            scene = ex.song(song)
+            rows = self.live.call("song_files", scene_index=scene["index"])
+        except ActionFailed as e:
+            raise LookupError(str(e)) from e
+        except LiveUnavailable as e:
+            raise LookupError(f"{e} Songs in the set can only be heard with Live open.") from e
+        except RigLinkError as e:
+            if "unknown cmd" in str(e):
+                raise LookupError("Live is running an older RigLink. Quit and reopen Live, then try again.") from e
+            raise LookupError(f"Live couldn't say which files are in that song ({e}).") from e
+        return [(r["track"], r["file_path"]) for r in rows if r.get("file_path")]
+
+    def _load_imports(self):
+        if self.imports_path is None:
+            return
+        try:
+            data = json.loads(self.imports_path.read_text())
+            self.files.update({str(k): str(v) for k, v in data.get("files", {}).items()})
+            self.imports.update({str(k): int(v) for k, v in data.get("folders", {}).items()})
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass  # nothing saved yet, or unreadable: start fresh
+
+    def _save_imports(self):
+        if self.imports_path is None:
+            return
+        try:
+            self.imports_path.parent.mkdir(parents=True, exist_ok=True)
+            self.imports_path.write_text(json.dumps({"files": self.files, "folders": self.imports}, indent=1))
+        except OSError:
+            pass  # remembering imports is a convenience; the import itself worked
+
     def import_folder(self, path, note=""):
         """Measure every audio file in a folder and hand the list to the assistant."""
         try:
@@ -171,6 +211,7 @@ class App:
             lines.append(f"(Only the first {audio_files.MAX_FILES} files are listed.)")
         self.files.update(dict(found))
         self.imports[folder.name] = len(found)
+        self._save_imports()
         attachment = (
             f'<imported_folder name="{folder.name}" files="{len(found)}">\n'
             + "\n".join(lines) + "\n</imported_folder>"
@@ -183,7 +224,8 @@ class App:
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
-            results = run_all(self.live, p["actions"], self.files, on_touch=self.touch)
+            results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
+                              folders=self.folders)
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -506,7 +548,9 @@ def main(argv=None):
         live_port = fake_server.server_address[1]
 
     key = secrets.token_urlsafe(9) if args.lan else None
-    app = App(LiveLink(port=live_port), Conversation(room=RoomMemory()), key=key, demo=args.fake_live)
+    room = RoomMemory()
+    app = App(LiveLink(port=live_port), Conversation(room=room), key=key, demo=args.fake_live,
+              imports_path=room.path.with_name("imports.json"))
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), make_handler(app))
     server.daemon_threads = True

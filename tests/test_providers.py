@@ -103,7 +103,7 @@ class ChatTranslationTest(unittest.TestCase):
         body = opener.sent()
         self.assertEqual(body["model"], "kimi-k3")
         self.assertEqual((body["tool_choice"], body["parallel_tool_calls"]), ("auto", False))
-        self.assertEqual([t["function"]["name"] for t in body["tools"]], ["propose_changes", "remember"])
+        self.assertEqual([t["function"]["name"] for t in body["tools"]], ["propose_changes", "listen_to_stems", "remember"])
         self.assertEqual(body["tools"][0]["type"], "function")
         self.assertIn("actions", body["tools"][0]["function"]["parameters"]["properties"])
         self.assertEqual(body["messages"], [

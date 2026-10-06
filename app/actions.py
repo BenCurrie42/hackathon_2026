@@ -19,6 +19,7 @@ from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from app.folders import FAMILIES, KEYS
 from app.live import LiveUnavailable
 from live_control.starting_fader import starting_fader_db
 from live_control.timecode import is_timecode
@@ -27,6 +28,7 @@ from live_control.live_connection import RigLinkError
 from file_builder.rig_spec import RigSpec, TrackSpec
 
 ColorName = Literal[tuple(TRACK_COLORS)]
+FolderKey = Literal[tuple(KEYS)]
 
 # How long to let a launched scene settle (launch quantisation) before measuring.
 LISTEN_SETTLE_SECONDS = 1.0
@@ -193,6 +195,8 @@ class RenameTrack(BaseModel):
     def run(self, ex):
         t = ex.track(self.track)
         ex.call("set_track_name", track_index=t.index, is_return=t.is_return, name=self.new_name)
+        if ex.folders is not None:
+            ex.folders.rename(t.name, self.new_name)
         ex.touch(self.new_name)
         ex.tracks_changed()
         return f"Renamed {t.name} to {self.new_name}."
@@ -465,6 +469,32 @@ class SetColor(BaseModel):
         return f"{t.name} is {self.color} now."
 
 
+class MoveToFolder(BaseModel):
+    action: Literal["move_to_folder"]
+    track: TrackRef = Field(description="A track (not a return).")
+    folder: FolderKey = Field(description=(
+        'Mixer folder: "vocals", "instruments" (drums, bass, guitars, keys, pads), '
+        '"playback" (click, guide, stems, timecode) or "other".'))
+
+    def describe(self):
+        return f"Move “{self.track}” to the {_folder_label(self.folder)} folder"
+
+    def run(self, ex):
+        if ex.folders is None:
+            raise ActionFailed("Folders aren't available here.")
+        t = ex.track(self.track, allow_return=False)
+        ex.folders.move(t.name, self.folder)
+        # Live can't show folders; the folder's colour is how it shows up there.
+        colour = next(c for key, _label, c in FAMILIES if key == self.folder)
+        problems = []
+        ex.try_step(problems, f"colour it {colour} in Live", "set_track_color",
+                    track_index=t.index, is_return=False, rgb=TRACK_COLORS[colour])
+        done = f"Moved {t.name} to {_folder_label(self.folder)}, {colour} in Live."
+        if problems:
+            return done + " But " + "; ".join(problems) + "."
+        return done
+
+
 class ImportAudio(BaseModel):
     action: Literal["import_audio"]
     track: TrackRef = Field(description="An audio track. Create it first in the same batch if needed.")
@@ -550,7 +580,7 @@ class Listen(BaseModel):
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    DeleteSong, StartSong, Transport, SetColor, ImportAudio, SetClipGain, Listen,
+    DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportAudio, SetClipGain, Listen,
 ]
 
 
@@ -573,9 +603,10 @@ class Target:
 class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
-    def __init__(self, live, files=None, on_touch=None):
+    def __init__(self, live, files=None, on_touch=None, folders=None):
         self._live = live
         self._files = files or {}
+        self.folders = folders  # the mixer's FolderMemory, or None where there is no mixer
         self._on_touch = on_touch  # called with a track's name whenever an action works on it
         self._tracks = None
         self.detail = None  # extra facts for the assistant from the last action
@@ -678,12 +709,13 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
-def run_all(live, actions, files=None, on_touch=None):
+def run_all(live, actions, files=None, on_touch=None, folders=None):
     """Run actions in order. One failure doesn't stop the rest.
 
-    on_touch(name) is called for each track an action works on.
+    on_touch(name) is called for each track an action works on. folders is the
+    mixer's FolderMemory, for move_to_folder and renames.
     """
-    ex = Executor(live, files, on_touch)
+    ex = Executor(live, files, on_touch, folders)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
     per_song = {}
@@ -764,6 +796,10 @@ def to_rigspec(actions):
 
 
 # -- wording ------------------------------------------------------------------
+
+
+def _folder_label(key):
+    return next(label for k, label, _colour in FAMILIES if k == key)
 
 
 def _db(db):

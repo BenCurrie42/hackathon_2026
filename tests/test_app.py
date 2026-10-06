@@ -6,6 +6,7 @@ Needs neither Ableton nor an API key. unittest rather than pytest because
 pytest isn't an approved dependency yet (CLAUDE.md).
 """
 
+import array
 import copy
 import http.client
 import http.client as http_client
@@ -21,10 +22,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app import audio_files, fake_live
+from app import audio_files, fake_live, song_map
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.folders import FolderMemory, classify
+from pydantic import ValidationError
+from rig import TRACK_COLORS
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
 from app.server import App, make_handler
@@ -430,6 +433,29 @@ class ServerTest(FakeLiveCase):
         status, state = self.request("POST", "/api/track-folder", {"track": "Pad", "folder": None})
         self.assertEqual(self.folder_of(state, "Pad"), "instruments")  # back to sorting by name
 
+    def test_assistant_moves_a_track_to_a_folder_and_colours_it_in_live(self):
+        self.live.call("create_audio_track", name="Mystery")
+        actions = Proposal.model_validate({"actions": [
+            {"action": "move_to_folder", "track": "Mystery", "folder": "playback"},
+            {"action": "rename_track", "track": "Mystery", "new_name": "Loop"},
+        ]}).actions
+        results = run_all(self.live, actions, folders=self.folders)
+        self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
+        self.assertEqual(results[0]["text"], "Moved Mystery to Click & playback, teal in Live.")
+        state = self.request("GET", "/api/state")[1]
+        self.assertEqual(self.folder_of(state, "Loop"), "playback")  # kept through the rename
+        loop = next(t for t in state["live"]["snapshot"]["tracks"] if t["name"] == "Loop")
+        self.assertEqual(loop["color"], TRACK_COLORS["teal"])
+        self.assertIn("Loop | folder playback | colour teal", self.app.notes())
+
+    def test_move_to_folder_needs_a_mixer_and_a_real_folder(self):
+        self.live.call("create_audio_track", name="Kick")
+        move = Proposal.model_validate({"actions": [
+            {"action": "move_to_folder", "track": "Kick", "folder": "vocals"}]}).actions
+        self.assertIn("Folders aren't available", run_all(self.live, move)[0]["text"])
+        with self.assertRaises(ValidationError):
+            Proposal.model_validate({"actions": [{"action": "move_to_folder", "track": "Kick", "folder": "brass"}]})
+
     def test_a_folder_that_does_not_exist_is_refused(self):
         status, data = self.request("POST", "/api/track-folder", {"track": "Kick", "folder": "brass"})
         self.assertEqual(status, 400)
@@ -580,6 +606,101 @@ class StemFolderCase(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+
+def write_song_stem(path, seconds, sounding=(), clicks_per_second=0, rate=8000):
+    """A mono 16-bit stem: a tone during each (start, end) in sounding, else silence."""
+    frames = array.array("h", bytes(2 * seconds * rate))
+    for start, end in sounding:
+        for i in range(int(start * rate), int(end * rate)):
+            frames[i] = int(8000 * math.sin(2 * math.pi * 220 * i / rate))
+    if clicks_per_second:
+        for n in range(int(seconds * clicks_per_second)):
+            first = int(n * rate / clicks_per_second)
+            for i in range(first, first + rate // 100):
+                frames[i] = 20000
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames.tobytes())
+
+
+class ListenToStemsTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        song = Path(self._tmp.name) / "Way Maker"
+        write_song_stem(song / "Click.wav", 60, clicks_per_second=2)  # 120 BPM
+        write_song_stem(song / "Keys.wav", 60, [(0, 60)])
+        write_song_stem(song / "Lead Vox.wav", 60, [(8, 56)])
+        write_song_stem(song / "BGV.wav", 60, [(20, 32), (40, 52)])
+        self.files = {f"Sunday Stems/Way Maker/{p.name}": str(p) for p in song.iterdir()}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_report_names_parts_sections_tempo_and_lead(self):
+        report = song_map.listen(sorted((Path(k).stem, v) for k, v in self.files.items()))
+        self.assertIn("Tempo from the click: about 120 BPM.", report)
+        self.assertIn("  Lead Vox: 0:08-0:56", report)
+        self.assertIn("  BGV: 0:20-0:32, 0:40-0:52", report)
+        self.assertIn("0:20-0:32  in: BGV", report)
+        self.assertIn("Probably the lead vocal: Lead Vox", report)
+        self.assertNotIn("in: Click", report)  # the click isn't part of the arrangement
+
+    def test_tool_runs_inside_the_turn_with_a_chat_note(self):
+        claude = ScriptedClaude(
+            reply(Block(type="tool_use", id="tu_1", name="listen_to_stems",
+                        input={"files": ["Sunday Stems/Way Maker"]}), stop="tool_use"),
+            reply(text("Lead Vox is the lead; the BGVs come in on the choruses.")),
+        )
+        chat = Conversation(client_factory=lambda: claude)
+        chat.files.update(self.files)
+        shown = chat.send("Which one is the lead?", "notes")
+        self.assertEqual([e["role"] for e in shown], ["user", "heard", "assistant"])
+        self.assertEqual(shown[1]["text"], "Listened to 4 stems")
+        result = claude.requests[1]["messages"][-1]["content"][0]
+        self.assertEqual(result["tool_use_id"], "tu_1")
+        self.assertIn("Probably the lead vocal: Lead Vox", result["content"])
+
+    def test_listens_to_a_song_already_in_the_set(self):
+        server, fake = fake_live.serve(port=0, latency=0)
+        live = LiveLink(port=server.server_address[1])
+        try:
+            fake.set_scene(0, name="Way Maker")
+            for i, (fid, path) in enumerate(sorted(self.files.items())):
+                fake.create_audio_track(Path(fid).stem + " Track")
+                fake.import_audio(i, path, 0)
+            app = App(live, Conversation(client_factory=lambda: None))
+            outcome, note = app.chat._listen({"song": "way maker"})
+            self.assertEqual(note, "Listened to 4 stems")
+            self.assertIn("Probably the lead vocal: Lead Vox Track", outcome)
+            outcome, note = app.chat._listen({"song": "Amazing Grace"})
+            self.assertIn("There's no song called Amazing Grace", outcome)
+            self.assertIsNone(note)
+        finally:
+            live.close()
+            server.shutdown()
+            server.server_close()
+
+    def test_imports_are_remembered_between_runs(self):
+        saved = Path(self._tmp.name) / "imports.json"
+        first = App(mock.Mock(), Conversation(client_factory=lambda: None), imports_path=saved)
+        first.files.update(self.files)
+        first.imports["Sunday Stems"] = 4
+        first._save_imports()
+        again = App(mock.Mock(), Conversation(client_factory=lambda: None), imports_path=saved)
+        self.assertEqual(again.files, self.files)
+        self.assertEqual(again.imports, {"Sunday Stems": 4})
+        outcome, _note = again.chat._listen({"files": ["Sunday Stems/Way Maker"]})
+        self.assertIn("Probably the lead vocal: Lead Vox", outcome)
+
+    def test_only_imported_files_can_be_heard(self):
+        chat = Conversation(client_factory=lambda: None)
+        outcome, note = chat._listen({"files": ["/etc/passwd"]})
+        self.assertIn("No imported files match", outcome)
+        self.assertIsNone(note)
 
 
 class StartingFaderTest(unittest.TestCase):
@@ -860,7 +981,7 @@ class RoomMemoryTest(unittest.TestCase):
         result = claude.requests[1]["messages"][-1]["content"][0]
         self.assertEqual((result["type"], result["tool_use_id"]), ("tool_result", "tu_mem"))
         self.assertIn("#1. Lead vocal is on input 2.", claude.requests[0]["messages"][0]["content"][-1]["text"])
-        self.assertEqual([t["name"] for t in claude.requests[0]["tools"]], ["propose_changes", "remember"])
+        self.assertEqual([t["name"] for t in claude.requests[0]["tools"]], ["propose_changes", "listen_to_stems", "remember"])
 
     def test_giving_up_leaves_history_valid(self):
         bad = {"action": "set_volume", "track": "Vox", "db": 99}

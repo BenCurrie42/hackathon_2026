@@ -14,9 +14,11 @@ import itertools
 import re
 import threading
 import uuid
+from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app import song_map
 from app.actions import Proposal, is_audible, is_destructive
 from app.providers import (
     AnthropicProvider,
@@ -82,8 +84,8 @@ pair. Playback tracks have no input.
 16. Songs are Live scenes, one per song, with that song's tempo. Shared reverbs and delays \
 are return tracks fed with set_send.
 17. Refer to tracks by exact name; names must be unique.
-18. You can't change effect settings, group or reorder tracks, delete clips, or move the \
-Master fader. Say so plainly if asked.
+18. You can't change effect settings, group or reorder tracks in Live, delete clips, or move \
+the Master fader. Say so plainly if asked.
 19. Use only effect names from the stock device list. Leave presets out unless named.
 20. Meter readings are 0-1 after the fader. Compare tracks with each other; never call a \
 reading dB.
@@ -109,8 +111,9 @@ Mute crowd and room stems for live use.
 28. Stereo pairs (L/R): pan -1 and 1, same clip gain and fader on both.
 29. Vocals on top: lead, then BGVs, then pads and keys. One source owns the low end: with a \
 live bassist, lower or mute Bass and Sub stems.
-30. Colour related tracks alike: drums and bass red or orange, keys and pads blue or teal, \
-guitars green, vocals purple or pink, click and guide grey. Colours: \
+30. The mixer sorts tracks into folders (Vocals, Instruments, Click & playback, Other) by \
+name; the notes show each track's folder. If one is in the wrong folder, move_to_folder it. \
+That also gives it the folder's colour in Live, so don't set_color it too. Colours: \
 """ + ", ".join(TRACK_COLORS) + """.
 
 ## Remembering their church
@@ -123,6 +126,18 @@ instead of asking again.
 33. Delete only when clearly asked.
 34. listen, start_song and transport make sound in the room. Say so, and only during setup, \
 never during a service.
+
+## Listening to stems
+35. listen_to_stems reads one song's stem files (a song in the set, or an imported folder's \
+files) and tells you when each part plays, \
+where the sections change, the tempo from the click and which vocal is probably the lead. It \
+plays nothing aloud and needs no Apply. Use it when you need to understand a song: lead vs \
+backing vocals, what to mute for a live band, which part is the chorus. Call it once per song.
+36. Lead vocals sing through verses and choruses; backing vocals and harmonies mostly come in \
+on choruses and bridges, so where they enter is usually a chorus. A section where most parts \
+drop out is often a verse or a breakdown.
+37. Tell the volunteer what you heard in a sentence or two ("Vox 1 is the lead; the BGVs only \
+come in on the choruses at 0:48 and 2:10"). Call it a guess when file names don't settle it.
 """
 
 
@@ -136,6 +151,16 @@ class Remember(BaseModel):
         "Numbers (#) of remembered facts that are no longer true."))
 
 
+class ListenToStems(BaseModel):
+    """What the listen_to_stems tool takes: a song in the set, or imported files."""
+
+    song: str | None = Field(default=None, description=(
+        "A song in the open Live set, by name or number: listens to the audio clips in it."))
+    files: list[str] = Field(default_factory=list, max_length=64, description=(
+        "Or, for stems not in the set yet: one song's files exactly as listed in an imported "
+        "folder, or that song's subfolder (e.g. 'Sunday Stems/Way Maker') for every file in it."))
+
+
 def _tools():
     return [
         {
@@ -145,6 +170,15 @@ def _tools():
                 "and applies it with one button. Include every change for this request, in order."
             ),
             "input_schema": _inline_refs(Proposal.model_json_schema()),
+        },
+        {
+            "name": "listen_to_stems",
+            "description": (
+                "Listen to one song's stems: when each part sounds, where sections change, tempo "
+                "from the click, and the likely lead vocal. Give a song in the set, or an imported "
+                "song's files. Reads the audio files; nothing plays aloud."
+            ),
+            "input_schema": _inline_refs(ListenToStems.model_json_schema()),
         },
         {
             "name": "remember",
@@ -235,6 +269,10 @@ class Conversation:
         self._client = None
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
+        self.files = {}  # imported file id -> path; listen_to_stems may read only these
+        # song name or number -> [(track name, file path)] for a song in the open set.
+        # Set by the app, which can reach Live; raises LookupError with a sentence.
+        self.song_stems = None
         self.busy = False
         self.feed = ReplyFeed()
         self.setup_error = None  # set when a request shows the key is missing or wrong
@@ -375,6 +413,11 @@ class Conversation:
                         if note:
                             shown.append(self._entry(role="note", text=note))
                         result = {"type": "tool_result", "tool_use_id": c["id"], "content": outcome}
+                    elif c["name"] == "listen_to_stems":
+                        outcome, note = self._listen(c["input"])
+                        if note:
+                            shown.append(self._entry(role="heard", text=note))
+                        result = {"type": "tool_result", "tool_use_id": c["id"], "content": outcome}
                     elif c["name"] != "propose_changes":
                         result = _error_result(c, f"There's no tool called {c['name']}.")
                     elif proposal_call is not None or invalid is not None:
@@ -446,6 +489,40 @@ class Conversation:
         outcome = (f"Saved {len(added)} fact(s), forgot {len(removed)}. "
                    "Now answer the volunteer.") if parts else "Nothing new to save."
         return outcome, "\n".join(parts) or None
+
+    def _listen(self, data):
+        """Run the listen_to_stems tool. Returns (tool result text, note for the chat or None)."""
+        try:
+            request = ListenToStems.model_validate(data)
+        except ValidationError as e:
+            return f"Nothing listened to; fix these and try again:\n{_errors(e)}", None
+        stems, missing = [], []
+        if request.song:
+            if self.song_stems is None:
+                return "Songs in the set can't be listened to here; give imported files instead.", None
+            try:
+                stems = self.song_stems(request.song)
+            except LookupError as e:
+                return str(e), None
+            if not stems:
+                return f"{request.song} has no audio clips to listen to.", None
+        for wanted in request.files:
+            key = wanted.strip().strip("/").casefold()
+            found = [(Path(fid).stem, path) for fid, path in self.files.items()
+                     if fid.casefold() == key or fid.casefold().startswith(key + "/")]
+            if found:
+                stems.extend(f for f in found if f not in stems)
+            else:
+                missing.append(wanted)
+        if not stems:
+            if not request.files:
+                return "Say which song to listen to, or which imported files.", None
+            known = "none imported yet" if not self.files else "use names from the imported folder"
+            return f"No imported files match those names ({known}).", None
+        report = song_map.listen(stems)
+        if missing:
+            report += "\nNot found among imported files: " + ", ".join(missing)
+        return report, f"Listened to {len(stems)} stem{'s' if len(stems) != 1 else ''}"
 
     def _rewind(self, mark, reopen):
         """Forget a turn that never got an answer, so the history stays valid."""
@@ -623,6 +700,8 @@ def color_name(rgb):
 
 def _strip_line(t, scene_names=None):
     parts = [t["name"]]
+    if t.get("folder"):
+        parts.append(f"folder {t['folder']}")
     if t.get("color") is not None:
         parts.append(f"colour {color_name(t['color'])}")
     if not t["is_return"]:
