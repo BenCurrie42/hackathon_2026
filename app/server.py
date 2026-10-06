@@ -33,6 +33,7 @@ from app import audio_files
 from app.actions import Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
+from app.folders import FAMILIES, FolderMemory
 from app.room import RoomMemory
 from rig import TRACK_COLORS
 from live_control.live_connection import RigLinkError
@@ -54,8 +55,9 @@ DIRECT_COMMANDS = {
 
 
 class App:
-    def __init__(self, live, conversation, key=None):
+    def __init__(self, live, conversation, key=None, folders=None):
         self.room = conversation.room
+        self.folders = folders or FolderMemory()
         self.live = live
         self.chat = conversation
         self.key = key  # None: only this computer can connect
@@ -65,13 +67,29 @@ class App:
 
     # -- state ----------------------------------------------------------
 
+    def with_folders(self, snapshot):
+        """The snapshot with each track's mixer folder (instrument family) added."""
+        if not snapshot:
+            return snapshot
+        tracks = [dict(t, folder=self.folders.folder_for(t["name"])) for t in snapshot["tracks"]]
+        return dict(snapshot, tracks=tracks)
+
     def live_state(self):
         try:
-            return {"connected": True, "snapshot": self.live.snapshot(), "message": None}
+            return {"connected": True, "snapshot": self.with_folders(self.live.snapshot()), "message": None}
         except LiveUnavailable as e:
             return {"connected": False, "snapshot": None, "message": str(e)}
         except RigLinkError as e:
             return {"connected": False, "snapshot": None, "message": f"Live reported a problem: {e}"}
+
+    def track_name(self, args):
+        """The current name of the track a direct command points at, if it has one."""
+        try:
+            snap = self.live.snapshot()
+            rows = snap["returns"] if args.get("is_return") else snap["tracks"]
+            return rows[int(args.get("track_index"))]["name"]
+        except (LiveUnavailable, RigLinkError, KeyError, IndexError, TypeError, ValueError):
+            return None
 
     def ai_state(self):
         try:
@@ -100,6 +118,10 @@ class App:
             "busy": self.chat.busy,
             "usage": self.chat.usage,
             "colors": {name: f"#{rgb:06x}" for name, rgb in TRACK_COLORS.items()},
+            "folders": [
+                {"key": key, "label": label, "color": f"#{TRACK_COLORS[colour]:06x}"}
+                for key, label, colour in FAMILIES
+            ],
             "room": self.room.facts() if self.room else [],
         }
 
@@ -346,6 +368,15 @@ def make_handler(app):
                     if body.get("remove") is not None:
                         app.room.remove([int(body["remove"])])
                     return self._json(app.state())
+                if path == "/api/track-folder":
+                    track = str(body.get("track", "")).strip()
+                    if not track:
+                        raise UserError("Say which track to move.")
+                    try:
+                        app.folders.move(track, body.get("folder"))
+                    except ValueError as e:
+                        raise UserError(str(e))
+                    return self._json(app.state())
                 if path == "/api/reset":
                     app.chat.reset()
                     return self._json(app.state())
@@ -364,7 +395,10 @@ def make_handler(app):
                     args = body.get("args") or {}
                     if not isinstance(args, dict):
                         raise UserError("The page sent something the app couldn't read.")
+                    old_name = app.track_name(args) if cmd == "set_track_name" else None
                     result = app.live.call(cmd, **args)
+                    if old_name and args.get("name"):
+                        app.folders.rename(old_name, str(args["name"]))
                     return self._json({"result": result, "live": app.live_state()})
                 return self._error("Not found.", HTTPStatus.NOT_FOUND)
             except UserError as e:

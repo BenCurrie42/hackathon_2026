@@ -24,6 +24,7 @@ from unittest import mock
 from app import audio_files, fake_live
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
+from app.folders import FolderMemory, classify
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
 from app.server import App, make_handler
@@ -386,7 +387,10 @@ class ServerTest(FakeLiveCase):
                 {"action": "add_track", "name": "Click", "output": {"destination": "Ext. Out", "channel": "3/4"}},
             ])),
         )
-        self.app = App(self.live, Conversation(client_factory=lambda: self.claude))
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.folders = FolderMemory(Path(self.home.name) / "folders.json")
+        self.app = App(self.live, Conversation(client_factory=lambda: self.claude), folders=self.folders)
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
 
@@ -394,6 +398,44 @@ class ServerTest(FakeLiveCase):
         self.http.shutdown()
         self.http.server_close()
         super().tearDown()
+
+    def folder_of(self, state, name):
+        return next(t["folder"] for t in state["live"]["snapshot"]["tracks"] if t["name"] == name)
+
+    def test_mixer_groups_tracks_by_instrument_and_remembers_a_move(self):
+        for name in ("Lead Vocal", "Kick", "Keys", "Click", "Acoustic DI", "Bass DI", "Mystery"):
+            self.live.call("create_audio_track", name=name)
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual([f["key"] for f in state["folders"]],
+                         ["vocals", "instruments", "playback", "other"])
+        self.assertEqual({n: self.folder_of(state, n) for n in
+                          ("Lead Vocal", "Kick", "Keys", "Click", "Acoustic DI", "Bass DI", "Mystery")},
+                         {"Lead Vocal": "vocals", "Kick": "instruments", "Keys": "instruments", "Click": "playback",
+                          "Acoustic DI": "instruments", "Bass DI": "instruments", "Mystery": "other"})
+
+        status, state = self.request("POST", "/api/track-folder", {"track": "Mystery", "folder": "vocals"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.folder_of(state, "Mystery"), "vocals")
+        self.assertEqual(self.folder_of(self.request("GET", "/api/state")[1], "Mystery"), "vocals")
+        # A new run of the app reads the same choice from disk.
+        self.assertEqual(FolderMemory(self.folders.path).folder_for("Mystery"), "vocals")
+
+        # Renaming over the direct mixer route keeps the track in its folder.
+        index = next(i for i, t in enumerate(state["live"]["snapshot"]["tracks"]) if t["name"] == "Mystery")
+        status, data = self.request("POST", "/api/live", {"cmd": "set_track_name",
+                                    "args": {"track_index": index, "is_return": False, "name": "Pad"}})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.folder_of({"live": data["live"]}, "Pad"), "vocals")
+
+        status, state = self.request("POST", "/api/track-folder", {"track": "Pad", "folder": None})
+        self.assertEqual(self.folder_of(state, "Pad"), "instruments")  # back to sorting by name
+
+    def test_a_folder_that_does_not_exist_is_refused(self):
+        status, data = self.request("POST", "/api/track-folder", {"track": "Kick", "folder": "brass"})
+        self.assertEqual(status, 400)
+        self.assertIn("no folder", data["error"])
+        status, _ = self.request("POST", "/api/track-folder", {"track": "", "folder": "vocals"})
+        self.assertEqual(status, 400)
 
     def test_events_stream_the_reply_to_open_pages(self):
         conn = http.client.HTTPConnection(*self.http.server_address, timeout=5)
@@ -711,6 +753,43 @@ class ImportServerTest(StemFolderCase):
         with self.assertRaises(UserError) as ctx:
             self.app.import_folder(str(empty))
         self.assertIn("no audio", str(ctx.exception))
+
+
+class FolderTest(unittest.TestCase):
+    def test_names_sort_into_instrument_folders(self):
+        cases = {
+            "Lead Vocal": "vocals", "BGV 2": "vocals", "Choir": "vocals", "Pastor Mic": "vocals",
+            "Kick": "instruments", "Snare Top": "instruments", "OH L": "instruments", "Cajon": "instruments",
+            "Bass": "instruments", "Bass DI": "instruments",
+            "Acoustic Guitar": "instruments", "EG 1": "instruments",
+            "Keys": "instruments", "Piano": "instruments", "Pad": "instruments", "Synth Lead": "instruments",
+            "Click": "playback", "Guide": "playback", "Backing Track": "playback", "Loops": "playback",
+            "Kick Drum Bass": "instruments", "Something Else": "other", "": "other",
+        }
+        for name, folder in cases.items():
+            self.assertEqual(classify(name), folder, name)
+
+    def test_a_move_beats_the_name_and_none_goes_back(self):
+        with tempfile.TemporaryDirectory() as home:
+            memory = FolderMemory(Path(home) / "folders.json")
+            self.assertEqual(memory.folder_for("Kick"), "instruments")
+            memory.move("kick", "other")
+            self.assertEqual(memory.folder_for("Kick"), "other")  # not case sensitive
+            memory.rename("Kick", "Kick In")
+            self.assertEqual(memory.folder_for("Kick In"), "other")
+            self.assertEqual(memory.folder_for("Kick"), "instruments")
+            memory.move("Kick In", None)
+            self.assertEqual(memory.folder_for("Kick In"), "instruments")
+            with self.assertRaises(ValueError):
+                memory.move("Kick", "brass")
+
+    def test_a_broken_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "folders.json"
+            path.write_text("{not json")
+            self.assertEqual(FolderMemory(path).folder_for("Keys"), "instruments")
+            path.write_text(json.dumps({"moved": {"keys": "brass"}}))
+            self.assertEqual(FolderMemory(path).folder_for("Keys"), "instruments")
 
 
 class RoomMemoryTest(unittest.TestCase):

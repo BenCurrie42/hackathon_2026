@@ -209,6 +209,8 @@ app/                            Web app: chat + mixer, `uv run python -m app`
     live.py                     Shared, self-reconnecting RigLink connection
     audio_files.py              Folder browsing + stdlib WAV/AIFF level measurement
     room.py                     Week-to-week room memory (~/.holysound/room.json)
+    folders.py                  Mixer folders (Vocals / Instruments / Click & playback / Other):
+                                sorted by track name, plus moves remembered in ~/.holysound/folders.json
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
     static/                     The page: HTML/CSS/JS, served as-is
 tests/                          unittest suite; needs neither Live nor an API key

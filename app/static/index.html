@@ -77,9 +77,10 @@
         <p class="muted">You can still chat and plan. New tracks can be downloaded as a session file.</p>
       </div>
       <div class="tab-panel" id="panel-mixer">
-        <div class="strips" id="strips"></div>
-        <h3 class="section-label" id="returns-label" hidden>Shared effects</h3>
-        <div class="strips" id="returns"></div>
+        <div class="mixer-tools">
+          <button class="link-btn" id="match-colors" type="button" title="Live can't show folders, so each folder gets its own colour there">Colour tracks in Live to match these folders</button>
+        </div>
+        <div class="groups" id="groups"></div>
         <p class="empty" id="mixer-empty" hidden>No tracks yet. Ask in the chat, e.g. “set up a lead vocal on input 1”.</p>
       </div>
       <div class="tab-panel" id="panel-songs" hidden>
@@ -176,6 +177,9 @@
         <input class="strip-name" aria-label="Track name">
         <span class="strip-route"></span>
         <div class="strip-toggles">
+          <span class="strip-grip" draggable="true" title="Drag to another folder" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
+          </span>
           <button class="toggle mute" aria-pressed="false" title="Mute">M</button>
           <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
         </div>
@@ -197,6 +201,10 @@
         <summary>Sends &amp; outputs</summary>
         <div class="sends"></div>
         <div class="clip-gains"></div>
+        <label class="folder-line">
+          <span>Folder</span>
+          <select class="folder-select" aria-label="Folder"></select>
+        </label>
         <div class="route-line"></div>
       </details>
     </article>

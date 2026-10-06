@@ -470,16 +470,206 @@ function markdownLite(text) {
 }
 
 // -- mixer -------------------------------------------------------------------
+//
+// Strips sit in folders by instrument: Vocals, Drums, Keys and so on. The
+// server picks each track's folder from its name, or from wherever the
+// volunteer last moved it (row.folder), and sends the folder list in
+// state.folders.
+//
+// Live can't reorder tracks or make group tracks from a Control Surface, so
+// moving a strip to another folder also gives it that folder's colour in Live
+// (the same set_track_color the colour picker uses). Colour is the one part of
+// a folder Live can show, and it keeps the two screens saying the same thing.
+const groupEls = new Map(); // folder key (or "returns") -> dom refs
+let dragging = null;        // the strip being dragged to another folder
 
 function renderMixer(snap) {
-  syncStrips($("#strips"), snap.tracks, "t", snap);
-  syncStrips($("#returns"), snap.returns, "r", snap);
-  $("#returns-label").hidden = snap.returns.length === 0;
+  const groups = buildMixerGroups(snap);
+  const groupsEl = $("#groups");
+  const keepGroups = new Set();
+  const keepStrips = new Set();
+
+  groups.forEach((group) => {
+    keepGroups.add(group.key);
+    const g = ensureGroup(group.key);
+    g.nameEl.textContent = group.label;
+    g.countEl.textContent = String(group.rows.length);
+    g.dotEl.style.setProperty("--swatch", group.swatch || "transparent");
+    g.dotEl.classList.toggle("is-empty", !group.swatch);
+    g.section.classList.toggle("is-empty", group.rows.length === 0);
+    groupsEl.appendChild(g.section); // re-adding an attached node just reorders it
+    placeStrips(g.stripsEl, group.rows, group.prefix, snap, keepStrips);
+  });
+
+  for (const [key, g] of groupEls) {
+    if (!keepGroups.has(key)) {
+      g.section.remove();
+      groupEls.delete(key);
+    }
+  }
+  for (const [key, el] of strips) {
+    if (!keepStrips.has(key)) {
+      el.remove();
+      strips.delete(key);
+    }
+  }
+
   $("#mixer-empty").hidden = snap.tracks.length > 0;
+  syncTabsOffset();
 }
 
-function syncStrips(container, rows, prefix, snap) {
-  const keep = new Set();
+/* One entry per folder, in the server's order. Empty folders stay in the
+   list (hidden until a drag starts) so there's somewhere to drop a track.
+   Shared effects (return tracks) are a trailing folder you can't drop into. */
+function buildMixerGroups(snap) {
+  const folders = state.folders || [];
+  const known = new Set(folders.map((f) => f.key));
+  const byKey = new Map(folders.map((f) => [f.key, []]));
+  for (const row of snap.tracks) {
+    byKey.get(known.has(row.folder) ? row.folder : "other")?.push(row);
+  }
+  const groups = folders.map((f) => ({
+    key: f.key, label: f.label, swatch: f.color, rows: byKey.get(f.key), prefix: "t",
+  }));
+  if (snap.returns.length > 0) {
+    groups.push({ key: "returns", label: "Shared effects", swatch: null, rows: snap.returns, prefix: "r" });
+  }
+  return groups;
+}
+
+function ensureGroup(key) {
+  let g = groupEls.get(key);
+  if (g) return g;
+
+  const section = document.createElement("section");
+  section.className = "track-group";
+  section.dataset.group = key;
+
+  const header = document.createElement("header");
+  header.className = "group-header";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "group-toggle";
+  toggle.innerHTML =
+    '<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>' +
+    '<span class="group-dot"></span><span class="group-name"></span><span class="group-count"></span>';
+  header.append(toggle);
+
+  const stripsEl = document.createElement("div");
+  stripsEl.className = "strips";
+  const hint = document.createElement("p");
+  hint.className = "group-empty";
+  hint.textContent = "Drag a track here";
+  section.append(header, stripsEl, hint);
+
+  const collapsed = loadCollapsedGroups().has(key);
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", "Show or hide this folder");
+  stripsEl.hidden = collapsed;
+  toggle.addEventListener("click", () => {
+    const open = toggle.getAttribute("aria-expanded") === "true";
+    toggle.setAttribute("aria-expanded", String(!open));
+    stripsEl.hidden = open;
+    saveGroupCollapsed(key, open);
+  });
+
+  if (key !== "returns") {
+    section.addEventListener("dragover", (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      section.classList.add("drop-target");
+    });
+    section.addEventListener("dragleave", (e) => {
+      if (!section.contains(e.relatedTarget)) section.classList.remove("drop-target");
+    });
+    section.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const el = dragging;
+      endDrag();
+      if (el) moveTrack(el, key);
+    });
+  }
+
+  g = {
+    section, toggle, stripsEl,
+    nameEl: $(".group-name", header), countEl: $(".group-count", header), dotEl: $(".group-dot", header),
+  };
+  groupEls.set(key, g);
+  return g;
+}
+
+function endDrag() {
+  dragging?.classList.remove("is-dragging");
+  dragging = null;
+  $("#groups").classList.remove("dragging");
+  document.querySelectorAll(".track-group.drop-target").forEach((s) => s.classList.remove("drop-target"));
+}
+
+/* Move a strip to another folder: remember it on the server, then give the
+   track that folder's colour in Live so Live shows the same grouping. */
+async function moveTrack(el, folderKey) {
+  const row = el._row;
+  const folder = (state.folders || []).find((f) => f.key === folderKey);
+  if (!row || row.is_return || !folder || row.folder === folderKey) return;
+  try {
+    render(await api("/api/track-folder", { track: row.name, folder: folderKey }));
+  } catch (e) {
+    toast(e.message, "error");
+    return;
+  }
+  const recoloured = await liveCmd("set_track_color", { ...target(el), rgb: parseInt(folder.color.slice(1), 16) })
+    .then(() => true, () => false);
+  if (recoloured) toast(`Moved ${row.name} to ${folder.label}.`);
+}
+
+/* Live can't show folders, so give every track its folder's colour there. */
+$("#match-colors").addEventListener("click", async () => {
+  const snap = state?.live.snapshot;
+  if (!snap) return;
+  const colours = new Map((state.folders || []).map((f) => [f.key, parseInt(f.color.slice(1), 16)]));
+  let done = 0;
+  for (const row of snap.tracks) {
+    const rgb = colours.get(row.folder);
+    if (rgb === undefined) continue;
+    try {
+      await liveCmd("set_track_color", { track_index: row.index, is_return: false, rgb });
+      done += 1;
+    } catch {
+      return; // liveCmd already said why
+    }
+  }
+  toast(`Coloured ${done} track${done === 1 ? "" : "s"} in Live to match their folders.`);
+});
+
+/* Which folders this volunteer has collapsed -- a per-device convenience,
+   not session state, so it's fine if it's empty on a fresh browser. */
+function loadCollapsedGroups() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem("holysound-collapsed-groups") || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveGroupCollapsed(key, collapsed) {
+  try {
+    const set = loadCollapsedGroups();
+    if (collapsed) set.add(key); else set.delete(key);
+    localStorage.setItem("holysound-collapsed-groups", JSON.stringify([...set]));
+  } catch {
+    /* private browsing or storage disabled -- the fold just won't be remembered */
+  }
+}
+
+/* Keeps each folder header's sticky offset flush under the tab bar, so it
+   stays correct whatever the tab bar's real rendered height is. */
+function syncTabsOffset() {
+  const tabs = $(".tabs");
+  if (tabs) document.documentElement.style.setProperty("--tabs-h", tabs.offsetHeight + "px");
+}
+window.addEventListener("resize", syncTabsOffset);
+
+function placeStrips(container, rows, prefix, snap, keep) {
   rows.forEach((row, i) => {
     const key = prefix + row.index;
     keep.add(key);
@@ -491,12 +681,6 @@ function syncStrips(container, rows, prefix, snap) {
     if (container.children[i] !== el) container.insertBefore(el, container.children[i] || null);
     updateStrip(el, row, snap);
   });
-  for (const [key, el] of strips) {
-    if (key.startsWith(prefix) && !keep.has(key)) {
-      el.remove();
-      strips.delete(key);
-    }
-  }
 }
 
 function target(el) {
@@ -521,6 +705,20 @@ function createStrip() {
   slider($(".pan input", el), $(".pan output", el), (pan) => ({ cmd: "set_pan", args: { ...target(el), pan } }), panText);
 
   $(".more", el).addEventListener("toggle", (e) => { if (e.target.open) loadRouting(el); });
+
+  // Moving a track between folders: drag the grip (computers), or pick from the list (phones).
+  const grip = $(".strip-grip", el);
+  grip.addEventListener("dragstart", (e) => {
+    if (el._row.is_return) return e.preventDefault();
+    dragging = el;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", el._row.name);
+    e.dataTransfer.setDragImage(el, 24, 24);
+    el.classList.add("is-dragging");
+    $("#groups").classList.add("dragging");
+  });
+  grip.addEventListener("dragend", endDrag);
+  $(".folder-select", el).addEventListener("change", (e) => moveTrack(el, e.target.value));
   return el;
 }
 
@@ -587,6 +785,18 @@ function updateStrip(el, row, snap) {
 
   const name = $(".strip-name", el);
   if (document.activeElement !== name) name.value = row.name;
+
+  // Return tracks (shared effects) aren't sorted into instrument folders.
+  $(".strip-grip", el).hidden = row.is_return;
+  $(".folder-line", el).hidden = row.is_return;
+  const pick = $(".folder-select", el);
+  const folders = state.folders || [];
+  const folderSig = folders.map((f) => f.key + f.label).join("|");
+  if (pick._sig !== folderSig) {
+    pick._sig = folderSig;
+    pick.replaceChildren(...folders.map((f) => new Option(f.label, f.key)));
+  }
+  if (!row.is_return && document.activeElement !== pick) pick.value = row.folder;
 
   const route = row.is_return
     ? `→ ${routeLabel(row.output)}`
@@ -1050,5 +1260,6 @@ function toast(message, kind = "info") {
   setTimeout(() => el.remove(), kind === "error" ? 8000 : 5000);
 }
 
+syncTabsOffset();
 listen();
 poll();
