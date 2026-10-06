@@ -505,9 +505,16 @@ def effect_presets(device: str = typer.Argument(..., help="Stock effect name, e.
 # optionally with its own tempo.
 
 
+def _key_text(semitones):
+    if semitones is None:
+        return "mixed transpose"
+    return f"{semitones:+d} semitone{'' if abs(semitones) == 1 else 's'}"
+
+
 def _song_line(s):
     bpm = f"  ({s['tempo']:g} BPM)" if s["tempo"] is not None else ""
-    return f"{s['index'] + 1:>3}  {s['name']}{bpm}"
+    key = "" if s.get("transpose", 0) == 0 else f"  [{_key_text(s['transpose'])}]"
+    return f"{s['index'] + 1:>3}  {s['name']}{bpm}{key}"
 
 
 @song_app.command("list")
@@ -552,6 +559,18 @@ def song_tempo(
         row = _pick(_run(live.list_scenes), song, "song")
         result = _run(lambda: live.set_scene(row["index"], bpm=bpm))
     typer.echo("Song " + _song_line(result).strip())
+
+
+@song_app.command("transpose", context_settings={"ignore_unknown_options": True})  # so -2 is a number
+def song_transpose(
+    song: str = typer.Argument(..., help="Song name or number."),
+    semitones: int = typer.Argument(..., min=-12, max=12, help="Semitones up (2) or down (-3); 0 is the original key."),
+):
+    """Shift every audio clip in a song to a new key."""
+    with _connect() as live:
+        row = _pick(_run(live.list_scenes), song, "song")
+        result = _run(lambda: live.transpose_song(row["index"], semitones))
+    typer.echo(f"Song {_song_line(result).strip()}: {result['clips']} clip(s) at {_key_text(semitones)}")
 
 
 @song_app.command("delete")

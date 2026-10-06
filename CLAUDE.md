@@ -249,8 +249,9 @@ no repair prompt. Verified with a four-track click/pad/guide rig.
 RigLink works against any open set, not just our template: tracks (add, rename,
 colour, delete), mixer (volume, pan, mute, solo, sends, output meters), input and
 output routing, stock effects and their presets (load, list, remove), songs as
-scenes with per-song tempo, Arrangement markers, and `song import` of a stem
-folder with level matching via clip gain.
+scenes with per-song tempo and transpose (`pitch_coarse` on every audio clip in
+the scene, -12 to 12), Arrangement markers, and `song import` of a stem folder
+with level matching via clip gain.
 
 The web app (`app/`) is the conversation layer. Claude proposes typed actions
 (`app/actions.py`), the volunteer presses Apply, and each action runs through
@@ -259,9 +260,15 @@ as a `.als`.
 
 Missing, in order (detail in `docs/td_next.md`): record-arm and monitoring; any
 effect parameter control; plugins, User Library presets and rack internals;
-song-to-song transitions; MIDI mapping; clip editing beyond gain; group tracks.
+song-to-song transitions; MIDI mapping; clip editing beyond gain and transpose;
+group tracks.
 
 ## Open questions
+
+- **Transpose on unwarped stems.** Stems import unwarped, and `song transpose`
+  sets `pitch_coarse` on them. Not yet checked in Live whether that also changes
+  their speed (and so drifts from the click's tempo). Needs one probe: transpose
+  a song, play it against the click.
 
 - **Setlist shape: Session scenes or Arrangement locators?** Worship rigs are
   usually one scene per song with BPM in the scene name, but unconfirmed for this

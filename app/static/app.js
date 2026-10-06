@@ -1231,11 +1231,37 @@ function songRow(scene) {
     const value = parseFloat(bpm.value);
     if (value >= 20 && value <= 999) liveCmd("set_scene", { scene_index: scene.index, bpm: value }).catch(() => {});
   });
+  li.append(transposer(scene));
   const start = button("", "btn start", () => liveCmd("fire_scene", { scene_index: scene.index }).catch(() => {}));
   start.innerHTML = "▶<span> Start</span>";
   start.setAttribute("aria-label", `Start ${scene.name || "song " + (scene.index + 1)}`);
   li.append(start);
   return li;
+}
+
+/* Key: − and + move every audio clip in the song a semitone; the number resets to the
+   original key. A song whose clips disagree shows "mixed" until it's set. */
+function transposer(scene) {
+  const el = document.createElement("div");
+  el.className = "transpose";
+  const key = scene.transpose;
+  const label = (n) => (n === null || n === undefined ? "mixed" : n === 0 ? "Key 0" : `Key ${n > 0 ? "+" : ""}${n}`);
+  const set = (n) => {
+    if (n < -12 || n > 12) return;
+    liveCmd("transpose_song", { scene_index: scene.index, semitones: n })
+      .then((r) => { songsSig = ""; if (r && !r.clips) toast("That song has no audio clips to transpose."); })
+      .catch(() => {});
+  };
+  const name = scene.name || "song " + (scene.index + 1);
+  const down = button("−", "btn key-step", () => set((key ?? 0) - 1));
+  const reset = button(label(key), "btn key-value", () => set(0));
+  const up = button("+", "btn key-step", () => set((key ?? 0) + 1));
+  down.setAttribute("aria-label", `Transpose ${name} down a semitone`);
+  up.setAttribute("aria-label", `Transpose ${name} up a semitone`);
+  reset.setAttribute("aria-label", `Key of ${name}: ${label(key)}. Press to go back to the original key.`);
+  reset.title = "Back to the original key";
+  el.append(down, reset, up);
+  return el;
 }
 
 $("#add-song").addEventListener("submit", async (e) => {

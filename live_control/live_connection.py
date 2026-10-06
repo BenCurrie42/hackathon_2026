@@ -187,6 +187,9 @@ class LiveConnection:
     def set_scene(self, scene_index, name=None, bpm=None):
         return self.send("set_scene", scene_index=scene_index, name=name, bpm=bpm)
 
+    def transpose_song(self, scene_index, semitones):
+        return self.send("transpose_song", scene_index=scene_index, semitones=semitones)
+
     def count_scene_clips(self, scene_index):
         return self.send("count_scene_clips", scene_index=scene_index)
 

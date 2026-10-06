@@ -664,8 +664,20 @@ def _stop(rf):
     return {"is_playing": False}
 
 
+def _audio_clips(scene):
+    return [slot.clip for slot in scene.clip_slots if slot.has_clip and slot.clip.is_audio_clip]
+
+
+def _song_transpose(scene):
+    """Semitones the song's audio clips are shifted: 0 with none, None if they differ."""
+    pitches = {clip.pitch_coarse for clip in _audio_clips(scene)}
+    if not pitches:
+        return 0
+    return pitches.pop() if len(pitches) == 1 else None
+
+
 def _scene_row(i, scene):
-    row = {"index": i, "name": scene.name, "tempo": None}
+    row = {"index": i, "name": scene.name, "tempo": None, "transpose": _song_transpose(scene)}
     # Scene.tempo arrived in Live 11; tolerate its absence.
     if getattr(scene, "tempo_enabled", False):
         row["tempo"] = scene.tempo
@@ -697,6 +709,18 @@ def _set_scene(rf, scene_index, name=None, bpm=None):
         scene.tempo = float(bpm)
         scene.tempo_enabled = True
     return _scene_row(scene_index, scene)
+
+
+def _transpose_song(rf, scene_index, semitones):
+    """Shift every audio clip in a song by the same number of semitones (-12 to 12)."""
+    semitones = int(semitones)
+    if not -12 <= semitones <= 12:
+        raise ValueError("transpose is -12 to 12 semitones")
+    scene = rf.song().scenes[scene_index]
+    clips = _audio_clips(scene)
+    for clip in clips:
+        clip.pitch_coarse = semitones
+    return dict(_scene_row(scene_index, scene), clips=len(clips))
 
 
 def _count_scene_clips(rf, scene_index):
@@ -939,6 +963,7 @@ COMMANDS = {
     "list_scenes": _list_scenes,
     "create_scene": _create_scene,
     "set_scene": _set_scene,
+    "transpose_song": _transpose_song,
     "count_scene_clips": _count_scene_clips,
     "delete_scene": _delete_scene,
     "fire_scene": _fire_scene,

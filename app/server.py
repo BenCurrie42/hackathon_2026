@@ -53,6 +53,7 @@ DIRECT_COMMANDS = {
     "play", "stop", "fire_scene", "load_device", "delete_device", "set_track_name",
     "create_scene", "set_scene", "set_routing", "create_audio_track", "create_midi_track",
     "create_return_track", "get_routing", "set_track_color", "set_clip_gain",
+    "transpose_song",
 }
 
 

@@ -58,6 +58,7 @@ uv run rig.py route out Click "Ext. Out" 1
 uv run rig.py mix volume Click -6
 uv run rig.py effect add "Lead Vocal" Compressor --preset "Gentle Squeeze"
 uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170
+uv run rig.py song transpose "Let's Have Church" -2   # down a whole step
 uv run rig.py song play "Let's Have Church"
 ```
 

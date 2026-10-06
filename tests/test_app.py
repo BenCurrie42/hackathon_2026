@@ -178,8 +178,32 @@ class ActionsTest(FakeLiveCase):
         )
         self.assertTrue(all(r["ok"] for r in results), results)
         snap = self.live.snapshot(max_age=0)
-        self.assertEqual(snap["scenes"][-1], {"index": 1, "name": "Way Maker", "tempo": 70.0})
+        self.assertEqual(snap["scenes"][-1], {"index": 1, "name": "Way Maker", "tempo": 70.0, "transpose": 0})
         self.assertEqual(snap["song"]["tempo"], 70)
+
+    def test_transpose_song_moves_every_audio_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, name in enumerate(("Keys", "Bass")):
+                path = Path(tmp) / f"{name}.wav"
+                write_song_stem(path, 2, [(0, 2)])
+                self.fake.create_audio_track(name)
+                self.fake.import_audio(i, str(path), 0)
+            self.fake.set_scene(0, name="Way Maker")
+            results = self.run_actions({"action": "transpose_song", "song": "Way Maker", "semitones": -2})
+            self.assertEqual(results[0]["text"], "Way Maker is at down 2 semitones now (2 clips).")
+            snap = self.live.snapshot(max_age=0)
+            self.assertEqual(snap["scenes"][0]["transpose"], -2)
+            self.assertIn("1. Way Maker — transposed -2", session_notes(snap, None))
+            self.fake.transpose_song(0, 0)
+            self.fake.tracks[0]["clips"][0]["transpose"] = 3
+            self.assertIsNone(self.fake.list_scenes()[0]["transpose"])  # clips disagree
+
+    def test_transpose_needs_audio_and_a_sane_range(self):
+        results = self.run_actions({"action": "add_song", "name": "Empty"},
+                                   {"action": "transpose_song", "song": "Empty", "semitones": 1})
+        self.assertIn("has no audio clips", results[1]["text"])
+        with self.assertRaises(ValidationError):
+            Proposal.model_validate({"actions": [{"action": "transpose_song", "song": "1", "semitones": 13}]})
 
     def test_to_rigspec_keeps_tracks_and_explains_the_rest(self):
         actions = Proposal.model_validate({"actions": [

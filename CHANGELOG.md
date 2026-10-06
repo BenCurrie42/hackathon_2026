@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Song transpose** — `transpose_song` in RigLink sets `pitch_coarse` on every audio clip in a song (scene), -12 to 12 semitones; scene rows carry `transpose` (`None` when clips disagree). `rig.py song transpose <song> <semitones>`, a − / Key / + control on each song in the Songs tab (the middle button resets to the original key), and a `transpose_song` action the assistant can propose; session notes show each song's transpose.
+
 ## [1.0.0] — 2026-10-06
 
 First release, for the 2026 Gloo AI Hackathon (Ministry Resourcing track).

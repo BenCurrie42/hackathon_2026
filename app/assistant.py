@@ -82,7 +82,9 @@ stems inside a song.
 15. Inputs are written as printed on the interface: "1" for a mic or DI, "3/4" for a stereo \
 pair. Playback tracks have no input.
 16. Songs are Live scenes, one per song, with that song's tempo. Shared reverbs and delays \
-are return tracks fed with set_send.
+are return tracks fed with set_send. transpose_song shifts every audio clip in a song by \
+semitones from its original key (-12 to 12, 0 resets) when the leader changes the key; it \
+doesn't touch MIDI or live inputs, and the notes show each song's transpose.
 17. Refer to tracks by exact name; names must be unique.
 18. You can't change effect settings, group or reorder tracks in Live, delete clips, or move \
 the Master fader. Say so plainly if asked.
@@ -634,7 +636,9 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=N
         lines.append("Songs (scenes):" if scenes else "Songs: none.")
         for s in scenes:
             bpm = f" — {s['tempo']:g} BPM" if s["tempo"] else ""
-            lines.append(f"  {s['index'] + 1}. {s['name'] or '(unnamed)'}{bpm}")
+            key = s.get("transpose", 0)
+            key = "" if key == 0 else " — clips at mixed keys" if key is None else f" — transposed {key:+d}"
+            lines.append(f"  {s['index'] + 1}. {s['name'] or '(unnamed)'}{bpm}{key}")
         lines.append(_outputs_line(snapshot))
     if imports:
         lines.append("")

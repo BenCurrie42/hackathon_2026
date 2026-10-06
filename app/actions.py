@@ -411,6 +411,27 @@ class UpdateSong(BaseModel):
         return f"Updated {self.new_name or s['name'] or 'song ' + str(s['index'] + 1)}."
 
 
+class TransposeSong(BaseModel):
+    action: Literal["transpose_song"]
+    song: SongRef
+    semitones: int = Field(ge=-12, le=12, description=(
+        "Semitones from the original key: 2 is up a whole step, -3 down a minor third, 0 back to the original."))
+
+    def describe(self):
+        if self.semitones == 0:
+            return f"Put “{self.song}” back in its original key"
+        return f"Transpose “{self.song}” {_semitones(self.semitones)}"
+
+    def run(self, ex):
+        s = ex.song(self.song)
+        result = ex.call("transpose_song", scene_index=s["index"], semitones=self.semitones)
+        name = s["name"] or f"song {s['index'] + 1}"
+        if not result.get("clips"):
+            raise ActionFailed(f"{name} has no audio clips to transpose.")
+        where = "its original key" if self.semitones == 0 else _semitones(self.semitones)
+        return f"{name} is at {where} now ({result['clips']} clips)."
+
+
 class DeleteSong(BaseModel):
     action: Literal["delete_song"]
     song: SongRef
@@ -580,7 +601,7 @@ class Listen(BaseModel):
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportAudio, SetClipGain, Listen,
+    TransposeSong, DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportAudio, SetClipGain, Listen,
 ]
 
 
@@ -796,6 +817,10 @@ def to_rigspec(actions):
 
 
 # -- wording ------------------------------------------------------------------
+
+
+def _semitones(n):
+    return f"{'up' if n > 0 else 'down'} {abs(n)} semitone{'' if abs(n) == 1 else 's'}"
 
 
 def _folder_label(key):

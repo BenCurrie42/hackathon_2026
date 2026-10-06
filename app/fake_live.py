@@ -240,6 +240,7 @@ class FakeSet:
             "length": seconds * self.tempo / 60.0,
             "loudness": loudness,
             "file_path": os.path.abspath(file_path),
+            "transpose": 0,
         }
         track["clips"][scene_index] = clip
         return {"name": clip["name"], "gain": _db_text(clip["gain_db"]), "length": clip["length"],
@@ -275,7 +276,9 @@ class FakeSet:
 
     def _scene_row(self, i):
         scene = self.scenes[i]
-        return {"index": i, "name": scene["name"], "tempo": scene["tempo"]}
+        pitches = {t["clips"][i]["transpose"] for t in self.tracks if i in t["clips"]}
+        transpose = 0 if not pitches else (pitches.pop() if len(pitches) == 1 else None)
+        return {"index": i, "name": scene["name"], "tempo": scene["tempo"], "transpose": transpose}
 
     # -- tracks ---------------------------------------------------------
 
@@ -448,6 +451,16 @@ class FakeSet:
         if bpm is not None:
             scene["tempo"] = float(bpm)
         return self._scene_row(scene_index)
+
+    def transpose_song(self, scene_index, semitones):
+        semitones = int(semitones)
+        if not -12 <= semitones <= 12:
+            raise ValueError("transpose is -12 to 12 semitones")
+        self.scenes[scene_index]  # IndexError for a song that isn't there
+        clips = [t["clips"][scene_index] for t in self.tracks if scene_index in t["clips"]]
+        for clip in clips:
+            clip["transpose"] = semitones
+        return dict(self._scene_row(scene_index), clips=len(clips))
 
     def count_scene_clips(self, scene_index):
         return sum(1 for t in self.tracks if scene_index in t["clips"])
