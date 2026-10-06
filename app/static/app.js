@@ -682,8 +682,8 @@ function saveGroupCollapsed(key, collapsed) {
 /* Keeps each folder header's sticky offset flush under the tab bar, so it
    stays correct whatever the tab bar's real rendered height is. */
 function syncTabsOffset() {
-  const tabs = $(".tabs");
-  if (tabs) document.documentElement.style.setProperty("--tabs-h", tabs.offsetHeight + "px");
+  const head = $(".session-head");
+  if (head) document.documentElement.style.setProperty("--tabs-h", head.offsetHeight + "px");
 }
 window.addEventListener("resize", syncTabsOffset);
 

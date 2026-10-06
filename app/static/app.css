@@ -124,7 +124,7 @@ svg { width: 1em; height: 1em; }
 
 .pane { min-height: 0; display: flex; flex-direction: column; }
 .chat-pane { border-right: 1px solid var(--line); background: var(--bg); }
-.session-pane { background: var(--bg); overflow-y: auto; padding: 16px 20px 32px; }
+.session-pane { background: var(--bg); overflow-y: auto; padding: 0 20px 32px; }
 
 .bottom-nav { display: none; }
 
@@ -137,8 +137,8 @@ svg { width: 1em; height: 1em; }
   .chat-pane { border-right: 0; }
   .layout[data-view="chat"] .session-pane,
   .layout:not([data-view="chat"]) .chat-pane { display: none; }
-  .layout:not([data-view="chat"]) .tabs { display: none; }
-  .session-pane { padding: 14px 14px 24px; }
+  .layout:not([data-view="chat"]) .session-head { display: none; }
+  .session-pane { padding: 0 14px 24px; }
 
   .bottom-nav {
     display: flex; flex-shrink: 0;
@@ -259,10 +259,16 @@ svg { width: 1em; height: 1em; }
 
 /* -- session ---------------------------------------------------------- */
 
+/* The tab bar sits in a solid, full-width band that sticks to the top, so
+   nothing scrolls into view above, beside or under it. The folder headers
+   stick directly beneath the band. */
+.session-head {
+  position: sticky; top: 0; z-index: 4; background: var(--bg);
+  margin: 0 -20px; padding: 16px 20px 14px;
+}
 .tabs {
-  display: flex; gap: 4px; padding: 4px; margin-bottom: 16px; border-radius: 12px;
+  display: flex; gap: 4px; padding: 4px; border-radius: 12px;
   background: var(--panel); border: 1px solid var(--line); width: fit-content;
-  position: sticky; top: 0; z-index: 3;
 }
 .tab { border: 0; background: none; padding: 8px 18px; border-radius: 9px; color: var(--muted); font-weight: 600; min-height: 40px; }
 .tab[aria-selected="true"] { background: var(--panel-2); color: var(--text); }
