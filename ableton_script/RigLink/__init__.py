@@ -837,6 +837,21 @@ def _strip(song, i, track, is_return, meters):
     return row
 
 
+def _ext_outputs(master):
+    """The interface's output channels ("1/2", "3/4", ...), as the Master sees them.
+
+    A track only lists the channels of its current output type, so a track on
+    Master can't say which Ext. Out channels exist. The Master always goes to
+    Ext. Out, so its list is the whole set, without touching any routing.
+    """
+    try:
+        if master.output_routing_type.display_name != "Ext. Out":
+            return []
+        return [c.display_name for c in master.available_output_routing_channels]
+    except AttributeError:
+        return []
+
+
 def _get_snapshot(rf):
     """The whole set. Meters are the peak/average since the previous snapshot."""
     song = rf.song()
@@ -853,6 +868,7 @@ def _get_snapshot(rf):
         },
         "scenes": _list_scenes(rf),
         "locators": _list_locators(rf),
+        "ext_outputs": _ext_outputs(master),
     }
     meters.reset()
     return snapshot

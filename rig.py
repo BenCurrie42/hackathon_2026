@@ -27,7 +27,8 @@ import typer
 
 from live_control.live_connection import LiveConnection, RigLinkError
 from live_control.starting_fader import starting_fader_db
-from live_control.stem_level import stem_level
+from live_control.stem_level import pair_level, stem_level
+from live_control.stereo_pairs import stereo_pairs
 from live_control.timecode import is_timecode
 
 # Loading a device walks Live's browser tree, which can take a while.
@@ -598,18 +599,41 @@ def _select_stems(stems, patterns):
     return chosen
 
 
-def _level_match_gain(stem):
-    """Clip gain that brings a stem to STEM_LEVEL_DB, and a note when it can't."""
-    level = stem_level(stem)
-    if level is None:
-        if stem.suffix.casefold() != ".wav":
-            return 0.0, "not a WAV, level not matched"
-        return 0.0, "silent"
+def _level_match_gain(level):
+    """Clip gain that brings a level to STEM_LEVEL_DB, and a note when it can't."""
     wanted = STEM_LEVEL_DB - level.active_rms_db
     headroom = STEM_PEAK_CEILING_DB - level.peak_db
     low, high = CLIP_GAIN_RANGE_DB
     gain = max(low, min(high, wanted, headroom))
     return gain, ("held back to avoid clipping" if headroom < wanted else "")
+
+
+def _level_match_gains(stems):
+    """Clip gain and a note for each stem. Both sides of a stereo pair share one gain."""
+    levels = {p: stem_level(p) for p in stems}
+    by_name = {p.stem: p for p in stems}
+    partner = {}
+    for left, right in stereo_pairs(list(by_name)):
+        partner[by_name[left]] = by_name[right]
+        partner[by_name[right]] = by_name[left]
+
+    gains = {}
+    for stem in stems:
+        other = partner.get(stem)
+        level = levels[stem]
+        if level is None and stem.suffix.casefold() != ".wav":
+            gains[stem] = (0.0, "not a WAV, level not matched")
+            continue
+        if other is not None and (other.suffix.casefold() == ".wav" or levels[other] is not None):
+            level = pair_level(level, levels[other])
+        if level is None:
+            gains[stem] = (0.0, "silent")
+            continue
+        gain, note = _level_match_gain(level)
+        if other is not None:
+            note = ", ".join(n for n in (f"same gain as {other.stem}", note) if n)
+        gains[stem] = (gain, note)
+    return gains
 
 
 @song_app.command("import")
@@ -632,6 +656,8 @@ def song_import(
     loudness, so the faders set the mix for all songs at once. New tracks
     start with their faders down far enough that all the stems together don't
     clip; existing tracks keep theirs. A new SMPTE/timecode track starts muted.
+    Stereo pairs ("GTR L" and "GTR R") get one clip gain between them, so the
+    image stays centred.
     """
     if not folder.is_dir():
         _fail(f"There's no folder at {folder}.")
@@ -640,7 +666,7 @@ def song_import(
         _fail(f"There are no audio files in {folder}.")
     stems = _select_stems(stems, only)
     name = name or folder.name
-    gains = {p: _level_match_gain(p) if match_levels else (None, "") for p in stems}
+    gains = _level_match_gains(stems) if match_levels else {p: (None, "") for p in stems}
 
     with _connect() as live:
         scenes = _run(live.list_scenes)

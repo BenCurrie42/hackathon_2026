@@ -27,7 +27,10 @@ from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
 from app.server import App, make_handler
+import rig
 from live_control.starting_fader import starting_fader_db
+from live_control.stem_level import StemLevel, pair_level
+from live_control.stereo_pairs import stereo_pairs
 from live_control.timecode import is_timecode
 
 
@@ -290,6 +293,34 @@ class ConversationTest(unittest.TestCase):
         self.assertIn("A. A-Reverb", notes)
         self.assertIn("audio effects: Auto Filter", notes)
         self.assertIn("NOT connected", session_notes(None, None, "Live is closed"))
+
+    def test_session_notes_show_pan_as_a_number_and_list_outputs(self):
+        server, fake = fake_live.serve(port=0, latency=0)
+        try:
+            for name in ("Gtr L", "Keys R", "Bass"):
+                fake.create_audio_track(name)
+            fake.set_pan(0, -1)
+            fake.set_pan(1, 0.5)
+            live = LiveLink(port=server.server_address[1])
+            notes = session_notes(live.snapshot(), live.stock_devices())
+            live.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertIn("| pan -1 (50L)\n", notes)
+        self.assertIn("| pan 0.5 (25R)\n", notes)
+        self.assertIn("| 0.0 dB | pan 0 (C)\n", notes)
+        self.assertIn("Outputs: Master; Ext. Out 1/2, 3/4, 5/6, 7/8, 1, 2,", notes)
+
+    def test_session_notes_without_riglink_output_list(self):
+        strip = {"name": "Click", "is_return": False, "input": None, "volume": "-12.0 dB", "mute": False,
+                 "solo": False, "devices": [], "sends": [], "pan": "25L", "pan_value": None,
+                 "output": {"type": "Ext. Out", "channel": "3/4"}}
+        snapshot = {"song": {"tempo": 120, "numerator": 4, "denominator": 4, "is_playing": False},
+                    "tracks": [strip | {"index": 0}], "returns": [], "scenes": []}
+        notes = session_notes(snapshot, None)
+        self.assertIn("| pan -0.5 (25L)\n", notes)
+        self.assertIn("Outputs: Master; Ext. Out (in use: 3/4). Live didn't list every output", notes)
 
 
 class ServerTest(FakeLiveCase):
@@ -681,6 +712,48 @@ class RoomMemoryTest(unittest.TestCase):
         self.assertEqual(state["room"][0]["text"], "Keys are stereo on 5/6.")
         state = post({"remove": state["room"][0]["id"]})
         self.assertEqual(state["room"], [])
+
+
+class ProposalLimitTest(unittest.TestCase):
+    def test_a_big_import_fits_in_one_proposal(self):
+        step = {"action": "set_tempo", "bpm": 120}
+        self.assertEqual(len(Proposal.model_validate({"actions": [step] * 150}).actions), 150)
+        with self.assertRaises(ValueError):
+            Proposal.model_validate({"actions": [step] * 151})
+
+
+class StereoPairsTest(unittest.TestCase):
+    def test_pairs_only_exact_base_names(self):
+        names = ["GTR 1 L", "GTR 1 R", "Crowds 4 Left", "Crowds 4 Right", "Keys_L", "Keys_R",
+                 "Loops Synths L", "Loops Synth R", "Vocal", "Lead L", "Bass"]
+        self.assertEqual(
+            sorted(stereo_pairs(names)),
+            [("Crowds 4 Left", "Crowds 4 Right"), ("GTR 1 L", "GTR 1 R"), ("Keys_L", "Keys_R")],
+        )
+
+    def test_ambiguous_sides_dont_pair(self):
+        self.assertEqual(stereo_pairs(["Pad L", "Pad Left", "Pad R"]), [])
+
+    def test_pair_level_averages_power_and_keeps_the_higher_peak(self):
+        level = pair_level(StemLevel(-10.0, -2.0), StemLevel(-10.0, -6.0))
+        self.assertAlmostEqual(level.active_rms_db, -10.0)
+        self.assertEqual(level.peak_db, -2.0)
+        self.assertEqual(pair_level(None, StemLevel(-12.0, -3.0)), StemLevel(-12.0, -3.0))
+
+    def test_song_import_gives_a_pair_one_gain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            left = write_stem(tmp, "GTR 1 L.wav", peak_db=-6)
+            right = write_stem(tmp, "GTR 1 R.wav", peak_db=-12)
+            solo = write_stem(tmp, "Bass.wav", peak_db=-12)
+            gains = rig._level_match_gains([left, right, solo])
+            alone_left, _ = rig._level_match_gain(rig.stem_level(left))
+            alone_right, _ = rig._level_match_gain(rig.stem_level(right))
+        self.assertAlmostEqual(gains[left][0], gains[right][0])
+        self.assertLess(alone_left, gains[left][0])
+        self.assertLess(gains[right][0], alone_right)
+        self.assertIn("same gain as GTR 1 R", gains[left][1])
+        self.assertAlmostEqual(gains[solo][0], alone_right)
+        self.assertEqual(gains[solo][1], "")
 
 
 class AddTrackWordingTest(unittest.TestCase):

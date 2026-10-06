@@ -60,3 +60,17 @@ def stem_level(path):
         return None
     rms = math.sqrt(active_sum / active_windows)
     return StemLevel(20 * math.log10(rms / full_scale), 20 * math.log10(peak / full_scale))
+
+
+def pair_level(left, right):
+    """One level for a stereo pair, so both sides can share a clip gain.
+
+    Loudness is the mean power of the two sides: a pair levelled this way sits
+    as loud as one mono stem at the same level, however it's spread across the
+    sides. The peak is the higher one, so the shared gain clips neither side.
+    Either side may be None (silent or unreadable); then the other one decides.
+    """
+    if left is None or right is None:
+        return left or right
+    power = (10 ** (left.active_rms_db / 10) + 10 ** (right.active_rms_db / 10)) / 2
+    return StemLevel(10 * math.log10(power), max(left.peak_db, right.peak_db))

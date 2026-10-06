@@ -493,6 +493,7 @@ class FakeSet:
                        "meter": {"peak": master, "average": master * 0.7}},
             "scenes": self.list_scenes(),
             "locators": self.list_locators(),
+            "ext_outputs": list(OUTPUTS["Ext. Out"]),
         }
 
     # -- dispatch -------------------------------------------------------

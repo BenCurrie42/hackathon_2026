@@ -75,14 +75,19 @@ class Output(BaseModel):
 
 class AddTrack(BaseModel):
     action: Literal["add_track"]
-    name: str = Field(min_length=1, max_length=64)
-    kind: Literal["audio", "midi"] = "audio"
+    name: str = Field(min_length=1, max_length=64, description="Track name. Must differ from every other track.")
+    kind: Literal["audio", "midi"] = Field(
+        default="audio", description='"audio" for mics, instruments and stems; "midi" for software instruments.',
+    )
     input: InputChannel | None = Field(
         default=None,
         description="Hardware input for a live source (mic, DI). Null for playback tracks like click, pads or stems.",
     )
     output: Output | None = Field(default=None, description="Null to leave it going to the Master.")
-    volume_db: float | None = Field(default=None, ge=-70, le=6)
+    volume_db: float | None = Field(
+        default=None, ge=-70, le=6,
+        description="Fader in dB, -70 to +6; 0 is unity. Null for a sensible start (low when importing stems).",
+    )
     pan: float | None = Field(default=None, ge=-1, le=1, description="-1 hard left, 0 centre, 1 hard right.")
     devices: list[Device] = Field(default_factory=list, description="Effects in chain order.")
     color: ColorName | None = Field(default=None, description="Track colour, to group related tracks.")
@@ -153,7 +158,7 @@ class AddTrack(BaseModel):
 
 class AddReturn(BaseModel):
     action: Literal["add_return"]
-    name: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=64, description='Name of the shared effect, e.g. "Vocal Reverb".')
     devices: list[Device] = Field(default_factory=list, description="Usually one reverb or delay.")
 
     def describe(self):
@@ -177,7 +182,7 @@ class AddReturn(BaseModel):
 class RenameTrack(BaseModel):
     action: Literal["rename_track"]
     track: TrackRef
-    new_name: str = Field(min_length=1, max_length=64)
+    new_name: str = Field(min_length=1, max_length=64, description="The new name. Must differ from every other track.")
 
     def describe(self):
         return f"Rename “{self.track}” to “{self.new_name}”"
@@ -235,7 +240,7 @@ class SetPan(BaseModel):
 class SetMute(BaseModel):
     action: Literal["set_mute"]
     track: TrackRef
-    on: bool
+    on: bool = Field(description="True mutes the track, false unmutes it.")
 
     def describe(self):
         return f"{'Mute' if self.on else 'Unmute'} “{self.track}”"
@@ -249,7 +254,7 @@ class SetMute(BaseModel):
 class SetSolo(BaseModel):
     action: Literal["set_solo"]
     track: TrackRef
-    on: bool
+    on: bool = Field(description="True solos the track (only soloed tracks are heard), false unsolos it.")
 
     def describe(self):
         return f"{'Solo' if self.on else 'Unsolo'} “{self.track}”"
@@ -283,7 +288,7 @@ class SetInput(BaseModel):
 class SetOutput(BaseModel):
     action: Literal["set_output"]
     track: TrackRef
-    output: Output
+    output: Output = Field(description="Where the track's sound goes.")
 
     def describe(self):
         return f"Send “{self.track}” to {self.output.label()}"
@@ -317,7 +322,7 @@ class SetSend(BaseModel):
 class AddDevice(BaseModel):
     action: Literal["add_device"]
     track: TrackRef
-    device: Device
+    device: Device = Field(description="The stock effect to add at the end of the track's chain.")
 
     def describe(self):
         return f"Add {self.device.label()} to “{self.track}”"
@@ -353,7 +358,7 @@ class RemoveDevice(BaseModel):
 
 class SetTempo(BaseModel):
     action: Literal["set_tempo"]
-    bpm: float = Field(ge=20, le=999)
+    bpm: float = Field(ge=20, le=999, description="The set's tempo in beats per minute, 20 to 999.")
 
     def describe(self):
         return f"Set the tempo to {self.bpm:g} BPM"
@@ -379,8 +384,10 @@ class AddSong(BaseModel):
 class UpdateSong(BaseModel):
     action: Literal["update_song"]
     song: SongRef
-    new_name: str | None = None
-    bpm: float | None = Field(default=None, ge=20, le=999)
+    new_name: str | None = Field(default=None, description="The new song title. Null keeps the name.")
+    bpm: float | None = Field(
+        default=None, ge=20, le=999, description="The song's tempo in BPM, 20 to 999. Null keeps it.",
+    )
 
     def describe(self):
         changes = []
@@ -413,6 +420,7 @@ class DeleteSong(BaseModel):
 class StartSong(BaseModel):
     action: Literal["start_song"]
     song: SongRef
+    audible: ClassVar[bool] = True
 
     def describe(self):
         return f"Start “{self.song}”"
@@ -425,7 +433,11 @@ class StartSong(BaseModel):
 
 class Transport(BaseModel):
     action: Literal["transport"]
-    playing: bool
+    playing: bool = Field(description="True starts playback, false stops it.")
+
+    @property
+    def audible(self):
+        return self.playing
 
     def describe(self):
         return "Start playback" if self.playing else "Stop playback"
@@ -438,7 +450,7 @@ class Transport(BaseModel):
 class SetColor(BaseModel):
     action: Literal["set_color"]
     track: TrackRef
-    color: ColorName
+    color: ColorName = Field(description="Track colour, to group related tracks.")
 
     def describe(self):
         return f"Colour “{self.track}” {self.color}"
@@ -494,7 +506,7 @@ class Listen(BaseModel):
     song: SongRef | None = Field(
         default=None, description="A song to start and measure. Null to measure whatever is already playing.",
     )
-    seconds: int = Field(default=10, ge=3, le=30)
+    seconds: int = Field(default=10, ge=3, le=30, description="How long to play and measure, 3 to 30 seconds.")
     audible: ClassVar[bool] = True
 
     def describe(self):
@@ -541,7 +553,7 @@ Action = Union[
 class Proposal(BaseModel):
     """What the propose_changes tool takes."""
 
-    actions: list[Annotated[Action, Field(discriminator="action")]] = Field(min_length=1, max_length=60)
+    actions: list[Annotated[Action, Field(discriminator="action")]] = Field(min_length=1, max_length=150)
 
 
 # -- running them -------------------------------------------------------------
@@ -689,7 +701,7 @@ def is_destructive(action):
 
 def is_audible(action):
     """Plays sound through the speakers when applied."""
-    return getattr(type(action), "audible", False)
+    return getattr(action, "audible", False)
 
 
 # -- exporting to a .als ------------------------------------------------------
