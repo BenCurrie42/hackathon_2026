@@ -323,6 +323,23 @@ class ProviderChoiceTest(unittest.TestCase):
             self.assertNotIn(key, kwargs)
         client.beta.messages.create.assert_not_called()
 
+    def test_opencode_requests_carry_session_and_user_agent(self):
+        # OpenCode Go answers 400 MissingSessionID without x-opencode-session.
+        provider, opener = chat_provider(completion("Hi."))
+        provider.session_id = "conv-1"
+        provider.create("sys", [], [{"role": "user", "content": "hi"}])
+        request = opener.requests[0]
+        self.assertEqual(request.get_header("X-opencode-session"), "conv-1")
+        self.assertEqual(request.get_header("User-agent"), "holy-sound/0.1")
+
+        create = mock.Mock(return_value="reply")
+        client = mock.Mock()
+        client.messages.create = create
+        gateway = AnthropicProvider(client, model="qwen3.8-flash", gateway=True)
+        gateway.session_id = "conv-2"
+        gateway.create("sys", [], [])
+        self.assertEqual(create.call_args.kwargs["extra_headers"], {"x-opencode-session": "conv-2"})
+
 
 if __name__ == "__main__":
     unittest.main()

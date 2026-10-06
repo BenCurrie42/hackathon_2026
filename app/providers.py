@@ -70,6 +70,15 @@ FORMAT_NAMES = {
 }
 
 
+# OpenCode Go asks clients to name themselves rather than send an HTTP library's name.
+USER_AGENT = "holy-sound/0.1"
+
+
+def session_headers(session_id):
+    """OpenCode Go rejects requests without a stable per-conversation session id."""
+    return {"x-opencode-session": session_id} if session_id else {}
+
+
 class AssistantUnavailable(RuntimeError):
     """No API key, or the AI service can't be reached. Message is a sentence."""
 
@@ -117,6 +126,7 @@ class AnthropicProvider:
         self.effort = effort
         self.key_var = key_var
         self.gateway = gateway
+        self.session_id = None  # set per conversation; OpenCode Go requires it
 
     def create(self, system, tools, messages):
         import anthropic
@@ -130,6 +140,7 @@ class AnthropicProvider:
                     tools=tools,
                     tool_choice={"type": "auto"},
                     messages=messages,
+                    extra_headers=session_headers(self.session_id),
                 )
             return self.client.beta.messages.create(
                 model=self.model,
@@ -174,6 +185,7 @@ class OpenAIChatProvider:
         self.model = model
         self.key_var = key_var
         self.opener = opener or urllib.request.urlopen
+        self.session_id = None  # set per conversation; OpenCode Go requires it
 
     def create(self, system, tools, messages):
         body = {
@@ -191,7 +203,8 @@ class OpenAIChatProvider:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "holy-sound",
+                "User-Agent": USER_AGENT,
+                **session_headers(self.session_id),
             },
             method="POST",
         )
@@ -480,6 +493,6 @@ def _opencode_provider(env, opener=None):
 
         # The SDK adds /v1/messages itself.
         root = base_url[:-3] if base_url.endswith("/v1") else base_url
-        client = anthropic.Anthropic(base_url=root, api_key=key)
+        client = anthropic.Anthropic(base_url=root, api_key=key, default_headers={"User-Agent": USER_AGENT})
         return AnthropicProvider(client, model=model, key_var="OPENCODE_API_KEY", gateway=True)
     return OpenAIChatProvider(base_url, key, model, opener=opener)

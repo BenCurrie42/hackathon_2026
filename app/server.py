@@ -218,7 +218,10 @@ def make_handler(app):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the page reloaded or closed mid-reply; nothing to do
 
         def _error(self, message, status=HTTPStatus.BAD_REQUEST):
             self._json({"error": message}, status)
