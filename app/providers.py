@@ -4,7 +4,10 @@ The conversation (app/assistant.py) keeps its history in Anthropic's content
 block format. A provider takes that history and returns the next reply in the
 same shape, so the conversation never knows who answered:
 
-    provider.create(system, tools, messages) -> Reply(stop_reason, content)
+    provider.create(system, tools, messages, on_event) -> Reply(stop_reason, content)
+
+Both stream. on_event(kind, data), if given, hears the reply as it's written:
+("thinking", text), ("text", text) and ("tool", name) as a tool call starts.
 
 Two providers:
 
@@ -22,6 +25,7 @@ Configuration comes from the environment (.env), see .env.example.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import socket
@@ -93,6 +97,22 @@ class Reply:
 
     stop_reason: str
     content: list
+    usage: dict | None = None  # {"input": tokens, "output": tokens}, when the service says
+
+
+def token_usage(reply):
+    """(input, output) tokens one reply cost, from either provider; zeros if not reported.
+
+    Input counts cached prompt tokens too: they were sent, just billed cheaper.
+    """
+    usage = getattr(reply, "usage", None)
+    if usage is None:
+        return 0, 0
+    if isinstance(usage, dict):
+        return usage.get("input") or 0, usage.get("output") or 0
+    cached = (getattr(usage, "cache_read_input_tokens", 0) or 0) + \
+        (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    return (getattr(usage, "input_tokens", 0) or 0) + cached, getattr(usage, "output_tokens", 0) or 0
 
 
 def not_set_up(key_var):
@@ -128,12 +148,12 @@ class AnthropicProvider:
         self.gateway = gateway
         self.session_id = None  # set per conversation; OpenCode Go requires it
 
-    def create(self, system, tools, messages):
+    def create(self, system, tools, messages, on_event=None):
         import anthropic
 
         try:
             if self.gateway:
-                return self.client.messages.create(
+                stream = self.client.messages.stream(
                     model=self.model,
                     max_tokens=MAX_TOKENS,
                     system=system,
@@ -142,18 +162,26 @@ class AnthropicProvider:
                     messages=messages,
                     extra_headers=session_headers(self.session_id),
                 )
-            return self.client.beta.messages.create(
-                model=self.model,
-                max_tokens=MAX_TOKENS,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                tools=tools,
-                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
-                messages=messages,
-                output_config={"effort": self.effort},
-                # If a safety classifier declines, retry on Anthropic's recommended model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
+            else:
+                stream = self.client.beta.messages.stream(
+                    model=self.model,
+                    max_tokens=MAX_TOKENS,
+                    system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                    tools=tools,
+                    tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+                    messages=messages,
+                    # Thinking is always on; "summarized" lets the page show it.
+                    thinking={"type": "adaptive", "display": "summarized"},
+                    output_config={"effort": self.effort},
+                    # If a safety classifier declines, retry on Anthropic's recommended model.
+                    betas=["server-side-fallback-2026-07-01"],
+                    fallbacks="default",
+                )
+            with stream as events:
+                for event in events:
+                    if on_event is not None:
+                        _forward(event, on_event)
+                return events.get_final_message()
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise AssistantSetupError(bad_key(self.key_var)) from e
         except TypeError as e:
@@ -167,6 +195,19 @@ class AnthropicProvider:
             raise AssistantUnavailable(UNREACHABLE) from e
         except anthropic.APIStatusError as e:
             raise AssistantUnavailable(f"The AI service had a problem ({e.status_code}). Try again.") from e
+        except anthropic.APIError as e:  # an error event part-way through the stream
+            raise AssistantUnavailable("The AI service stopped part-way through. Try again.") from e
+
+
+def _forward(event, on_event):
+    """Pass on the parts of an Anthropic stream event the page shows."""
+    if event.type == "content_block_start" and event.content_block.type == "tool_use":
+        on_event("tool", event.content_block.name)
+    elif event.type == "content_block_delta":
+        if event.delta.type == "thinking_delta":
+            on_event("thinking", event.delta.thinking)
+        elif event.delta.type == "text_delta":
+            on_event("text", event.delta.text)
 
 
 # -- OpenAI Chat Completions --------------------------------------------------
@@ -187,7 +228,7 @@ class OpenAIChatProvider:
         self.opener = opener or urllib.request.urlopen
         self.session_id = None  # set per conversation; OpenCode Go requires it
 
-    def create(self, system, tools, messages):
+    def create(self, system, tools, messages, on_event=None):
         body = {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
@@ -195,6 +236,8 @@ class OpenAIChatProvider:
             "tools": [chat_tool(t) for t in tools],
             "tool_choice": "auto",
             "parallel_tool_calls": False,
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         request = urllib.request.Request(
             self.url,
@@ -202,7 +245,7 @@ class OpenAIChatProvider:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "Accept": "application/json",
+                "Accept": "text/event-stream, application/json",
                 "User-Agent": USER_AGENT,
                 **session_headers(self.session_id),
             },
@@ -210,7 +253,7 @@ class OpenAIChatProvider:
         )
         try:
             with self.opener(request, timeout=REQUEST_TIMEOUT) as response:
-                data = json.loads(response.read())
+                data = read_chat(response, on_event)
         except urllib.error.HTTPError as e:
             raise self._http_error(e) from e
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
@@ -346,7 +389,71 @@ def chat_reply(data):
     stop = _FINISH_REASONS.get(choice.get("finish_reason"), "end_turn")
     if any(b["type"] == "tool_use" for b in content):
         stop = "tool_use"  # some models say "stop" even when they called a tool
-    return Reply(stop_reason=stop, content=content)
+    usage = data.get("usage") or {}
+    tokens = {"input": usage.get("prompt_tokens") or 0, "output": usage.get("completion_tokens") or 0}
+    return Reply(stop_reason=stop, content=content, usage=tokens if usage else None)
+
+
+def read_chat(response, on_event=None):
+    """A Chat Completions response as one completion dict, streamed or not.
+
+    Some services ignore "stream": true and answer with plain JSON; take either.
+    """
+    first = response.readline()
+    while first and not first.strip():
+        first = response.readline()
+    if first.lstrip().startswith(b"{"):
+        return json.loads(first + response.read())
+    return chat_stream(itertools.chain([first], response), on_event)
+
+
+def chat_stream(lines, on_event=None):
+    """Server-sent Chat Completions chunks, put back together as one completion."""
+    emit = on_event or (lambda kind, data: None)
+    texts, reasoning, calls, finish, usage = [], [], {}, None, None
+    for raw in lines:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue  # comments, event names, keep-alives
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        chunk = json.loads(payload)
+        if chunk.get("error"):
+            message = chunk["error"].get("message") if isinstance(chunk["error"], dict) else chunk["error"]
+            raise AssistantUnavailable(f"The AI service stopped part-way through: {message}. Try again.")
+        usage = chunk.get("usage") or usage  # the last chunk, when asked for
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if delta.get("reasoning_content"):
+                reasoning.append(delta["reasoning_content"])
+                emit("thinking", delta["reasoning_content"])
+            if delta.get("content"):
+                texts.append(delta["content"])
+                emit("text", delta["content"])
+            for part in delta.get("tool_calls") or []:
+                call = calls.setdefault(part.get("index", len(calls)), {"id": None, "name": "", "arguments": ""})
+                function = part.get("function") or {}
+                if part.get("id"):
+                    call["id"] = part["id"]
+                if function.get("name"):
+                    if not call["name"]:
+                        emit("tool", function["name"])
+                    call["name"] += function["name"]
+                call["arguments"] += function.get("arguments") or ""
+            finish = choice.get("finish_reason") or finish
+    message = {"role": "assistant", "content": "".join(texts) or None}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    if calls:
+        message["tool_calls"] = [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+            for _i, c in sorted(calls.items())
+        ]
+    out = {"choices": [{"index": 0, "message": message, "finish_reason": finish}]}
+    if usage:
+        out["usage"] = usage
+    return out
 
 
 # -- model discovery -----------------------------------------------------------

@@ -44,7 +44,7 @@ class FakeOpener:
         body = self.routes[request.full_url] if self.routes else self.bodies.pop(0)
         if isinstance(body, Exception):
             raise body
-        return FakeResponse(json.dumps(body).encode())
+        return FakeResponse(body if isinstance(body, bytes) else json.dumps(body).encode())
 
     def sent(self, i=-1):
         return json.loads(self.requests[i].data)
@@ -65,6 +65,16 @@ def tool_call(call_id, name, args):
 def http_error(code, body):
     return urllib.error.HTTPError("https://x/chat/completions", code, "err", {},
                                   io.BytesIO(json.dumps(body).encode()))
+
+
+def sse(*chunks):
+    """A streamed Chat Completions body."""
+    lines = [": keep-alive", ""] + [f"data: {json.dumps(c)}\n" for c in chunks] + ["data: [DONE]", ""]
+    return "\n".join(lines).encode()
+
+
+def delta(finish=None, **fields):
+    return {"choices": [{"index": 0, "delta": fields, "finish_reason": finish}]}
 
 
 def chat_provider(*bodies):
@@ -136,6 +146,42 @@ class ChatTranslationTest(unittest.TestCase):
     def test_invalid_json_arguments_are_kept_as_text(self):
         reply = chat_reply(completion(None, [tool_call("c1", "remember", "{not json")], "tool_calls"))
         self.assertEqual(reply.content[0]["input"], "{not json")
+
+
+class ChatStreamTest(unittest.TestCase):
+    def test_streamed_reply_is_reassembled_and_heard_as_it_arrives(self):
+        provider, opener = chat_provider(sse(
+            delta(role="assistant", reasoning_content="They want "),
+            delta(reasoning_content="a vocal."),
+            delta(content="Here it is."),
+            delta(tool_calls=[{"index": 0, "id": "c1", "type": "function",
+                               "function": {"name": "propose_changes", "arguments": '{"acti'}}]),
+            delta(tool_calls=[{"index": 0, "function": {"arguments": 'ons": []}'}}]),
+            delta(finish="tool_calls"),
+            {"choices": [], "usage": {"prompt_tokens": 900, "completion_tokens": 45}},
+        ))
+        heard = []
+        out = provider.create("sys", [], [{"role": "user", "content": "hi"}],
+                              on_event=lambda kind, data: heard.append((kind, data)))
+        self.assertTrue(opener.sent()["stream"])
+        self.assertEqual(opener.sent()["stream_options"], {"include_usage": True})
+        self.assertEqual(out.usage, {"input": 900, "output": 45})
+        self.assertEqual(out.stop_reason, "tool_use")
+        self.assertEqual(out.content, [
+            {"type": "thinking", "thinking": "They want a vocal."},
+            {"type": "text", "text": "Here it is."},
+            {"type": "tool_use", "id": "c1", "name": "propose_changes", "input": {"actions": []}},
+        ])
+        self.assertEqual(heard, [
+            ("thinking", "They want "), ("thinking", "a vocal."),
+            ("text", "Here it is."), ("tool", "propose_changes"),
+        ])
+
+    def test_error_part_way_through_is_a_sentence(self):
+        provider, _ = chat_provider(sse(delta(content="Hel"), {"error": {"message": "overloaded"}}))
+        with self.assertRaises(AssistantUnavailable) as ctx:
+            provider.create("sys", [], [])
+        self.assertIn("overloaded", str(ctx.exception))
 
 
 class ChatErrorTest(unittest.TestCase):
@@ -312,16 +358,16 @@ class ProviderChoiceTest(unittest.TestCase):
             self.make(HOLYSOUND_PROVIDER="openai")
 
     def test_gateway_request_drops_claude_only_options(self):
-        create = mock.Mock(return_value="reply")
+        create = mock.MagicMock()
         client = mock.Mock()
-        client.messages.create = create
+        client.messages.stream = create
         AnthropicProvider(client, model="qwen3.8-max", gateway=True).create("sys", [], [])
         kwargs = create.call_args.kwargs
         self.assertEqual(kwargs["system"], "sys")
         self.assertEqual(kwargs["tool_choice"], {"type": "auto"})
-        for key in ("betas", "fallbacks", "output_config"):
+        for key in ("betas", "fallbacks", "output_config", "thinking"):
             self.assertNotIn(key, kwargs)
-        client.beta.messages.create.assert_not_called()
+        client.beta.messages.stream.assert_not_called()
 
     def test_opencode_requests_carry_session_and_user_agent(self):
         # OpenCode Go answers 400 MissingSessionID without x-opencode-session.
@@ -332,9 +378,9 @@ class ProviderChoiceTest(unittest.TestCase):
         self.assertEqual(request.get_header("X-opencode-session"), "conv-1")
         self.assertEqual(request.get_header("User-agent"), "holy-sound/0.1")
 
-        create = mock.Mock(return_value="reply")
+        create = mock.MagicMock()
         client = mock.Mock()
-        client.messages.create = create
+        client.messages.stream = create
         gateway = AnthropicProvider(client, model="qwen3.8-flash", gateway=True)
         gateway.session_id = "conv-2"
         gateway.create("sys", [], [])

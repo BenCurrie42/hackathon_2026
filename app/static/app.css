@@ -189,6 +189,20 @@ svg { width: 1em; height: 1em; }
 .thinking span:nth-child(3) { animation-delay: 0.3s; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 
+.thoughts { margin: 0 0 8px; font-size: 13.5px; color: var(--muted); }
+.thoughts:only-child, .thoughts:has(+ [hidden]) { margin-bottom: 0; }
+.thoughts summary { cursor: pointer; width: max-content; list-style: none; user-select: none; }
+.thoughts summary::-webkit-details-marker { display: none; }
+.thoughts summary::before { content: "▸ "; }
+.thoughts[open] summary::before { content: "▾ "; }
+.thought-text {
+  margin-top: 6px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line);
+  white-space: pre-wrap; max-height: 16em; overflow-y: auto;
+}
+.msg.streaming .reply-status { color: var(--muted); font-size: 14px; }
+.msg.streaming .reply-text + .reply-status:not([hidden]) { margin-top: 8px; }
+.msg.streaming .reply-status .thinking { padding: 4px 0; border: 0; background: none; }
+
 .proposal {
   align-self: stretch; margin-top: -4px;
   border: 1px solid var(--line); border-radius: var(--radius);
@@ -239,7 +253,8 @@ svg { width: 1em; height: 1em; }
 .send svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .send:disabled { opacity: 0.4; }
 
-.chat-tools { display: flex; justify-content: center; padding: 6px 16px 12px; }
+.chat-tools { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 6px 16px 12px; }
+.token-count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .link-btn { border: 0; background: none; color: var(--muted); font-size: 13px; padding: 6px 8px; text-decoration: underline; text-underline-offset: 3px; }
 
 /* -- session ---------------------------------------------------------- */

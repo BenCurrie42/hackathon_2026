@@ -23,6 +23,7 @@ from app.providers import (
     AssistantSetupError,
     AssistantUnavailable,  # re-exported: app/server.py and tests import it from here
     provider_from_env,
+    token_usage,
 )
 from rig import TRACK_COLORS
 
@@ -185,6 +186,42 @@ def _inline_refs(schema):
     return walk(schema)
 
 
+class ReplyFeed:
+    """What the assistant is writing right now, for every page that's watching.
+
+    Events are (seq, kind, data): "start" and "end" bracket a turn, "step" marks
+    each model call in it, and "thinking" / "text" / "tool" carry the reply as
+    it streams (app/providers.py). Only the current turn is kept, so a page that
+    connects part-way through can catch up.
+    """
+
+    def __init__(self):
+        self._changed = threading.Condition()
+        self._events = []
+        self._seq = 0
+
+    def publish(self, kind, data=None):
+        with self._changed:
+            if kind == "start":
+                self._events = []
+            self._seq += 1
+            self._events.append((self._seq, kind, data))
+            self._changed.notify_all()
+
+    def cursor(self):
+        """Where a newly connected page starts: the beginning of a turn in progress, else now."""
+        with self._changed:
+            if self._events and self._events[-1][1] != "end":
+                return self._events[0][0] - 1
+            return self._seq
+
+    def since(self, seq, timeout):
+        """Events after seq, waiting up to timeout seconds for the first one."""
+        with self._changed:
+            self._changed.wait_for(lambda: self._seq > seq, timeout)
+            return [e for e in self._events if e[0] > seq]
+
+
 ONE_PROPOSAL = ("Ignored: only one propose_changes call per reply. Put every change for this "
                 "request in a single call, in order.")
 
@@ -199,6 +236,7 @@ class Conversation:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self.busy = False
+        self.feed = ReplyFeed()
         self.setup_error = None  # set when a request shows the key is missing or wrong
         self.reset()
 
@@ -207,6 +245,7 @@ class Conversation:
         self.messages = []
         self.transcript = []
         self.proposals = {}
+        self.usage = {"input": 0, "output": 0}  # tokens this conversation has used
         # (tool_use_id, proposal_id, other results) awaiting a tool_result. Other
         # results answer the reply's other tool calls; they go in the same message.
         self._open_tool_use = None
@@ -228,22 +267,22 @@ class Conversation:
         (the measurements of an imported folder, say).
         """
         with self._lock:
-            self.busy = True
+            self._begin()
             try:
                 return self._send(text, session_notes, attachment)
             finally:
-                self.busy = False
+                self._finish()
 
     def follow_up(self, session_notes):
         """Let Claude react to applied results without a new message (after listening)."""
         with self._lock:
             if self._open_tool_use is None:
                 return []
-            self.busy = True
+            self._begin()
             try:
                 return self._send(None, session_notes)
             finally:
-                self.busy = False
+                self._finish()
 
     def proposal(self, proposal_id):
         return self.proposals.get(proposal_id)
@@ -256,6 +295,15 @@ class Conversation:
             p["results"] = results
 
     # -- internals ----------------------------------------------------------
+
+    def _begin(self):
+        self.busy = True
+        self.feed.publish("start")
+
+    def _finish(self):
+        # Not busy before "end": a page refreshing on "end" must see the finished turn.
+        self.busy = False
+        self.feed.publish("end")
 
     def _entry(self, **fields):
         entry = {"id": next(self._ids), **fields}
@@ -285,6 +333,13 @@ class Conversation:
         mark = len(self.messages)
         user_entry = self._entry(role="user", text=text) if text is not None else None
         shown = [user_entry] if user_entry else []
+        thoughts = []  # thinking not yet attached to a reply in the chat
+
+        def said(text, **fields):
+            if thoughts:
+                fields["thinking"] = "\n\n".join(thoughts)
+                thoughts.clear()
+            return self._entry(role="assistant", text=text, **fields)
 
         try:
             fixes = 0
@@ -295,17 +350,19 @@ class Conversation:
                     raise _Refused()
                 blocks = _replayable(response.content)
                 self.messages.append({"role": "assistant", "content": blocks})
+                thoughts.extend(b["thinking"].strip() for b in blocks
+                                if b["type"] == "thinking" and (b.get("thinking") or "").strip())
 
                 reply = "\n\n".join(b["text"] for b in blocks if b["type"] == "text").strip()
                 calls = [b for b in blocks if b["type"] == "tool_use"]
                 if not calls:
-                    return shown + [self._entry(role="assistant", text=reply or "…")]
+                    return shown + [said(reply or "…")]
 
                 # Every tool call gets a result, in order. One proposal per reply:
                 # the first propose_changes counts, any others are sent back.
                 proposing = any(c["name"] == "propose_changes" for c in calls)
                 if reply and not proposing:
-                    shown.append(self._entry(role="assistant", text=reply))
+                    shown.append(said(reply))
                 results, proposal, proposal_call, invalid = [], None, None, None
                 for c in calls:
                     if not isinstance(c["input"], dict):
@@ -345,7 +402,7 @@ class Conversation:
                         if other["id"] != pid and other["status"] == "pending":
                             other["status"] = "superseded"
                     self._open_tool_use = (proposal_call["id"], pid, results)
-                    return shown + [self._entry(role="assistant", text=reply, proposal_id=pid)]
+                    return shown + [said(reply, proposal_id=pid)]
 
                 if invalid is not None:
                     fixes += 1
@@ -416,10 +473,17 @@ class Conversation:
     def _create(self, provider):
         try:
             provider.session_id = self.session_id
-            return provider.create(SYSTEM, _tools(), self.messages)
+            self.feed.publish("step")
+            response = provider.create(SYSTEM, _tools(), self.messages, on_event=self.feed.publish)
         except AssistantSetupError as e:
             self.setup_error = str(e)
             raise
+        # Counted even if the turn is later abandoned: the tokens were spent.
+        spent_in, spent_out = token_usage(response)
+        self.usage["input"] += spent_in
+        self.usage["output"] += spent_out
+        self.feed.publish("usage", dict(self.usage))
+        return response
 
 
 class _Refused(Exception):

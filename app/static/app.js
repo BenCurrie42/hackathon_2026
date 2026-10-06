@@ -12,6 +12,7 @@ let chatSig = "";
 let songsSig = "";
 let stockDevices = null;
 const strips = new Map();     // "t0" / "r1" -> strip element
+const openThoughts = new Set(); // ids of chat entries whose "Thinking" is expanded
 const holding = new WeakSet(); // controls the user is touching: polling won't move them
 
 // -- API --------------------------------------------------------------------
@@ -69,6 +70,7 @@ function render(next) {
   renderLive();
   renderAi();
   renderChat();
+  renderUsage(state.usage);
 }
 
 // -- header ------------------------------------------------------------------
@@ -132,8 +134,20 @@ function renderAi() {
   banner.textContent = state.ai.message || "";
 }
 
+function renderUsage(usage) {
+  const el = $("#token-count");
+  const total = usage ? usage.input + usage.output : 0;
+  el.hidden = total === 0;
+  el.textContent = `${tokens(total)} tokens used`;
+  el.title = total ? `${tokens(usage.input)} sent · ${tokens(usage.output)} written, this conversation` : "";
+}
+
+function tokens(n) {
+  return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+}
+
 function renderChat() {
-  const sig = JSON.stringify([state.chat, state.busy, sending, state.live.connected]);
+  const sig = JSON.stringify([state.chat, state.busy, sending, state.live.connected, reply !== null]);
   if (sig === chatSig) return;
   chatSig = sig;
 
@@ -144,7 +158,11 @@ function renderChat() {
   welcome.hidden = state.chat.length > 0 || sending !== null;
 
   for (const entry of state.chat) {
-    if (entry.text) box.append(bubble(entry.role, entry.text));
+    if (entry.text || entry.thinking) {
+      const el = bubble(entry.role, entry.text || "");
+      if (entry.thinking) el.prepend(thoughts(entry.thinking, entry.id));
+      box.append(el);
+    }
     if (entry.proposal) box.append(proposalCard(entry.proposal));
   }
   if (sending !== null) {
@@ -152,16 +170,100 @@ function renderChat() {
     pending.classList.add("pending");
     box.append(pending);
   }
-  if (sending !== null || state.busy) {
-    const dots = document.createElement("div");
-    dots.className = "thinking";
-    dots.setAttribute("aria-label", "Thinking");
-    dots.innerHTML = "<span></span><span></span><span></span>";
-    box.append(dots);
+  if (reply) {
+    box.append(reply.el);
+  } else if (sending !== null || state.busy) {
+    box.append(dots());
   }
   if (nearBottom || sending !== null) box.scrollTop = box.scrollHeight;
   $("#composer .send").disabled = sending !== null || state.busy;
   $("#import-btn").disabled = sending !== null || state.busy;
+}
+
+function dots() {
+  const el = document.createElement("div");
+  el.className = "thinking";
+  el.setAttribute("aria-label", "Thinking");
+  el.innerHTML = "<span></span><span></span><span></span>";
+  return el;
+}
+
+// Collapsed by default: a volunteer wants the answer, the reasoning is there if they're curious.
+function thoughts(text, id) {
+  const el = document.createElement("details");
+  el.className = "thoughts";
+  el.innerHTML = "<summary>Thinking</summary><div class=\"thought-text\"></div>";
+  $(".thought-text", el).textContent = text;
+  if (id !== undefined) {
+    el.open = openThoughts.has(id);
+    el.addEventListener("toggle", () => { el.open ? openThoughts.add(id) : openThoughts.delete(id); });
+  }
+  return el;
+}
+
+// -- the reply being written -------------------------------------------------
+// /api/events streams the assistant's reply as it's written. The finished turn
+// arrives through /api/state as usual, so on "end" this bubble just goes away.
+
+const TOOL_LABELS = {
+  propose_changes: "Writing up the changes…",
+  remember: "Saving that for next week…",
+};
+
+let reply = null;  // { el, thinking, text, tool } while a reply is streaming
+
+function startReply() {
+  const el = document.createElement("div");
+  el.className = "msg assistant streaming";
+  el.append(thoughts(""), document.createElement("div"), document.createElement("div"));
+  el.children[1].className = "reply-text";
+  el.children[2].className = "reply-status";
+  reply = { el, thinking: "", text: "", tool: null };
+  chatSig = "";
+  if (state) renderChat();
+  paintReply();
+}
+
+let paintQueued = false;
+function paintReply() {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    if (!reply) return;
+    const [think, text, status] = reply.el.children;
+    think.hidden = !reply.thinking;
+    $("summary", think).textContent = reply.text || reply.tool ? "Thinking" : "Thinking…";
+    $(".thought-text", think).textContent = reply.thinking;
+    text.innerHTML = markdownLite(reply.text);
+    text.hidden = !reply.text;
+    status.replaceChildren();
+    if (reply.tool) status.textContent = TOOL_LABELS[reply.tool] || "Working…";
+    else if (!reply.text && !reply.thinking) status.append(dots());
+    status.hidden = !status.hasChildNodes();
+    const box = $("#messages");
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 160) box.scrollTop = box.scrollHeight;
+  });
+}
+
+function listen() {
+  const events = new EventSource("/api/events");
+  const on = (kind, fn) => events.addEventListener(kind, (e) => { fn(JSON.parse(e.data)); paintReply(); });
+  on("start", startReply);
+  on("step", () => {
+    if (!reply) startReply();
+    if (reply.text && !reply.text.endsWith("\n\n")) reply.text += "\n\n";
+    reply.tool = null;
+  });
+  on("thinking", (t) => { if (reply) reply.thinking += t; });
+  on("text", (t) => { if (reply) reply.text += t; });
+  on("tool", (name) => { if (reply) reply.tool = name; });
+  on("usage", renderUsage);
+  on("end", () => {
+    reply = null;
+    chatSig = "";
+    poll();
+  });
 }
 
 function bubble(role, text) {
@@ -948,4 +1050,5 @@ function toast(message, kind = "info") {
   setTimeout(() => el.remove(), kind === "error" ? 8000 : 5000);
 }
 
+listen();
 poll();

@@ -51,17 +51,47 @@ def reply(*blocks, stop="end_turn"):
     return SimpleNamespace(stop_reason=stop, content=list(blocks))
 
 
+def thinking(t):
+    return Block(type="thinking", thinking=t, signature="sig")
+
+
+class ScriptedStream:
+    """Stands in for the SDK's MessageStream: replays a canned reply as stream events."""
+
+    def __init__(self, message):
+        self.message = message
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        for block in self.message.content:
+            yield SimpleNamespace(type="content_block_start", content_block=block)
+            if block.type == "thinking":
+                yield SimpleNamespace(type="content_block_delta",
+                                      delta=SimpleNamespace(type="thinking_delta", thinking=block.thinking))
+            elif block.type == "text":
+                yield SimpleNamespace(type="content_block_delta",
+                                      delta=SimpleNamespace(type="text_delta", text=block.text))
+
+    def get_final_message(self):
+        return self.message
+
+
 class ScriptedClaude:
-    """Stands in for anthropic.Anthropic: returns canned replies, records requests."""
+    """Stands in for anthropic.Anthropic: streams canned replies, records requests."""
 
     def __init__(self, *script):
         self.script = list(script)
         self.requests = []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self._stream))
 
-    def _create(self, **kwargs):
+    def _stream(self, **kwargs):
         self.requests.append(copy.deepcopy(kwargs))
-        return self.script.pop(0)
+        return ScriptedStream(self.script.pop(0))
 
 
 class FakeLiveCase(unittest.TestCase):
@@ -248,19 +278,44 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual(chat.proposal(pid)["status"], "superseded")
         self.assertIn("hasn't applied", claude.requests[1]["messages"][-1]["content"][0]["content"])
 
+    def test_reply_streams_to_the_feed_and_keeps_its_thinking(self):
+        answer = reply(thinking("They haven't said which input."), text("Which input?"))
+        answer.usage = SimpleNamespace(input_tokens=100, output_tokens=20,
+                                       cache_read_input_tokens=1000, cache_creation_input_tokens=None)
+        claude = ScriptedClaude(answer)
+        chat = Conversation(client_factory=lambda: claude)
+        start = chat.feed.cursor()
+        chat.send("Set up a lead vocal", "notes")
+        events = [(kind, data) for _seq, kind, data in chat.feed.since(start, 0)]
+        self.assertEqual(events, [
+            ("start", None), ("step", None),
+            ("thinking", "They haven't said which input."), ("text", "Which input?"),
+            ("usage", {"input": 1100, "output": 20}),
+            ("end", None),
+        ])
+        self.assertEqual(chat.usage, {"input": 1100, "output": 20})
+        self.assertEqual(chat.transcript[-1]["thinking"], "They haven't said which input.")
+        self.assertEqual(claude.requests[0]["thinking"], {"type": "adaptive", "display": "summarized"})
+        # The thinking block goes back unchanged, signature and all.
+        self.assertEqual(chat.messages[-1]["content"][0]["signature"], "sig")
+        # A page that connects after the turn doesn't replay it.
+        self.assertEqual(chat.feed.since(chat.feed.cursor(), 0), [])
+        chat.reset()
+        self.assertEqual(chat.usage, {"input": 0, "output": 0})
+
     def test_failed_request_leaves_history_valid(self):
         def boom(**_):
             raise RuntimeError("network down")
 
         claude = ScriptedClaude(reply(text("Hello again.")))
-        real = claude.beta.messages.create
+        real = claude.beta.messages.stream
         chat = Conversation(client_factory=lambda: claude)
-        claude.beta.messages.create = boom
+        claude.beta.messages.stream = boom
         with self.assertRaises(RuntimeError):
             chat.send("Hi", "notes")
         self.assertEqual(chat.messages, [])
         self.assertEqual(chat.transcript, [])
-        claude.beta.messages.create = real
+        claude.beta.messages.stream = real
         chat.send("Hi", "notes")
         self.assertEqual([m["role"] for m in chat.messages], ["user", "assistant"])
 
@@ -269,7 +324,7 @@ class ConversationTest(unittest.TestCase):
             raise TypeError('"Could not resolve authentication method. Expected one of api_key..."')
 
         claude = ScriptedClaude()
-        claude.beta.messages.create = no_key
+        claude.beta.messages.stream = no_key
         chat = Conversation(client_factory=lambda: claude)
         with self.assertRaises(AssistantUnavailable) as ctx:
             chat.send("Hi", "notes")
@@ -339,6 +394,23 @@ class ServerTest(FakeLiveCase):
         self.http.shutdown()
         self.http.server_close()
         super().tearDown()
+
+    def test_events_stream_the_reply_to_open_pages(self):
+        conn = http.client.HTTPConnection(*self.http.server_address, timeout=5)
+        conn.request("GET", "/api/events")
+        stream = conn.getresponse()
+        self.assertEqual(stream.getheader("Content-Type"), "text/event-stream")
+        self.request("POST", "/api/chat", {"message": "Add a click"})
+        kinds, texts = [], []
+        while "end" not in kinds:
+            line = stream.readline().decode().strip()
+            if line.startswith("event: "):
+                kinds.append(line[7:])
+            elif line.startswith("data: ") and kinds[-1] == "text":
+                texts.append(json.loads(line[6:]))
+        conn.close()
+        self.assertEqual(kinds, ["start", "step", "text", "tool", "usage", "end"])
+        self.assertEqual(texts, ["Adding a click for the drummer."])
 
     def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection(*self.http.server_address)

@@ -7,7 +7,8 @@
 
 Standard library HTTP only. The page is static files in app/static; everything
 else is a small JSON API over Live (app/live.py) and the conversation
-(app/assistant.py).
+(app/assistant.py), plus /api/events, which streams the assistant's reply to
+every open page as it's written.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 TEMPLATE = ROOT / "templates" / "test.als"
 DEFAULT_PORT = 8765
+KEEP_ALIVE = 15  # seconds between comments on a quiet event stream
 
 # What the mixer panel may do directly, without going through the assistant.
 # Everything here is undoable in Live with Cmd+Z.
@@ -96,6 +98,7 @@ class App:
             "ai": self.ai_state(),
             "chat": self.transcript(),
             "busy": self.chat.busy,
+            "usage": self.chat.usage,
             "colors": {name: f"#{rgb:06x}" for name, rgb in TRACK_COLORS.items()},
             "room": self.room.facts() if self.room else [],
         }
@@ -189,7 +192,7 @@ def make_handler(app):
         server_version = "HolySound"
 
         def log_message(self, fmt, *args):  # quieter than the default
-            if not self.path.startswith("/api/state"):
+            if not self.path.startswith(("/api/state", "/api/events")):
                 super().log_message(fmt, *args)
 
         # -- access ------------------------------------------------------
@@ -222,6 +225,25 @@ def make_handler(app):
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the page reloaded or closed mid-reply; nothing to do
+
+        def _events(self):
+            """Server-sent events from the conversation's ReplyFeed, until the page goes away."""
+            feed = app.chat.feed
+            seq = feed.cursor()  # before the headers, so nothing published after them is missed
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                while True:
+                    events = feed.since(seq, KEEP_ALIVE)
+                    if not events:
+                        self.wfile.write(b": still here\n\n")
+                    for seq, kind, data in events:
+                        self.wfile.write(f"event: {kind}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the page closed or reloaded
 
         def _error(self, message, status=HTTPStatus.BAD_REQUEST):
             self._json({"error": message}, status)
@@ -258,6 +280,8 @@ def make_handler(app):
             try:
                 if url.path == "/api/state":
                     return self._json(app.state())
+                if url.path == "/api/events":
+                    return self._events()
                 if url.path == "/api/presets":
                     device = parse_qs(url.query).get("device", [""])[0]
                     return self._json({"presets": app.live.presets(device)})
