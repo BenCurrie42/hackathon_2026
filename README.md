@@ -43,6 +43,11 @@ also:
 - play a song, listen to Live's meters, and follow up on what it heard
 - remember your room (interface, who's on which input, which outputs go to the
   in-ears) so next week you don't have to say it again
+- listen to a song's stem files (without playing them) to tell the lead vocal
+  from the backing vocals and find the choruses
+- sort the mixer into Vocals, Instruments and Click & playback folders, and
+  move a track that landed in the wrong one
+- show its reply and its thinking as it writes them
 - hand you a `.als` to download when Live isn't open
 
 **The command line**, `rig.py`, does the same kind of thing by hand:

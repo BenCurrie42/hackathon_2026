@@ -197,6 +197,7 @@ live_control/
     starting_fader.py           Fader for tracks an import creates, so the sum of
                                 every stem doesn't clip
     timecode.py                 Spots SMPTE/timecode stems, which start muted
+    stereo_pairs.py             Pairs L/R stems so both sides get the same gain
 file_builder/                   Writes a .als with Live closed
     rig_spec.py                 RigSpec / TrackSpec, the contract
     write_als.py                render(spec, template_path) -> bytes
@@ -209,6 +210,8 @@ app/                            Web app: chat + mixer, `uv run python -m app`
     live.py                     Shared, self-reconnecting RigLink connection
     audio_files.py              Folder browsing + stdlib WAV/AIFF level measurement
     room.py                     Week-to-week room memory (~/.holysound/room.json)
+    song_map.py                 Reads a song's stems as text: when each part sounds,
+                                sections, tempo from the click, likely lead vocal
     folders.py                  Mixer folders (Vocals / Instruments / Click & playback / Other):
                                 sorted by track name, plus moves remembered in ~/.holysound/folders.json
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
@@ -271,7 +274,9 @@ song-to-song transitions; MIDI mapping; clip editing beyond gain; group tracks.
   only maps `add_track` onto `RigSpec`.
 - **One stem loudness measure.** `app/audio_files.py` (90th percentile of 0.4 s
   windows) and `live_control/stem_level.py` (active RMS, drives `rig.py song
-  import`) measure differently. Pick one.
+  import`) measure differently. Pick one. `app/song_map.py` adds a third use
+  (1 s envelope, "sounding" relative to each stem's own loud level), which only
+  needs relative levels, so it can stay separate.
 
 ## Working notes
 
