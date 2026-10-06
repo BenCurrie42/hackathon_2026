@@ -92,6 +92,8 @@ svg { width: 1em; height: 1em; }
 .status.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(116, 211, 156, 0.2); }
 .status.ok { color: var(--text); }
 .status.bad .dot { background: var(--warn); }
+.status.demo { color: var(--text); background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.status.demo .dot { background: var(--accent); }
 
 .transport { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 

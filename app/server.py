@@ -57,9 +57,10 @@ DIRECT_COMMANDS = {
 
 
 class App:
-    def __init__(self, live, conversation, key=None, folders=None):
+    def __init__(self, live, conversation, key=None, folders=None, demo=False):
         self.room = conversation.room
         self.folders = folders or FolderMemory()
+        self.demo = demo  # True when the "Live" behind this is the built-in pretend one
         self.clock = time.monotonic
         self._touched = {}  # track name (case-folded) -> (lit until, name)
         self.live = live
@@ -143,6 +144,7 @@ class App:
             ],
             "room": self.room.facts() if self.room else [],
             "activity": self.activity(),
+            "demo": self.demo,
         }
 
     # -- actions --------------------------------------------------------
@@ -504,7 +506,7 @@ def main(argv=None):
         live_port = fake_server.server_address[1]
 
     key = secrets.token_urlsafe(9) if args.lan else None
-    app = App(LiveLink(port=live_port), Conversation(room=RoomMemory()), key=key)
+    app = App(LiveLink(port=live_port), Conversation(room=RoomMemory()), key=key, demo=args.fake_live)
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), make_handler(app))
     server.daemon_threads = True

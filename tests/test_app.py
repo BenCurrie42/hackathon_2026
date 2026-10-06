@@ -508,6 +508,11 @@ class ServerTest(FakeLiveCase):
         self.request("POST", "/api/live", {"cmd": "set_mute", "args": {"track_index": 0, "is_return": False, "on": True}})
         self.assertEqual(self.request("GET", "/api/state")[1]["activity"], [])
 
+    def test_the_page_is_told_when_live_is_the_pretend_one(self):
+        self.assertIs(self.request("GET", "/api/state")[1]["demo"], False)
+        self.app.demo = True
+        self.assertIs(self.request("GET", "/api/state")[1]["demo"], True)
+
     def test_direct_mixer_commands_are_whitelisted(self):
         self.fake.create_audio_track("Vox")
         status, body = self.request("POST", "/api/live", {"cmd": "set_volume", "args": {"track_index": 0, "db": -6}})

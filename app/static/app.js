@@ -89,7 +89,9 @@ function renderLive() {
   const snap = live.snapshot;
   if (live.connected) {
     const n = snap.tracks.length;
-    setStatus("ok", "Live connected", `· ${n} track${n === 1 ? "" : "s"}`);
+    // The pretend Live looks exactly like the real one, so say which this is.
+    if (state.demo) setStatus("demo", "Demo set, not Ableton", `· ${n} track${n === 1 ? "" : "s"}`);
+    else setStatus("ok", "Ableton connected", `· ${n} track${n === 1 ? "" : "s"}`);
   } else {
     setStatus("bad", "Live not connected");
   }
