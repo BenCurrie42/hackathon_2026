@@ -174,7 +174,8 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
 - Python 3.11+. **lxml, pydantic, typer, anthropic only.** Nothing else
   without asking; pytest is not yet approved (tests use stdlib unittest).
   `anthropic` is for the chat. The web app itself is stdlib `http.server`
-  plus static files, no framework or build step.
+  plus static files, no framework or build step. OpenCode Go's
+  OpenAI-compatible models go over stdlib `urllib`, not the `openai` package.
 - Stock Ableton devices only. No third-party plugins.
 - **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop.
 - Golden-file tests must run without Ableton installed.
@@ -202,6 +203,8 @@ file_builder/                   Writes a .als with Live closed
 app/                            Web app: chat + mixer, `uv run python -m app`
     server.py                   HTTP server and JSON API
     assistant.py                Claude conversation → proposed actions
+    providers.py                Who answers: Anthropic, or OpenCode Go models
+                                (OpenAI Chat or Anthropic format), and discovery
     actions.py                  Proposable actions (intent only) and how each runs
     live.py                     Shared, self-reconnecting RigLink connection
     audio_files.py              Folder browsing + stdlib WAV/AIFF level measurement

@@ -3,6 +3,7 @@
     uv run python -m app                 # this computer only
     uv run python -m app --lan           # also phones/tablets on the same Wi-Fi
     uv run python -m app --fake-live     # no Ableton? use a pretend Live Set
+    uv run python -m app --list-models   # which OpenCode Go models can answer
 
 Standard library HTTP only. The page is static files in app/static; everything
 else is a small JSON API over Live (app/live.py) and the conversation
@@ -404,9 +405,16 @@ def main(argv=None):
     parser.add_argument("--lan", action="store_true", help="Let phones and tablets on the same Wi-Fi connect.")
     parser.add_argument("--fake-live", action="store_true", help="Use a pretend Live Set instead of Ableton.")
     parser.add_argument("--no-browser", action="store_true", help="Don't open a browser window.")
+    parser.add_argument("--list-models", action="store_true",
+                        help="List the OpenCode Go models and which ones Holy Sound can use, then quit.")
     args = parser.parse_args(argv)
 
     load_dotenv()
+    if args.list_models:
+        from app.providers import list_models_text
+
+        print(list_models_text())
+        return
     live_port = 9877
     if args.fake_live:
         from app import fake_live

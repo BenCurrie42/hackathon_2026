@@ -11,18 +11,22 @@ is only a proposal, and its result tells Claude what the volunteer decided.
 from __future__ import annotations
 
 import itertools
-import os
 import re
 import threading
 
 from pydantic import BaseModel, Field, ValidationError
 
 from app.actions import Proposal, is_audible, is_destructive
+from app.providers import (
+    AnthropicProvider,
+    AssistantSetupError,
+    AssistantUnavailable,  # re-exported: app/server.py and tests import it from here
+    provider_from_env,
+)
 from rig import TRACK_COLORS
 
-MODEL = os.environ.get("HOLYSOUND_MODEL", "claude-opus-5-5")
-EFFORT = os.environ.get("HOLYSOUND_EFFORT", "medium")
-MAX_TOKENS = 16000
+# The model, effort and provider come from .env, read when the AI is first used
+# (app/providers.py): HOLYSOUND_PROVIDER, HOLYSOUND_MODEL, HOLYSOUND_EFFORT.
 FIX_ATTEMPTS = 2
 MAX_STEPS = 6  # model calls per message: remembering, fixing, then answering
 
@@ -172,14 +176,26 @@ def _tools():
 
 
 def _inline_refs(schema):
-    """Replace $ref pointers with the definitions they name."""
+    """Replace $ref pointers with the definitions they name.
+
+    Also keeps to JSON Schema that open models (via OpenCode Go) follow:
+    oneOf becomes anyOf (the action variants never overlap, so it means the
+    same), and a const also gets a one-value enum.
+    """
     defs = schema.pop("$defs", {})
 
     def walk(node):
         if isinstance(node, dict):
             if "$ref" in node:
                 return walk(dict(defs[node["$ref"].split("/")[-1]]))
-            return {k: walk(v) for k, v in node.items() if k != "discriminator"}
+            out = {}
+            for k, v in node.items():
+                if k == "discriminator":
+                    continue
+                out["anyOf" if k == "oneOf" else k] = walk(v)
+            if "const" in out and "enum" not in out:
+                out["enum"] = [out["const"]]
+            return out
         if isinstance(node, list):
             return [walk(v) for v in node]
         return node
@@ -187,14 +203,8 @@ def _inline_refs(schema):
     return walk(schema)
 
 
-NOT_SET_UP = (
-    "The AI isn't set up yet. Put ANTHROPIC_API_KEY=... in a .env file next to "
-    "README.md and restart Holy Sound."
-)
-
-
-class AssistantUnavailable(RuntimeError):
-    """No API key, or the AI service can't be reached. Message is a sentence."""
+ONE_PROPOSAL = ("Ignored: only one propose_changes call per reply. Put every change for this "
+                "request in a single call, in order.")
 
 
 class Conversation:
@@ -214,13 +224,18 @@ class Conversation:
         self.messages = []
         self.transcript = []
         self.proposals = {}
-        self._open_tool_use = None  # (tool_use_id, proposal_id) awaiting a tool_result
+        # (tool_use_id, proposal_id, other results) awaiting a tool_result. Other
+        # results answer the reply's other tool calls; they go in the same message.
+        self._open_tool_use = None
 
     # -- public -----------------------------------------------------------
 
     def client(self):
+        """The provider that answers (app/providers.py)."""
         if self._client is None:
-            self._client = self._client_factory()
+            made = self._client_factory()
+            # A bare Anthropic SDK client (or a test stand-in for one) gets wrapped.
+            self._client = made if hasattr(made, "create") else AnthropicProvider(made)
         return self._client
 
     def send(self, text, session_notes, attachment=None):
@@ -269,7 +284,9 @@ class Conversation:
         content = []
         reopen = self._open_tool_use
         if reopen:
-            content.append(self._tool_result(*reopen))
+            tool_use_id, proposal_id, others = reopen
+            content.extend(others)
+            content.append(self._tool_result(tool_use_id, proposal_id))
             self._open_tool_use = None
         body = f"<session>\n{session_notes}\n</session>\n\n"
         if text is None:
@@ -288,62 +305,76 @@ class Conversation:
 
         try:
             fixes = 0
-            unanswered = None  # a tool call we gave up on without a tool_result
+            unanswered = None  # tool results we gave up on, still to send
             for _step in range(MAX_STEPS):
                 response = self._create(client)
                 if response.stop_reason == "refusal":
                     raise _Refused()
-                self.messages.append({"role": "assistant", "content": _replayable(response.content)})
+                blocks = _replayable(response.content)
+                self.messages.append({"role": "assistant", "content": blocks})
 
-                reply = "\n\n".join(b.text for b in response.content if b.type == "text").strip()
-                call = next((b for b in response.content if b.type == "tool_use"), None)
-                if call is None:
+                reply = "\n\n".join(b["text"] for b in blocks if b["type"] == "text").strip()
+                calls = [b for b in blocks if b["type"] == "tool_use"]
+                if not calls:
                     return shown + [self._entry(role="assistant", text=reply or "…")]
 
-                if call.name == "remember":
-                    if reply:
-                        shown.append(self._entry(role="assistant", text=reply))
-                    outcome, note = self._remember(call.input)
-                    if note:
-                        shown.append(self._entry(role="note", text=note))
-                    self.messages.append({"role": "user", "content": [
-                        {"type": "tool_result", "tool_use_id": call.id, "content": outcome},
-                    ]})
-                    continue
+                # Every tool call gets a result, in order. One proposal per reply:
+                # the first propose_changes counts, any others are sent back.
+                proposing = any(c["name"] == "propose_changes" for c in calls)
+                if reply and not proposing:
+                    shown.append(self._entry(role="assistant", text=reply))
+                results, proposal, proposal_call, invalid = [], None, None, None
+                for c in calls:
+                    if not isinstance(c["input"], dict):
+                        result = _error_result(c, "That input wasn't valid JSON. Send it again as "
+                                                  "one JSON object.")
+                        if c["name"] == "propose_changes" and proposal_call is None and invalid is None:
+                            invalid = result
+                    elif c["name"] == "remember":
+                        outcome, note = self._remember(c["input"])
+                        if note:
+                            shown.append(self._entry(role="note", text=note))
+                        result = {"type": "tool_result", "tool_use_id": c["id"], "content": outcome}
+                    elif c["name"] != "propose_changes":
+                        result = _error_result(c, f"There's no tool called {c['name']}.")
+                    elif proposal_call is not None or invalid is not None:
+                        result = _error_result(c, ONE_PROPOSAL)
+                    else:
+                        try:
+                            proposal = Proposal.model_validate(c["input"])
+                            proposal_call = c
+                            continue  # answered once the volunteer decides
+                        except ValidationError as e:
+                            result = invalid = _error_result(
+                                c, "The changes didn't validate, so the volunteer hasn't seen them. "
+                                   f"Fix these and call propose_changes again:\n{_errors(e)}")
+                    results.append(result)
 
-                try:
-                    proposal = Proposal.model_validate(call.input)
-                except ValidationError as e:
+                if proposal_call is not None:
+                    pid = str(next(self._ids))
+                    self.proposals[pid] = {
+                        "id": pid,
+                        "actions": proposal.actions,
+                        "status": "pending",
+                        "results": None,
+                    }
+                    for other in self.proposals.values():
+                        if other["id"] != pid and other["status"] == "pending":
+                            other["status"] = "superseded"
+                    self._open_tool_use = (proposal_call["id"], pid, results)
+                    return shown + [self._entry(role="assistant", text=reply, proposal_id=pid)]
+
+                if invalid is not None:
                     fixes += 1
                     if fixes > FIX_ATTEMPTS:
-                        unanswered = call
+                        invalid["content"] = "Stopped here; the volunteer saw an apology instead."
+                        unanswered = results
                         break
-                    self.messages.append({"role": "user", "content": [{
-                        "type": "tool_result", "tool_use_id": call.id, "is_error": True,
-                        "content": "The changes didn't validate, so the volunteer hasn't seen them. "
-                                   f"Fix these and call propose_changes again:\n{_errors(e)}",
-                    }]})
-                    continue
-
-                pid = str(next(self._ids))
-                self.proposals[pid] = {
-                    "id": pid,
-                    "actions": proposal.actions,
-                    "status": "pending",
-                    "results": None,
-                }
-                for other in self.proposals.values():
-                    if other["id"] != pid and other["status"] == "pending":
-                        other["status"] = "superseded"
-                self._open_tool_use = (call.id, pid)
-                return shown + [self._entry(role="assistant", text=reply, proposal_id=pid)]
+                self.messages.append({"role": "user", "content": results})
 
             # Gave up. Answer the dangling tool call, or the history stops being valid.
             if unanswered is not None:
-                self.messages.append({"role": "user", "content": [{
-                    "type": "tool_result", "tool_use_id": unanswered.id, "is_error": True,
-                    "content": "Stopped here; the volunteer saw an apology instead.",
-                }]})
+                self.messages.append({"role": "user", "content": unanswered})
             return shown + [self._entry(
                 role="assistant",
                 text="Sorry — I couldn't work out the right changes for that. Could you say it another way?",
@@ -399,41 +430,12 @@ class Conversation:
             p["status"] = "superseded"
         return {"type": "tool_result", "tool_use_id": tool_use_id, "content": outcome}
 
-    def _create(self, client):
-        import anthropic
-
+    def _create(self, provider):
         try:
-            return client.beta.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
-                tools=_tools(),
-                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
-                messages=self.messages,
-                output_config={"effort": EFFORT},
-                # If a safety classifier declines, retry on Anthropic's recommended model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
-        except anthropic.AuthenticationError as e:
-            self.setup_error = (
-                "The AI key isn't valid. Check ANTHROPIC_API_KEY in the .env file and restart Holy Sound."
-            )
-            raise AssistantUnavailable(self.setup_error) from e
-        except TypeError as e:
-            # The SDK only notices a missing key when it makes the first request.
-            if "authentication" not in str(e):
-                raise
-            self.setup_error = NOT_SET_UP
-            raise AssistantUnavailable(self.setup_error) from e
-        except anthropic.RateLimitError as e:
-            raise AssistantUnavailable("The AI service is busy right now. Try again in a minute.") from e
-        except anthropic.APIConnectionError as e:
-            raise AssistantUnavailable(
-                "Couldn't reach the AI service. Check this computer's internet connection."
-            ) from e
-        except anthropic.APIStatusError as e:
-            raise AssistantUnavailable(f"The AI service had a problem ({e.status_code}). Try again.") from e
+            return provider.create(SYSTEM, _tools(), self.messages)
+        except AssistantSetupError as e:
+            self.setup_error = str(e)
+            raise
 
 
 class _Refused(Exception):
@@ -441,22 +443,28 @@ class _Refused(Exception):
 
 
 def _default_client():
-    import anthropic
-
-    try:
-        return anthropic.Anthropic()
-    except anthropic.AnthropicError as e:
-        raise AssistantUnavailable(NOT_SET_UP) from e
+    """The provider .env asks for (Anthropic unless told otherwise)."""
+    return provider_from_env()
 
 
 def _replayable(blocks):
-    """Response blocks as request blocks, unchanged, so history stays append-only."""
+    """Response blocks as request blocks, unchanged, so history stays append-only.
+
+    Blocks are SDK objects (Anthropic) or plain dicts (other providers).
+    """
     out = []
     for block in blocks:
-        data = block.model_dump(mode="json", exclude_none=True, by_alias=True)
+        if isinstance(block, dict):
+            data = dict(block)
+        else:
+            data = block.model_dump(mode="json", exclude_none=True, by_alias=True)
         data.pop("parsed_output", None)
         out.append(data)
     return out
+
+
+def _error_result(call, text):
+    return {"type": "tool_result", "tool_use_id": call["id"], "is_error": True, "content": text}
 
 
 def _errors(error):

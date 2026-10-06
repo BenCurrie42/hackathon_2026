@@ -61,7 +61,7 @@ What it can't do yet is in [docs/td_next.md](docs/td_next.md).
 ## Running it
 
 You'll need macOS, Python 3.11+, [uv](https://docs.astral.sh/uv/), Ableton Live
-12, and an Anthropic API key.
+12, and an Anthropic API key (or an OpenCode Go one, see below).
 
 ```sh
 uv sync
@@ -77,6 +77,23 @@ uv run python -m app               # opens http://127.0.0.1:8765
 uv run python -m app --lan         # also prints a link for phones on your Wi-Fi
 uv run python -m app --fake-live   # no Ableton needed, a pretend set to play with
 ```
+
+### Using OpenCode Go
+
+Don't have an Anthropic key? An [OpenCode Go](https://opencode.ai/docs/go/)
+subscription works too, with open models like Kimi, GLM and Qwen. Put this in
+`.env` instead:
+
+```sh
+HOLYSOUND_PROVIDER=opencode-go
+OPENCODE_API_KEY=your-key
+HOLYSOUND_MODEL=kimi-k3    # optional, kimi-k3 is the default
+```
+
+`uv run python -m app --list-models` shows every model OpenCode Go has right
+now. A few (Grok, the GPT ones) only speak a format we don't support yet, and
+Holy Sound will tell you if you pick one. Claude is still what we test against,
+so expect open models to be a bit rougher.
 
 `uv run rig.py status` checks that Live is connected. If you change RigLink's
 code, quit and reopen Live, because it only loads RigLink at startup.
