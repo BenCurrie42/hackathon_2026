@@ -575,6 +575,35 @@ def _set_clip_gain(rf, track_index, scene_index, db):
     return {"gain": _set_clip_gain_db(clip, float(db))}
 
 
+def _play_from_file_start(clip):
+    """Start every stem at sample 0.
+
+    Auto-Warp moves a long sample's start to the first beat it detects, and that
+    guess differs per stem, so turning warping off alone leaves stems offset.
+    """
+    clip.loop_start = 0.0
+    clip.start_marker = 0.0
+
+
+def _clip_markers(rf, scene_index):
+    """Where each clip in a scene starts and ends, for checking stems line up."""
+    rows = []
+    for i, track in enumerate(rf.song().tracks):
+        slots = track.clip_slots
+        if scene_index >= len(slots) or not slots[scene_index].has_clip:
+            continue
+        clip = slots[scene_index].clip
+        row = {"index": i, "name": track.name}
+        for attr in ("start_marker", "end_marker", "loop_start", "loop_end", "length",
+                     "warping", "looping", "sample_length", "sample_rate"):
+            row[attr] = getattr(clip, attr, None)
+        markers = getattr(clip, "warp_markers", None)
+        if markers is not None:
+            row["warp_markers"] = [[m.sample_time, m.beat_time] for m in markers][:4]
+        rows.append(row)
+    return rows
+
+
 def _import_audio(rf, track_index, file_path, scene_index, name=None, gain_db=None):
     """Put an audio file in a Session slot, unwarped and playing once.
 
@@ -591,6 +620,7 @@ def _import_audio(rf, track_index, file_path, scene_index, name=None, gain_db=No
     clip = slot.clip
     clip.warping = False
     clip.looping = False
+    _play_from_file_start(clip)
     clip.color = track.color
     if name:
         clip.name = name
@@ -870,6 +900,7 @@ COMMANDS = {
     "get_meters": _get_meters,
     "import_audio": _import_audio,
     "set_clip_gain": _set_clip_gain,
+    "clip_markers": _clip_markers,
     "get_song": _get_song,
     "set_tempo": _set_tempo,
     "play": _play,

@@ -97,8 +97,10 @@ every song — not one track per file. Playback tracks have no input.
 song; use a tempo only if a name states it, otherwise ask.
 - Put each file in its track and song with import_audio, naming the file exactly as listed.
 - Balance the parts with clip gain (gain_db): bring their loud parts roughly in line with \
-each other, and never let a clip's peak plus its gain go above -1 dBFS. Leave faders at \
-0 dB so the volunteer has room to ride them.
+each other, and never let a clip's peak plus its gain go above -1 dBFS. Leave volume_db \
+unset on tracks you create for imported files: Holy Sound starts their faders low enough \
+that every part playing together doesn't clip. A SMPTE or timecode track starts muted; \
+say so, and don't put it through the speakers.
 - Say which files are silent or clip, and leave silent ones out.
 
 ## Listening

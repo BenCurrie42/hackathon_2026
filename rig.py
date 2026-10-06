@@ -26,7 +26,9 @@ from pathlib import Path
 import typer
 
 from live_control.live_connection import LiveConnection, RigLinkError
+from live_control.starting_fader import starting_fader_db
 from live_control.stem_level import stem_level
+from live_control.timecode import is_timecode
 
 # Loading a device walks Live's browser tree, which can take a while.
 TIMEOUT_SECONDS = 30.0
@@ -37,8 +39,8 @@ NEGATIVE_NUMBERS = {"ignore_unknown_options": True}
 # File types Live imports as audio clips.
 AUDIO_SUFFIXES = {".wav", ".aif", ".aiff", ".flac", ".mp3"}
 
-# Loudness every imported stem is brought to, as active RMS in dBFS. Leaves
-# headroom for summing a dozen stems onto one output.
+# Loudness every imported stem is brought to, as active RMS in dBFS. The sum
+# of many stems is far louder; starting_fader_db makes room for it.
 STEM_LEVEL_DB = -20.0
 # Never boost a stem past this peak, or spiky stems like click would clip.
 STEM_PEAK_CEILING_DB = -1.0
@@ -627,7 +629,9 @@ def song_import(
     Each stem goes on the track with the same name, or a new track if there
     isn't one. Stems play once at their own speed, so they stay in sync.
     With --match-levels (the default), clip gain brings every stem to the same
-    loudness, so the faders set the mix for all songs at once.
+    loudness, so the faders set the mix for all songs at once. New tracks
+    start with their faders down far enough that all the stems together don't
+    clip; existing tracks keep theirs. A new SMPTE/timecode track starts muted.
     """
     if not folder.is_dir():
         _fail(f"There's no folder at {folder}.")
@@ -650,15 +654,20 @@ def song_import(
         scene = slot["index"]
 
         tracks = {t["name"].casefold(): t["index"] for t in _run(live.list_tracks)}
+        fader = starting_fader_db(len(stems))
         for stem in stems:
             index = tracks.get(stem.stem.casefold())
             is_new = index is None
             if is_new:
                 index = _run(lambda: live.create_audio_track(name=stem.stem))["index"]
                 tracks[stem.stem.casefold()] = index
+                _run(lambda: live.set_volume(index, fader))
+                if is_timecode(stem.stem):
+                    _run(lambda: live.set_mute(index, True))
             gain, note = gains[stem]
             clip = _run(lambda: live.import_audio(index, str(stem.resolve()), scene, stem.stem, gain))
-            notes = ", ".join(n for n in ("new track" if is_new else "", note) if n)
+            muted = "muted, it's timecode" if is_new and is_timecode(stem.stem) else ""
+            notes = ", ".join(n for n in (f"new track at {fader:g} dB" if is_new else "", muted, note) if n)
             typer.echo(f"{index + 1:>3}  {stem.stem:<20} gain {clip['gain']:>9}" + (f"  ({notes})" if notes else ""))
 
     typer.echo(f"Added song {scene + 1}: {name} ({len(stems)} stems).")

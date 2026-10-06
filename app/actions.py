@@ -20,6 +20,8 @@ from typing import Annotated, ClassVar, Literal, Union
 from pydantic import BaseModel, Field
 
 from app.live import LiveUnavailable
+from live_control.starting_fader import starting_fader_db
+from live_control.timecode import is_timecode
 from rig import TRACK_COLORS
 from live_control.live_connection import RigLinkError
 from file_builder.rig_spec import RigSpec, TrackSpec
@@ -121,8 +123,14 @@ class AddTrack(BaseModel):
             ex.try_step(problems, f"send it to {self.output.label()}", "set_routing", **target,
                         direction="output", type_name=self.output.destination,
                         channel_name=self.output.channel)
-        if self.volume_db is not None:
-            ex.try_step(problems, "set its volume", "set_volume", **target, db=self.volume_db)
+        volume_db = self.volume_db
+        if volume_db is None and self.kind == "audio":
+            volume_db = ex.new_track_fader_db
+        if volume_db is not None:
+            ex.try_step(problems, "set its volume", "set_volume", **target, db=volume_db)
+        is_muted_timecode = ex.new_track_fader_db is not None and is_timecode(self.name)
+        if is_muted_timecode:
+            ex.try_step(problems, "mute it", "set_mute", **target, on=True)
         if self.pan:
             ex.try_step(problems, "pan it", "set_pan", **target, pan=self.pan)
         if self.color:
@@ -134,6 +142,10 @@ class AddTrack(BaseModel):
                 problems.append(note)
 
         done = f"Added “{self.name}” as track {index + 1}."
+        if self.volume_db is None and volume_db is not None:
+            done = done[:-1] + f", fader at {_db(volume_db)} to leave room for every part together."
+        if is_muted_timecode:
+            done = done[:-1] + ", muted because it's timecode."
         if problems:
             return done + " But " + "; ".join(problems) + "."
         return done
@@ -550,6 +562,7 @@ class Executor:
         self._files = files or {}
         self._tracks = None
         self.detail = None  # extra facts for the assistant from the last action
+        self.new_track_fader_db = None  # set when a batch imports audio; see run_all
 
     def file(self, file_id):
         """An imported file by the id the assistant saw. Only those, never any path."""
@@ -641,6 +654,14 @@ class Executor:
 def run_all(live, actions, files=None):
     """Run actions in order. One failure doesn't stop the rest."""
     ex = Executor(live, files)
+    # New audio tracks in a batch that imports a song start low enough that all of
+    # its stems together don't clip, unless the assistant chose a volume itself.
+    per_song = {}
+    for action in actions:
+        if isinstance(action, ImportAudio):
+            per_song[action.song.casefold()] = per_song.get(action.song.casefold(), 0) + 1
+    if per_song:
+        ex.new_track_fader_db = starting_fader_db(max(per_song.values()))
     results = []
     for n, action in enumerate(actions):
         try:

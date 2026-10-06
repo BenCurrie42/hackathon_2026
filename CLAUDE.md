@@ -193,6 +193,9 @@ live_control/
     live_connection.py          LiveConnection: client for RigLink
     stem_level.py               Active RMS and peak of a WAV stem, stdlib only;
                                 drives level matching on `song import`
+    starting_fader.py           Fader for tracks an import creates, so the sum of
+                                every stem doesn't clip
+    timecode.py                 Spots SMPTE/timecode stems, which start muted
 file_builder/                   Writes a .als with Live closed
     rig_spec.py                 RigSpec / TrackSpec, the contract
     write_als.py                render(spec, template_path) -> bytes
@@ -277,7 +280,9 @@ song-to-song transitions; MIDI mapping; clip editing beyond gain; group tracks.
   Live**; the symptom otherwise is `unknown cmd`. `rig.py` and client edits need
   no restart.
 - Stems import unwarped so they stay sample-locked. Song tempo therefore does not
-  stretch them.
+  stretch them. Auto-Warp still moves each clip's start to its guessed first
+  beat (different per stem, up to ~3 s here), so the import resets every clip
+  start to 0. With warping off, clip markers are in seconds.
 - Live reads a `.als` once at open and holds it in memory. Rewriting the file
   underneath a running Live does nothing and gets clobbered on its next save.
   **Never generate over a set that's currently open.**

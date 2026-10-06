@@ -27,6 +27,8 @@ from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
 from app.server import App, make_handler
+from live_control.starting_fader import starting_fader_db
+from live_control.timecode import is_timecode
 
 
 class Block(SimpleNamespace):
@@ -406,6 +408,23 @@ class StemFolderCase(unittest.TestCase):
         self._tmp.cleanup()
 
 
+class StartingFaderTest(unittest.TestCase):
+    def test_more_stems_start_lower(self):
+        self.assertEqual(starting_fader_db(1), -3.0)
+        self.assertEqual(starting_fader_db(2), -6.0)
+        self.assertEqual(starting_fader_db(8), -12.0)
+        self.assertEqual(starting_fader_db(50), -20.0)
+        self.assertEqual(starting_fader_db(0), 0.0)
+
+
+class TimecodeTest(unittest.TestCase):
+    def test_spots_timecode_names(self):
+        for name in ("SMPTE", "smpte 30fps", "LTC", "Timecode", "Time Code"):
+            self.assertTrue(is_timecode(name), name)
+        for name in ("Click", "Count", "Keys 1 L", "Ltd Pad", "Bass"):
+            self.assertFalse(is_timecode(name), name)
+
+
 class AudioFilesTest(StemFolderCase):
     def test_measures_peak_and_loud_parts(self):
         m = audio_files.measure(self.folder / "Way Maker" / "Click.wav")
@@ -496,6 +515,32 @@ class AudioActionsTest(StemFolderCase):
         self.assertIn("Loudest: Click", listen["text"])
         self.assertIn("1. Click: peak", listen["detail"])
         self.assertFalse(snap["song"]["is_playing"])  # it stopped what it started
+
+    def test_new_tracks_start_with_room_for_every_stem(self):
+        results = self.run_actions(
+            {"action": "add_song", "name": "Way Maker"},
+            {"action": "add_track", "name": "Click"},
+            {"action": "add_track", "name": "Pad", "volume_db": -4},
+            {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+             "song": "Way Maker"},
+            {"action": "import_audio", "track": "Pad", "file": "Sunday Stems/Way Maker/Pad.wav",
+             "song": "Way Maker"},
+        )
+        self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
+        self.assertIn("fader at -6 dB", results[1]["text"])
+        self.assertEqual(self.live.call("get_mixer", track_index=0)["volume"], "-6.0 dB")
+        self.assertEqual(self.live.call("get_mixer", track_index=1)["volume"], "-4.0 dB")  # its own choice
+
+    def test_timecode_track_starts_muted(self):
+        results = self.run_actions(
+            {"action": "add_song", "name": "Way Maker"},
+            {"action": "add_track", "name": "SMPTE"},
+            {"action": "import_audio", "track": "SMPTE", "file": "Sunday Stems/Way Maker/Click.wav",
+             "song": "Way Maker"},
+        )
+        self.assertTrue(all(r["ok"] for r in results), results)
+        self.assertIn("muted because it's timecode", results[1]["text"])
+        self.assertTrue(self.live.call("get_mixer", track_index=0)["mute"])
 
     def test_only_imported_files(self):
         results = self.run_actions(
