@@ -707,6 +707,8 @@ function target(el) {
 
 function createStrip() {
   const el = $("#strip-template").content.firstElementChild.cloneNode(true);
+  // Start each channel's travelling light at a different point so they don't move in lockstep.
+  el.style.setProperty("--orbit-offset", -Math.random() * 3.6 + "s");
 
   const name = $(".strip-name", el);
   name.addEventListener("change", () => {
