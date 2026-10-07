@@ -1237,7 +1237,8 @@ function createStrip() {
   const m = buildMore(strip);
   const r = {
     plate: $(".plate", strip), name: $(".strip-name", strip), note: $(".strip-note", strip),
-    mute: $(".mute", strip), zone: $(".fader-zone", strip), fader: $(".fader", strip),
+    mute: $(".mute", strip), solo: $(".solo", strip), pan: $(".pan", strip), panInput: $(".pan input", strip),
+    zone: $(".fader-zone", strip), fader: $(".fader", strip),
     ghost: $(".ghost", strip), meter: $(".meter", strip), more: m,
   };
   strip._r = r;
@@ -1245,7 +1246,7 @@ function createStrip() {
   // selecting: the name plate is the button; a tap on the strip's own padding counts too
   r.plate.addEventListener("click", () => selectStrip(strip, true));
   strip.addEventListener("click", (e) => {
-    if (e.target === strip) selectStrip(strip, true);
+    if (e.target === strip || e.target === r.note) selectStrip(strip, true);
   });
 
   // naming happens in the drawer
@@ -1263,12 +1264,18 @@ function createStrip() {
   };
   r.mute.addEventListener("click", toggleMute);
   m.mute.addEventListener("click", toggleMute);
-  m.solo.addEventListener("click", () => {
+  const toggleSolo = () => {
     const on = !strip._row.solo;
     strip._row.solo = on;
     liveCmd("set_solo", { ...target(strip), on }).catch(() => { strip._row.solo = !on; });
-  });
+  };
+  r.solo.addEventListener("click", toggleSolo);
+  m.solo.addEventListener("click", toggleSolo);
   slider(m.balanceInput, m.balanceOut, (pan) => ({ cmd: "set_pan", args: { ...target(strip), pan } }), panText);
+  // the strip's own pan bar moves the same value; the dot follows it at once
+  slider(r.panInput, m.balanceOut, (pan) => ({ cmd: "set_pan", args: { ...target(strip), pan } }), panText);
+  r.panInput.addEventListener("input", () => r.pan.style.setProperty("--p", String((parseFloat(r.panInput.value) + 1) / 2)));
+  r.panInput.addEventListener("dblclick", () => { r.panInput.value = "0"; r.panInput.dispatchEvent(new Event("input", { bubbles: true })); r.panInput.dispatchEvent(new Event("change", { bubbles: true })); });
 
   wireFader(strip);
 
@@ -1510,7 +1517,7 @@ function updateStrip(strip, row, snap) {
     key.setAttribute("aria-pressed", row.mute);
     key.textContent = row.mute ? "Muted" : "Mute";
   }
-  m.solo.setAttribute("aria-pressed", row.solo);
+  for (const key of [r.solo, m.solo]) key.setAttribute("aria-pressed", !!row.solo);
   paintMeter(r.meter, row.meter);
 
   // the level: while the assistant's light is running, hold what was there before
@@ -1528,6 +1535,11 @@ function updateStrip(strip, row, snap) {
   if (!holding.has(r.fader)) setFaderPosition(strip, held ? strip._heldDb : db);
 
   const pan = row.pan_value ?? panFromText(row.pan);
+  if (!holding.has(r.panInput)) {
+    r.panInput.value = String(pan);
+    r.pan.style.setProperty("--p", String((pan + 1) / 2));
+    r.panInput.setAttribute("aria-valuetext", panText(pan));
+  }
   if (!holding.has(m.balanceInput)) {
     m.balanceInput.value = String(pan);
     const words = panText(pan);
