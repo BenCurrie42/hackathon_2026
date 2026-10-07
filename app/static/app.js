@@ -16,6 +16,7 @@ let chatSig = "";
 let songsSig = "";
 let stockDevices = null;
 let applyingId = null;        // the proposal whose Apply was just pressed
+const exportNotes = new Map(); // proposal id -> what the saved file could not include
 const strips = new Map();     // "t0" / "r1" -> strip element
 const openThoughts = new Set(); // ids of chat entries whose thinking is expanded
 const holding = new WeakSet(); // controls the user is touching: polling won't move them
@@ -71,6 +72,13 @@ function shortDate(iso) {
   const month = MONTHS[parseInt(m[2], 10) - 1];
   const day = parseInt(m[3], 10);
   return parseInt(m[1], 10) === new Date().getFullYear() ? `${day} ${month}` : `${day} ${month} ${m[1]}`;
+}
+
+/* One sentence for screen readers, through the page's polite live region. */
+function say(text) {
+  const node = $("#sr-status");
+  node.textContent = "";
+  setTimeout(() => { node.textContent = text; }, 50);
 }
 
 // -- API --------------------------------------------------------------------
@@ -139,9 +147,10 @@ function render(next) {
 
 function setStatus(kind, text, detail = "") {
   const node = $("#live-status");
-  node.className = "status " + kind;
-  $(".status-text", node).textContent = text;
-  $(".status-detail", node).textContent = detail;
+  if (node.className !== "status " + kind) node.className = "status " + kind;
+  const t = $(".status-text", node), d = $(".status-detail", node);
+  if (t.textContent !== text) t.textContent = text;
+  if (d.textContent !== detail) d.textContent = detail;
 }
 
 function renderLive() {
@@ -164,6 +173,7 @@ function renderLive() {
     play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
     const tempo = $("#tempo-input");
     if (document.activeElement !== tempo) tempo.value = Math.round(snap.song.tempo * 100) / 100;
+    paintMeter($("#master-meter"), snap.master?.meter);
     setCount("mixer", snap.tracks.length);
     setCount("songs", snap.scenes.length);
   }
@@ -255,7 +265,7 @@ function eventLine(role, text) {
     node.tabIndex = 0;
     node.title = "See everything Holy Sound remembers";
     node.addEventListener("click", () => setView("room"));
-    node.addEventListener("keydown", (e) => { if (e.key === "Enter") setView("room"); });
+    node.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setView("room"); } });
   }
   return node;
 }
@@ -275,7 +285,8 @@ function dockedProposal() {
   let found = null;
   for (const entry of state.chat) {
     const p = entry.proposal;
-    if (p && (p.status === "pending" || p.id === applyingId)) found = p;
+    const running = state.applying && state.applying.id === p?.id;
+    if (p && (p.status === "pending" || p.id === applyingId || running)) found = p;
   }
   return found;
 }
@@ -321,25 +332,45 @@ function renderChat() {
   } else if (sending !== null || state.busy) {
     box.append(working("Working…"));
   }
-  if (!welcome.hidden) box.scrollTop = 0;
-  else if (nearBottom || sending !== null) box.scrollTop = box.scrollHeight;
-
   const dock = $("#slip-dock");
+  const keepSteps = docked && dock._lastSlip === docked.id ? $(".steps", dock)?.scrollTop : null;
   dock.replaceChildren(...(docked ? [slipEl(docked, true)] : []));
   if (docked) {
     const steps = $(".steps", dock);
-    if (steps && dock._lastSlip !== docked.id) steps.scrollTop = 0;
+    if (steps && dock._lastSlip !== docked.id) {
+      steps.scrollTop = 0;
+      const n = docked.steps.length;
+      say(`Holy Sound suggests ${n} change${n === 1 ? "" : "s"}. Press Apply or Not now.`);
+    } else if (steps && keepSteps !== null) {
+      steps.scrollTop = keepSteps;   // the list stays where the volunteer left it while steps report
+      $(".step.is-working", steps)?.scrollIntoView({ block: "nearest" });
+    }
     dock._lastSlip = docked.id;
   }
+
+  if (!welcome.hidden) box.scrollTop = 0;
+  else if (nearBottom || sending !== null || !box._shown) box.scrollTop = box.scrollHeight;
+  box._shown = true;
+  // the badge on the phone's Chat item while a slip waits
+  const mark = $("#nav-chat-mark");
+  const waiting = docked && docked.status === "pending" && $("#layout").dataset.view !== "chat";
+  mark.hidden = !waiting;
+  const chatNav = $(".bottom-nav [data-view=chat]");
+  if (waiting) { mark.textContent = String(docked.steps.length); chatNav.setAttribute("aria-label", `Chat, ${docked.steps.length} change${docked.steps.length === 1 ? "" : "s"} waiting`); }
+  else chatNav.removeAttribute("aria-label");
 
   $("#composer .send").disabled = sending !== null || state.busy;
   $("#import-btn").disabled = sending !== null || state.busy;
   $("#reset-btn").hidden = state.chat.length === 0 && sending === null;
-  $("#nav-chat-mark").hidden = !(docked && docked.status === "pending" && $("#layout").dataset.view !== "chat");
+  $(".chat-head").hidden = $("#reset-btn").hidden;
 }
 
 function paintWelcome() {
   $("#welcome-date").textContent = nextSundayLabel();
+  const n = state.live.snapshot?.tracks.length || 0;
+  $("#welcome-line").textContent = n
+    ? `Your set has ${n} channel${n === 1 ? "" : "s"}. Tell me what is different this Sunday.`
+    : "Nothing is set up yet. Say what is plugged in and which songs you are playing.";
   const facts = [...(state.room || [])].sort((a, b) => b.id - a.id).slice(0, 2);
   const line = $("#welcome-saved");
   line.hidden = facts.length === 0;
@@ -349,13 +380,13 @@ function paintWelcome() {
 // Collapsed by default: a volunteer wants the answer, the reasoning is there if they're curious.
 function thoughts(text, id) {
   const node = el("details", "thoughts");
-  node.innerHTML = '<summary>Show thinking</summary><div class="thought-text"></div>';
+  node.innerHTML = '<summary>Show how I worked it out</summary><div class="thought-text"></div>';
   $(".thought-text", node).textContent = text;
   const summary = $("summary", node);
   if (id !== undefined) node.open = openThoughts.has(id);
-  summary.textContent = node.open ? "Hide thinking" : "Show thinking";
+  summary.textContent = node.open ? "Hide how I worked it out" : "Show how I worked it out";
   node.addEventListener("toggle", () => {
-    summary.textContent = node.open ? "Hide thinking" : "Show thinking";
+    summary.textContent = node.open ? "Hide how I worked it out" : "Show how I worked it out";
     if (id !== undefined) node.open ? openThoughts.add(id) : openThoughts.delete(id);
   });
   return node;
@@ -366,7 +397,7 @@ function thoughts(text, id) {
 // arrives through /api/state as usual, so on "end" this entry just goes away.
 
 const TOOL_LABELS = {
-  listen_to_stems: "Listening to the stems…",
+  listen_to_stems: "Listening to the song files…",
   propose_changes: "Writing up the changes…",
   remember: "Saving that for next week…",
 };
@@ -405,8 +436,8 @@ function paintReply() {
     const status = $(".reply-status", reply.el);
     think.hidden = !reply.thinking;
     const summary = $("summary", think);
-    if (!reply.text && !reply.tool) summary.textContent = "Thinking…";
-    else summary.textContent = think.open ? "Hide thinking" : "Show thinking";
+    if (!reply.text && !reply.tool) summary.textContent = "Working it out…";
+    else summary.textContent = think.open ? "Hide how I worked it out" : "Show how I worked it out";
     // Follow the thinking as it's written, unless the volunteer scrolled up in it to read.
     const thought = $(".thought-text", think);
     const following = thought.scrollHeight - thought.scrollTop - thought.clientHeight < 24;
@@ -474,22 +505,11 @@ function stepRow(step, i, mode, p) {
   li.append(el("span", "step-num", String(i + 1)));
   const body = el("div", "step-body");
   body.append(el("p", "step-text", trueMinus(step.text)));
-  if (step.change) {
-    const ch = el("p", "step-change");
-    const from = el("s");
-    from.innerHTML = numHtml(trueMinus(String(step.change.from)));
-    const to = el("span");
-    to.innerHTML = numHtml(trueMinus(String(step.change.to))) + (step.change.unit ? " " + escapeHtml(step.change.unit) : "");
-    ch.append(from);
-    ch.insertAdjacentHTML("beforeend", ARROW_SVG);
-    ch.append(to);
-    body.append(ch);
-  }
   const note = consequence(step);
   if (note && mode === "pending") body.append(el("p", "step-note " + note.kind, note.text));
   li.append(body);
 
-  if (mode === "pending") return li;
+  if (mode !== "done") return li;   // "pending" and "plain" rows carry no state
 
   // applying or finished: the state of this step, in words and a lamp
   const result = p.results?.[i];
@@ -500,7 +520,8 @@ function stepRow(step, i, mode, p) {
     if (stateName === "failed") reason = result.text;
     else if (stateName === "check") reason = result.text.replace(/^.*? But /, "But ");
   } else {
-    stateName = state.applying?.id === p.id ? state.applying.states[i] || "waiting" : "waiting";
+    const live = state.applying && state.applying.id === p.id ? state.applying.states[i] : null;
+    stateName = live || "waiting";
   }
   const words = { waiting: "Waiting", working: "Working", done: "Done", check: "Check", failed: "Failed" };
   const status = el("span", "step-state " + stateName);
@@ -524,7 +545,7 @@ function slipEl(p, docked) {
   const collapsedWords = {
     dismissed: `${noun}, not applied`,
     superseded: "Replaced by a newer list",
-    exported: "Downloaded as a session file",
+    exported: "Saved as an Ableton file",
   }[p.status];
   if (collapsedWords) {
     const node = el("div", "slip collapsed");
@@ -532,17 +553,19 @@ function slipEl(p, docked) {
     line.append(el("span", "", collapsedWords));
     const list = el("ol", "steps");
     list.hidden = true;
-    p.steps.forEach((step, i) => list.append(stepRow(step, i, "done", { results: [] })));
+    p.steps.forEach((step, i) => list.append(stepRow(step, i, "plain", p)));
     const toggle = button("Show steps", "text-btn", () => {
       list.hidden = !list.hidden;
       toggle.textContent = list.hidden ? "Show steps" : "Hide steps";
     });
     line.append(toggle);
     node.append(line, list);
+    const notes = exportNotes.get(p.id);
+    if (p.status === "exported" && notes?.length) node.append(el("p", "slip-notes", "Not in the file: " + notes.join(" ")));
     return node;
   }
 
-  const applying = p.status === "pending" && p.id === applyingId;
+  const applying = p.status === "pending" && (p.id === applyingId || (state.applying && state.applying.id === p.id));
   const finished = p.status === "applied";
   const node = el("div", "slip " + (p.status === "pending" && !applying ? "pending paper" : applying ? "applying" : "done-state"));
   const head = el("div", "slip-head");
@@ -564,13 +587,8 @@ function slipEl(p, docked) {
     headline = `${noun}, not applied yet`;
   }
   head.append(el("span", "", headline));
+  head.tabIndex = -1;
   node.append(head);
-
-  if (p.status === "pending" && !applying) {
-    node.append(el("p", "slip-sub", state.demo
-      ? "Nothing in the demo set changes until you press Apply."
-      : "Nothing in Ableton changes until you press Apply."));
-  }
 
   const list = el("ol", "steps");
   const mode = p.status === "pending" && !applying ? "pending" : "done";
@@ -578,14 +596,16 @@ function slipEl(p, docked) {
   node.append(list);
 
   if (mode === "done" && total > 4 && !docked) {
-    const rows = [...list.children];
-    rows.slice(4).forEach((r) => { r.hidden = true; });
-    const more = button("Show all", "text-btn", () => {
-      const hidden = rows[4].hidden;
-      rows.slice(4).forEach((r) => { r.hidden = !hidden; });
-      more.textContent = hidden ? "Show fewer" : "Show all";
-    });
-    node.append(more);
+    const spare = [...list.children].slice(4).filter((r) => !r.querySelector(".step-state.failed, .step-state.check"));
+    if (spare.length) {
+      spare.forEach((r) => { r.hidden = true; });
+      const more = button("Show all", "text-btn", () => {
+        const hidden = spare[0].hidden;
+        spare.forEach((r) => { r.hidden = !hidden; });
+        more.textContent = hidden ? "Show fewer" : "Show all";
+      });
+      node.append(more);
+    }
   }
 
   if (p.status === "pending" && !applying) {
@@ -596,20 +616,15 @@ function slipEl(p, docked) {
       actions.append(apply);
     } else {
       if (p.exportable) {
-        const dl = button("Download session file", "key big on-paper", () => exportProposal(p.id, dl));
+        const dl = button("Save as an Ableton file", "key big on-paper", () => exportProposal(p.id, dl));
         actions.append(dl);
       }
       actions.append(el("p", "slip-line disabled", "Apply (Ableton isn’t open)"));
       actions.append(el("p", "slip-note", "Ableton isn’t open, so Apply is off." +
-        (p.exportable ? " Download the new tracks as a session file instead." : "")));
+        (p.exportable ? " Save the new tracks as an Ableton file instead." : "")));
     }
     const sub = el("div", "sub-row");
-    if (connected && p.exportable) {
-      const dl = button("Download session file", "text-btn", () => exportProposal(p.id, dl));
-      sub.append(dl);
-    } else {
-      sub.append(el("span"));
-    }
+    sub.append(el("span"));
     const later = button("Not now", "text-btn", () => act(p.id, "dismiss", later));
     sub.append(later);
     actions.append(sub);
@@ -636,6 +651,11 @@ async function act(id, verb, btn) {
       applyingId = null;
       chatSig = "";
       if (state) renderChat();
+      // read the outcome next, and leave the keyboard on it
+      const done = [...document.querySelectorAll("#messages .slip-head")].pop();
+      if (done) { done.focus({ preventScroll: true }); say(done.textContent); }
+    } else {
+      $("#message-input").focus();
     }
     poll();
   }
@@ -656,7 +676,9 @@ async function exportProposal(id, btn) {
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 10000);
     const { notes } = await api(`/api/proposals/export-notes?id=${id}`);
-    toast("Downloaded. Double-click it to open in Live." + (notes.length ? " Note: " + notes.join(" ") : ""));
+    exportNotes.set(id, notes);
+    chatSig = "";
+    toast("Saved. Double-click the file to open it in Ableton." + (notes.length ? " Some steps could not go in the file; they are listed under the slip." : ""));
     poll();
   } catch (e) {
     toast(e.message, "error");
@@ -714,17 +736,23 @@ $("#chips").addEventListener("click", (e) => {
   else send(chip.textContent);
 });
 
-$("#try-example").addEventListener("click", () => {
-  const input = $("#message-input");
-  input.value = "Lead vocal on input 1, click to the in-ears.";
-  autosize();
-  input.focus();
-});
-
 $("#open-room").addEventListener("click", () => setView("room"));
 
+/* A yes-or-no question in the app's own sheet (the browser's box says "localhost says"). */
+function ask(title, copy, yes) {
+  const dialog = $("#confirm-dialog");
+  $("#confirm-title").textContent = title;
+  $("#confirm-copy").textContent = copy;
+  $("#confirm-ok").textContent = yes;
+  dialog.returnValue = "";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
+    dialog.showModal();
+  });
+}
+
 $("#reset-btn").addEventListener("click", async () => {
-  if (!confirm("Start over? Your Ableton set stays as it is.")) return;
+  if (!await ask("Start over?", "The chat is cleared. Your Ableton set stays as it is.", "Start over")) return;
   try {
     render(await api("/api/reset", {}));
   } catch (e) {
@@ -751,7 +779,7 @@ function dbToPos(db) {
   return 1;
 }
 
-function posToDb(pos) {
+function posToDb(pos, detent = true) {
   if (pos < 0.012) return -70;
   if (pos >= 1) return 6;
   for (let i = 1; i < LAW.length; i++) {
@@ -760,7 +788,7 @@ function posToDb(pos) {
       const [d1, p1] = LAW[i];
       const db = d0 + ((pos - p0) / (p1 - p0)) * (d1 - d0);
       const half = Math.round(db * 2) / 2;
-      return Math.abs(half) <= 1 ? 0 : half;   // a detent at unity
+      return detent && Math.abs(half) <= 1 ? 0 : half;   // a detent at unity, for the hand not the keyboard
     }
   }
   return 6;
@@ -779,8 +807,8 @@ function dbText(db) {
 }
 
 function panText(pan) {
-  const amount = Math.round(Math.abs(pan) * 50);
-  return amount === 0 ? "Centre" : `${pan < 0 ? "Left" : "Right"} ${amount}`;
+  const amount = Math.round(Math.abs(pan) * 100);
+  return amount === 0 ? "Centre" : `${amount}% ${pan < 0 ? "left" : "right"}`;
 }
 
 function panFromText(text) {
@@ -815,18 +843,17 @@ function startRun(strip) {
   strip._stopTimer = null;
   paintNote(strip);
   const name = strip._row?.name || "channel";
-  $("#sr-status").textContent = `Editing ${name}`;
+  say(`Editing ${name}`);
 
   const rects = $$(".run rect", strip);
   const w = strip.offsetWidth, h = strip.offsetHeight;
+  strip._runW = w;   // 0 while the mixer is hidden; paintActivity re-measures when it can be seen
   rects.forEach((r) => {
-    r.setAttribute("x", 1.5); r.setAttribute("y", 1.5);
-    r.setAttribute("width", Math.max(1, w - 3)); r.setAttribute("height", Math.max(1, h - 3));
     r.getAnimations?.().forEach((a) => a.cancel());
     r.style.strokeDasharray = "";
     r.style.display = "";
   });
-  const perimeter = rects[0].getTotalLength?.() || 2 * (w + h);
+  const perimeter = w ? 2 * (w - 3 + h - 3) : 1000;
   strip._runDur = Math.min(2400, Math.max(1600, (perimeter / 520) * 1000));
   const seg = [[16, 0], [15, 16], [15, 31]];   // [dash length, distance behind the head] in px
   rects.forEach((r, i) => {
@@ -850,7 +877,7 @@ function stopRun(strip) {
   strip.classList.remove("is-run");
   $$(".run rect", strip).forEach((r) => r.getAnimations?.().forEach((a) => a.cancel()));
   const name = strip._row?.name || "channel";
-  $("#sr-status").textContent = `Changed ${name}`;
+  say(`Changed ${name}`);
 
   // landing: the cap glides to where the change put it, and a tick marks where it was
   const was = strip._heldDb;
@@ -880,6 +907,10 @@ function paintActivity() {
   for (const strip of strips.values()) {
     const until = litUntil.get((strip._row?.name || "").toLowerCase());
     const on = until !== undefined && until > now;
+    if (strip._running && strip._runW === 0 && strip.offsetWidth) {   // started out of sight; size it now
+      strip._running = false;
+      startRun(strip);
+    }
     if (on) {
       startRun(strip);
       if (strip._stopTimer) { clearTimeout(strip._stopTimer); strip._stopTimer = null; }
@@ -995,7 +1026,7 @@ function ensureGroup(key) {
   const apply = (folded) => {
     section.classList.toggle("folded", folded);
     bus.setAttribute("aria-expanded", String(!folded));
-    bus.setAttribute("aria-label", `${folded ? "Show" : "Hide"} ${nameEl.textContent}`);
+    bus.setAttribute("aria-label", `${nameEl.textContent} folder`);
   };
   apply(loadCollapsedGroups().has(key));
   bus.addEventListener("click", () => {
@@ -1052,8 +1083,8 @@ async function moveTrack(strip, folderKey) {
   if (recoloured) toast(`Moved ${row.name} to ${folder.label}.`);
 }
 
-/* Live can't show folders, so give every track its folder's colour there. */
-$$(".match-colors").forEach((btn) => btn.addEventListener("click", async () => {
+/* Ableton can't show folders, so give every track its folder's colour there. */
+async function matchColours() {
   const snap = state?.live.snapshot;
   if (!snap) return;
   const colours = new Map((state.folders || []).map((f) => [f.key, parseInt(f.color.slice(1), 16)]));
@@ -1068,8 +1099,8 @@ $$(".match-colors").forEach((btn) => btn.addEventListener("click", async () => {
       return; // liveCmd already said why
     }
   }
-  toast(`Matched ${done} track colour${done === 1 ? "" : "s"} in Live to their folders.`);
-}));
+  toast(`Copied ${done} folder colour${done === 1 ? "" : "s"} to Ableton.`);
+}
 
 /* Which folders this volunteer has folded -- a per-device convenience,
    not session state, so it's fine if it's empty on a fresh browser. */
@@ -1114,31 +1145,33 @@ function target(strip) {
 
 function keepSelection(groups) {
   const order = groups.flatMap((g) => g.rows.map((r) => g.prefix + r.index));
-  if (!order.length) {
-    selectedKey = null;
-    $("#drawer").replaceChildren(el("p", "drawer-empty", "Pick a channel number to see its effects, sends and routing."));
-    return;
-  }
-  if (!selectedKey || !strips.has(selectedKey)) {
-    const old = selectedKey;
-    const oldIndex = old ? parseInt(old.slice(1), 10) : 0;
-    selectedKey = order.find((k) => k.startsWith("t") && parseInt(k.slice(1), 10) >= oldIndex) || order[0];
-  }
+  const drawer = $("#drawer");
+  drawer.hidden = order.length === 0;
+  if (selectedKey && !strips.has(selectedKey)) selectedKey = null;
   for (const [key, strip] of strips) {
     const on = key === selectedKey;
     strip.classList.toggle("is-selected", on);
-    strip.setAttribute("aria-current", on ? "true" : "false");
+    strip._r.plate.setAttribute("aria-pressed", String(on));
+  }
+  if (!selectedKey) {
+    if (!drawer.querySelector(".drawer-empty")) {
+      drawer.replaceChildren(el("p", "drawer-empty", "Tap a channel to rename it, add an effect or change where it plays."));
+    }
+    return;
   }
   const strip = strips.get(selectedKey);
-  const drawer = $("#drawer");
   if (drawer.firstElementChild !== strip._more) drawer.replaceChildren(strip._more);
 }
 
 function selectStrip(strip, scroll = false) {
   selectedKey = strip._key;
   keepSelection(buildMixerGroups(state.live.snapshot));
-  if (scroll && matchMedia("(max-width: 820px)").matches) {
-    $("#drawer").scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" });
+  if (scroll && matchMedia("(max-width: 820px), (max-height: 500px)").matches) {
+    // bring the drawer's first section into view while the channel's own fader and Mute stay on screen
+    const pane = $("#pane-session");
+    const top = $("#drawer").getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    const want = top - (pane.clientHeight - 230);
+    if (want > 0) pane.scrollBy({ top: want, behavior: reducedMotion.matches ? "auto" : "smooth" });
   }
 }
 
@@ -1166,31 +1199,36 @@ function buildMore(strip) {
   const solo = el("button", "key solo", "Solo");
   for (const key of [mute, solo]) { key.type = "button"; key.setAttribute("aria-pressed", "false"); }
   keys.append(mute, solo);
+  const soundHelp = el("p", "sound-help", "Mute silences it. Solo plays only this channel.");
   const balance = el("div", "control balance");
   balance.innerHTML = '<span class="control-label">Balance</span><input type="range" min="-1" max="1" step="0.02" aria-label="Balance, left to right"><output></output>';
-  sound.append(el("h3", "", "Sound"), keys, balance);
+  sound.append(el("h3", "", "Sound"), keys, soundHelp, balance);
 
   const effects = el("section", "m-effects");
+  const sendsTitle = el("h3", "", "Reverb and delay");
+  const sends = el("div", "sends");
+  const devicesTitle = el("h3", "again", "Other effects");
   const devices = el("div", "devices");
   const addDevice = button("Add effect", "add-device", () => openDeviceDialog(strip));
-  const sends = el("div", "sends");
-  effects.append(el("h3", "", "Effects"), devices, addDevice, el("h3", "again", "Reverb and delay"), sends);
+  effects.append(sendsTitle, sends, devicesTitle, devices, addDevice);
 
   const routing = el("section", "m-routing");
   const folderLine = el("label", "folder-line");
   const folderSel = el("select", "folder-select");
   folderSel.setAttribute("aria-label", "Folder");
   folderLine.append(el("span", "", "Folder"), folderSel);
+  const copyColours = button("Copy folder colours to Ableton", "text-btn copy-colours", matchColours);
+  copyColours.title = "Ableton can’t show folders, so each folder gets its own colour there";
   const routeLine = el("div", "route-line");
   const clipGains = el("div", "clip-gains");
-  routing.append(el("h3", "", "Where it plays"), folderLine, routeLine, clipGains);
+  routing.append(el("h3", "", "Where it plays"), folderLine, copyColours, routeLine, clipGains);
 
   more.append(channel, sound, effects, routing);
   strip._more = more;
   return {
-    title, name, summary, colourChip: chip, mute, solo,
+    title, name, summary, colourChip: chip, mute, solo, soundHelp,
     balance, balanceInput: $("input", balance), balanceOut: $("output", balance),
-    devices, addDevice, sends, folderLine, folderSel, routeLine, clipGains,
+    sendsTitle, sends, devicesTitle, devices, addDevice, folderLine, copyColours, folderSel, routeLine, clipGains,
   };
 }
 
@@ -1204,13 +1242,10 @@ function createStrip() {
   };
   strip._r = r;
 
-  // selecting: tap anywhere on the channel except the fader and Mute
+  // selecting: the name plate is the button; a tap on the strip's own padding counts too
+  r.plate.addEventListener("click", () => selectStrip(strip, true));
   strip.addEventListener("click", (e) => {
-    if (e.target.closest(".mute, .fader-zone")) return;
-    selectStrip(strip, true);
-  });
-  strip.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target === strip) { e.preventDefault(); selectStrip(strip, true); }
+    if (e.target === strip) selectStrip(strip, true);
   });
 
   // naming happens in the drawer
@@ -1221,10 +1256,18 @@ function createStrip() {
   m.name.addEventListener("change", rename);
   m.name.addEventListener("keydown", (e) => { if (e.key === "Enter") m.name.blur(); });
 
-  const toggleMute = () => liveCmd("set_mute", { ...target(strip), on: !strip._row.mute }).catch(() => {});
+  const toggleMute = () => {
+    const on = !strip._row.mute;
+    strip._row.mute = on;
+    liveCmd("set_mute", { ...target(strip), on }).catch(() => { strip._row.mute = !on; });
+  };
   r.mute.addEventListener("click", toggleMute);
   m.mute.addEventListener("click", toggleMute);
-  m.solo.addEventListener("click", () => liveCmd("set_solo", { ...target(strip), on: !strip._row.solo }).catch(() => {}));
+  m.solo.addEventListener("click", () => {
+    const on = !strip._row.solo;
+    strip._row.solo = on;
+    liveCmd("set_solo", { ...target(strip), on }).catch(() => { strip._row.solo = !on; });
+  });
   slider(m.balanceInput, m.balanceOut, (pan) => ({ cmd: "set_pan", args: { ...target(strip), pan } }), panText);
 
   wireFader(strip);
@@ -1240,7 +1283,20 @@ function createStrip() {
     $("#groups").classList.add("dragging");
   });
   r.plate.addEventListener("dragend", endDrag);
-  m.folderSel.addEventListener("change", (e) => moveTrack(strip, e.target.value));
+  let folderTimer = null;
+  const commitFolder = () => {
+    clearTimeout(folderTimer);
+    const chosen = m.folderSel._pending;
+    m.folderSel._pending = null;
+    if (chosen && chosen !== strip._row.folder) moveTrack(strip, chosen);
+  };
+  m.folderSel.addEventListener("change", () => {
+    m.folderSel._pending = m.folderSel.value;   // arrow keys fire change on every step; only the last one counts
+    clearTimeout(folderTimer);
+    folderTimer = setTimeout(commitFolder, 700);
+  });
+  m.folderSel.addEventListener("blur", commitFolder);
+  m.folderSel.addEventListener("keydown", (e) => { if (e.key === "Enter") commitFolder(); });
   return strip;
 }
 
@@ -1274,9 +1330,10 @@ function wireFader(strip) {
   };
 
   input.addEventListener("pointerdown", () => { holding.add(input); strip.classList.add("is-down"); });
-  const up = () => strip.classList.remove("is-down");
+  const up = () => { strip.classList.remove("is-down"); setTimeout(() => holding.delete(input), 1200); };
   input.addEventListener("pointerup", up);
   input.addEventListener("pointercancel", up);
+  input.addEventListener("lostpointercapture", up);
   input.addEventListener("input", () => {
     holding.add(input);
     apply(currentDb(), true);
@@ -1287,13 +1344,41 @@ function wireFader(strip) {
     setTimeout(() => holding.delete(input), 1200);
   });
   input.addEventListener("dblclick", () => { holding.add(input); apply(0, false); setTimeout(() => holding.delete(input), 1200); });
+
+  // on a touch screen the native input is switched off; the cap is the handle
+  const hit = $(".cap-hit", strip);
+  let grab = null;
+  hit.addEventListener("pointerdown", (e) => {
+    const zone = r.zone.getBoundingClientRect();
+    grab = { startY: e.clientY, startPos: parseFloat(input.value) / 1000, travel: zone.height - 22 };
+    hit.setPointerCapture(e.pointerId);
+    holding.add(input);
+    strip.classList.add("is-down");
+    e.preventDefault();
+  });
+  hit.addEventListener("pointermove", (e) => {
+    if (!grab) return;
+    const pos = Math.min(1, Math.max(0, grab.startPos + (grab.startY - e.clientY) / grab.travel));
+    apply(posToDb(pos), true);
+  });
+  const letGo = () => {
+    if (!grab) return;
+    grab = null;
+    strip.classList.remove("is-down");
+    clearTimeout(timer);
+    push();
+    setTimeout(() => holding.delete(input), 1200);
+  };
+  hit.addEventListener("pointerup", letGo);
+  hit.addEventListener("pointercancel", letGo);
+  hit.addEventListener("dblclick", () => { holding.add(input); apply(0, false); setTimeout(() => holding.delete(input), 1200); });
   input.addEventListener("keydown", (e) => {
-    const step = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5, PageUp: 3, PageDown: -3 }[e.key];
+    const step = { ArrowUp: 10, ArrowRight: 10, ArrowDown: -10, ArrowLeft: -10, PageUp: 50, PageDown: -50 }[e.key];
     if (step === undefined) return;
     e.preventDefault();
     holding.add(input);
-    const db = Math.min(6, Math.max(-70, (strip._lastDb ?? currentDb()) + step));
-    apply(db <= -69.5 ? -70 : db, true);
+    const pos = Math.min(1000, Math.max(0, parseInt(input.value, 10) + step));
+    apply(posToDb(pos / 1000, false), false);
     setTimeout(() => holding.delete(input), 1200);
   });
 }
@@ -1315,9 +1400,16 @@ function slider(input, output, command, format) {
     last = Date.now();
   };
   input.addEventListener("pointerdown", () => holding.add(input));
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    input.addEventListener(ev, () => setTimeout(() => holding.delete(input), 1200));
+  }
+  const announce = () => input.setAttribute("aria-valuetext", format(parseFloat(input.value)));
+  announce();
+  new MutationObserver(announce).observe(input, { attributes: true, attributeFilter: ["value"] });
   input.addEventListener("input", () => {
     holding.add(input);
     output.textContent = format(parseFloat(input.value));
+    announce();
     clearTimeout(timer);
     if (Date.now() - last > 150) push();
     else timer = setTimeout(push, 150);
@@ -1331,23 +1423,36 @@ function slider(input, output, command, format) {
 
 /* What the input and output mean, in a sentence a volunteer would say. */
 function describeRouting(row) {
-  if (row.is_return) return "A shared effect. Other channels send to it.";
+  if (row.is_return) return "A reverb or delay that other channels can send to.";
   const input = row.is_midi ? "MIDI instrument"
     : !row.input || row.input.type === "No Input" ? "Playback track"
     : row.input.type === "Ext. In" ? `Input ${row.input.channel}` : row.input.type;
   const out = row.output;
-  const output = !out || out.type === "Master" ? "Plays in the room"
+  const output = !out || out.type === "Master" ? "Plays through the main speakers"
     : out.type === "Ext. Out" ? `Plays to outputs ${out.channel}`
     : out.type === "Sends Only" ? "Only feeds the shared effects" : `Plays to ${out.type}`;
   return `${input}. ${output}.`;
 }
 
 /* The line under a channel's name: what the assistant is doing to it, then that it did it. */
+/* The line under a channel's name: what the assistant is doing to it, then that it did it;
+   otherwise where its sound comes from, in two words. */
 function paintNote(strip) {
   const note = strip._r.note;
-  if (strip._running) note.textContent = "Editing\u2026";
+  const row = strip._row;
+  if (strip._running) note.textContent = "Editing…";
   else if (strip._changedUntil && performance.now() < strip._changedUntil) note.textContent = "Changed";
-  else note.textContent = "";
+  else if (row?.solo) note.textContent = "Solo";
+  else note.textContent = row ? idleNote(row) : "";
+}
+
+function idleNote(row) {
+  if (row.is_return) return "Shared";
+  const out = row.output;
+  if (out && out.type !== "Master") return out.type === "Ext. Out" ? `Out ${out.channel}` : out.type === "Sends Only" ? "Effects only" : out.type;
+  if (row.is_midi) return "MIDI";
+  if (row.input && row.input.type === "Ext. In") return `Input ${row.input.channel}`;
+  return "Playback";
 }
 
 function updateStrip(strip, row, snap) {
@@ -1356,6 +1461,7 @@ function updateStrip(strip, row, snap) {
   strip._row = row;
   strip.classList.toggle("is-return", row.is_return);
   strip.classList.toggle("is-muted", row.mute);
+  strip.classList.toggle("is-solo", !!row.solo);
   if (row.color != null) {
     const hex = "#" + row.color.toString(16).padStart(6, "0");
     strip.style.setProperty("--track", hex);
@@ -1363,11 +1469,30 @@ function updateStrip(strip, row, snap) {
   }
 
   const number = row.is_return ? String.fromCharCode(65 + row.index) : String(row.index + 1);
-  if (r.name.textContent !== row.name) r.name.textContent = row.name;
+  const shown = row.is_return ? row.name.replace(/^[A-Z]-\s*/, "") : row.name;   // Ableton's "A-" prefix stays out of sight
+  if (r.name.textContent !== shown) r.name.textContent = shown;
   strip.setAttribute("aria-label", `${row.name}, ${row.is_return ? "shared effect " : "track "}${number}`);
+  r.plate.setAttribute("aria-label", `Select ${row.name}`);
+  r.plate.title = row.is_return ? row.name : `${row.name}. Drag to another folder.`;
   if (document.activeElement !== m.name) m.name.value = row.name;
-  m.title.textContent = `Channel ${number}`;
+  m.title.textContent = row.is_return ? `Shared effect ${number}` : `Channel ${number}`;
   m.summary.textContent = describeRouting(row);
+  m.balance.hidden = row.is_return;
+  m.soundHelp.hidden = row.is_return;
+  m.sendsTitle.hidden = row.is_return;
+  m.sends.hidden = row.is_return;
+  m.copyColours.hidden = row.is_return;
+  const routeKey = `${row.output?.type || ""}|${row.output?.channel || ""}`;
+  if ($("#drawer").contains(strip._more) && strip._routeKey !== routeKey && !strip._more.contains(document.activeElement)) {
+    strip._routeKey = routeKey;
+    loadRouting(strip);
+  }
+  if (row.is_return) m.devicesTitle.textContent = "Effects";
+  else {
+    const names = row.sends.map((s) => s.return.replace(/^[A-Z]-/, ""));
+    m.sendsTitle.textContent = names.length ? names.join(" and ") : "Reverb and delay";
+    m.devicesTitle.textContent = "Other effects";
+  }
   paintNote(strip);
 
   // Return tracks (shared effects) aren't sorted into instrument folders.
@@ -1379,9 +1504,12 @@ function updateStrip(strip, row, snap) {
     m.folderSel._sig = folderSig;
     m.folderSel.replaceChildren(...folders.map((f) => new Option(f.label, f.key)));
   }
-  if (!row.is_return && document.activeElement !== m.folderSel) m.folderSel.value = row.folder;
+  if (!row.is_return && document.activeElement !== m.folderSel && !m.folderSel._pending) m.folderSel.value = row.folder;
 
-  for (const key of [r.mute, m.mute]) key.setAttribute("aria-pressed", row.mute);
+  for (const key of [r.mute, m.mute]) {
+    key.setAttribute("aria-pressed", row.mute);
+    key.textContent = row.mute ? "Muted" : "Mute";
+  }
   m.solo.setAttribute("aria-pressed", row.solo);
   paintMeter(r.meter, row.meter);
 
@@ -1402,8 +1530,11 @@ function updateStrip(strip, row, snap) {
   const pan = row.pan_value ?? panFromText(row.pan);
   if (!holding.has(m.balanceInput)) {
     m.balanceInput.value = String(pan);
-    m.balanceOut.textContent = panText(pan);
+    const words = panText(pan);
+    if (m.balanceInput.getAttribute("aria-valuetext") !== words) m.balanceInput.setAttribute("aria-valuetext", words);
+    if (m.balanceOut.textContent !== words) m.balanceOut.textContent = words;
   }
+  m.balanceInput.setAttribute("aria-label", `Balance, ${row.name}`);
 
   const devSig = JSON.stringify(row.devices);
   if (m.devices._sig !== devSig) {
@@ -1420,9 +1551,13 @@ function updateStrip(strip, row, snap) {
     label.textContent = s.return.replace(/^[A-Z]-/, "");
     label.title = s.return;
     const input = $("input", control);
+    input.setAttribute("aria-label", `${label.textContent} send, ${row.name}`);
     if (!holding.has(input)) {
-      input.value = s.level_db ?? -70;
-      $("output", control).textContent = sendText(s.level_db);
+      input.value = String(Math.round(dbToPos(s.level_db ?? -70) * 1000));
+      const words = sendText(s.level_db);
+      if (input.getAttribute("aria-valuetext") !== words) input.setAttribute("aria-valuetext", words);
+      const out = $("output", control);
+      if (out.textContent !== words) out.textContent = words;
     }
   });
   updateClips(strip, row, snap);
@@ -1477,8 +1612,8 @@ function deviceRow(strip, name, index) {
   const remove = el("button", "device-x");
   remove.type = "button";
   remove.setAttribute("aria-label", `Remove ${name}`);
-  remove.addEventListener("click", () => {
-    if (!confirm(`Remove ${name} from ${strip._row.name}? (Cmd+Z in Live brings it back.)`)) return;
+  remove.addEventListener("click", async () => {
+    if (!await ask(`Remove ${name}?`, `${name} comes off ${strip._row.name}. Undo in Ableton brings it back.`, "Remove")) return;
     liveCmd("delete_device", { ...target(strip), device_index: index }).catch(() => {});
   });
   row.append(el("span", "device-idx", String(index + 1)), el("span", "device-name", name), remove);
@@ -1487,10 +1622,13 @@ function deviceRow(strip, name, index) {
 
 function sendControl(strip, returnIndex) {
   const control = el("div", "control send-level");
-  control.innerHTML = `<span class="control-label"></span><input type="range" min="-70" max="6" step="0.5"><output></output>`;
+  control.innerHTML = `<span class="control-label"></span><input type="range" min="0" max="1000" step="1"><output></output>`;
   const input = $("input", control);
   input.setAttribute("aria-label", `Send ${String.fromCharCode(65 + returnIndex)}`);
-  slider(input, $("output", control), (db) => ({ cmd: "set_send", args: { ...target(strip), return_index: returnIndex, db } }), sendText);
+  // the slider is a position, so its thumb matches the percentage it reads
+  slider(input, $("output", control),
+    (pos) => ({ cmd: "set_send", args: { ...target(strip), return_index: returnIndex, db: posToDb(pos / 1000) } }),
+    (pos) => sendText(posToDb(pos / 1000)));
   return control;
 }
 
@@ -1509,7 +1647,9 @@ async function loadRouting(strip) {
   line.replaceChildren();
   const pick = el("div", "pick");
 
-  const typeSel = select(out.types, out.type);
+  const typeSel = select(out.types, out.type, {
+    "Master": "The room (main speakers)", "Ext. Out": "Another output (in-ears, etc.)", "Sends Only": "Only the shared effects",
+  });
   typeSel.setAttribute("aria-label", "Output type");
   typeSel.addEventListener("change", async () => {
     await liveCmd("set_routing", { ...target(strip), direction: "output", type_name: typeSel.value }).catch(() => {});
@@ -1529,11 +1669,12 @@ async function loadRouting(strip) {
   line.append(el("span", "", "Plays to"), pick);
 }
 
-function select(options, current) {
+function select(options, current, labels = {}) {
   const sel = document.createElement("select");
   for (const option of options) {
     const o = document.createElement("option");
-    o.value = o.textContent = option;
+    o.value = option;
+    o.textContent = labels[option] || option;
     o.selected = option === current;
     sel.append(o);
   }
@@ -1543,8 +1684,10 @@ function select(options, current) {
 // Load the output routing when a channel is shown in the drawer.
 const drawerWatcher = new MutationObserver(() => {
   const strip = strips.get(selectedKey);
-  if (strip && $("#drawer").contains(strip._more) && strip._routedFor !== selectedKey + "|" + (strip._row?.output?.type || "")) {
-    strip._routedFor = selectedKey + "|" + (strip._row?.output?.type || "");
+  if (!strip || !$("#drawer").contains(strip._more)) return;
+  const routeKey = `${strip._row?.output?.type || ""}|${strip._row?.output?.channel || ""}`;
+  if (strip._routeKey !== routeKey) {
+    strip._routeKey = routeKey;
     loadRouting(strip);
   }
 });
@@ -1567,19 +1710,23 @@ async function openDeviceDialog(strip) {
     }
   }
   sel.replaceChildren();
-  const groups = { audio_effects: "Effects", instruments: "Instruments", midi_effects: "MIDI effects" };
-  for (const [key, label] of Object.entries(groups)) {
-    const names = stockDevices?.[key];
-    if (!names?.length) continue;
+  const common = Object.keys(DEVICE_HELP).filter((n) => stockDevices?.audio_effects?.includes(n));
+  if (common.length) {
     const group = document.createElement("optgroup");
-    group.label = label;
-    for (const name of names) {
-      const o = document.createElement("option");
-      o.value = o.textContent = name;
-      group.append(o);
-    }
+    group.label = "Common";
+    for (const name of common) group.append(new Option(name, name));
     sel.append(group);
   }
+  const groups = { audio_effects: "Every effect", instruments: "Instruments", midi_effects: "MIDI effects" };
+  for (const [key, label] of Object.entries(groups)) {
+    const names = (stockDevices?.[key] || []).filter((n) => !common.includes(n));
+    if (!names.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const name of names) group.append(new Option(name, name));
+    sel.append(group);
+  }
+  paintDeviceHelp();
   await loadPresets();
   $("#device-dialog").returnValue = "";
   $("#device-dialog").showModal();
@@ -1598,7 +1745,21 @@ async function loadPresets() {
   }
 }
 
-$("#device-select").addEventListener("change", loadPresets);
+/* What the common effects do, in a sentence. */
+const DEVICE_HELP = {
+  "Reverb": "Adds space, as if the singer were in a bigger room.",
+  "Compressor": "Evens out loud and quiet moments.",
+  "EQ Eight": "Adjusts bass, middle and treble.",
+  "Limiter": "Stops sudden loud spikes.",
+  "Echo": "Repeats the sound, like a delay.",
+  "Gate": "Cuts background noise when nobody is playing.",
+};
+
+function paintDeviceHelp() {
+  $("#device-help").textContent = DEVICE_HELP[$("#device-select").value] || "";
+}
+
+$("#device-select").addEventListener("change", () => { paintDeviceHelp(); loadPresets(); });
 
 $("#device-dialog").addEventListener("close", async () => {
   if ($("#device-dialog").returnValue !== "add" || !dialogStrip) return;
@@ -1632,6 +1793,7 @@ function openColorDialog(strip) {
     });
     swatch.style.setProperty("--track", hex);
     swatch.setAttribute("aria-label", name);
+    if (strip._row.color != null && parseInt(hex.slice(1), 16) === strip._row.color) swatch.setAttribute("aria-current", "true");
     const label = () => { nameBox.textContent = name; };
     swatch.addEventListener("mouseenter", label);
     swatch.addEventListener("focus", label);
@@ -1664,13 +1826,14 @@ async function showFolder(path) {
     return;
   }
   importPath = folder.path;
-  $("#folder-path").textContent = folder.display;
+  $("#folder-path").textContent = /^~\/?\.?$/.test(folder.display) ? "Home" : folder.display;
   $("#folder-path").title = folder.path;
   $("#folder-up").disabled = !folder.parent;
   $("#folder-up").onclick = () => showFolder(folder.parent);
 
   $("#import-roots").replaceChildren(...folder.roots.map((r) =>
-    button(r.name, "root" + (r.path === folder.path ? " active" : ""), () => showFolder(r.path))));
+    Object.assign(button(r.name, "root" + (r.path === folder.path ? " active" : ""), () => showFolder(r.path)),
+      r.path === folder.path ? { ariaCurrent: "true" } : {})));
 
   list.replaceChildren(...folder.folders.map((f) => {
     const li = document.createElement("li");
@@ -1697,7 +1860,7 @@ $("#import-go").addEventListener("click", async () => {
   go.textContent = "Listening to your files…";
   const note = $("#import-note").value;
   const name = importPath.split("/").pop();
-  startSending(`Import the audio in “${name}”.` + (note.trim() ? " " + note.trim() : ""));
+  startSending(`Import the song files in “${name}”.` + (note.trim() ? " " + note.trim() : ""));
   renderChat();
   $("#import-dialog").close();
   try {
@@ -1710,7 +1873,7 @@ $("#import-go").addEventListener("click", async () => {
     chatSig = "";
     if (state) renderChat();
     go.disabled = false;
-    go.textContent = "Import stems";
+    go.textContent = "Import song files";
   }
 });
 
@@ -1725,7 +1888,7 @@ function playingScenes(snap) {
 function renderSongs(snap) {
   const list = $("#songs");
   $("#songs-empty").hidden = snap.scenes.length > 0;
-  if (list.contains(document.activeElement)) return;
+  if (list.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
   const playing = playingScenes(snap);
   const sig = JSON.stringify([snap.scenes, [...playing]]);
   if (sig === songsSig) return;
@@ -1740,7 +1903,7 @@ function songRow(scene, isPlaying) {
 
   const titleBox = el("div", "song-title");
   const name = el("input", "song-name");
-  name.setAttribute("aria-label", "Song title");
+  name.setAttribute("aria-label", `Title of song ${scene.index + 1}`);
   name.placeholder = "Name this song";
   name.value = scene.name;
   const fit = () => { if (!CSS.supports("field-sizing", "content")) name.style.width = Math.max(8, name.value.length + 1) + "ch"; };
@@ -1755,13 +1918,15 @@ function songRow(scene, isPlaying) {
   bpm.inputMode = "decimal";
   bpm.min = "20"; bpm.max = "999";
   bpm.placeholder = "—";
-  bpm.setAttribute("aria-label", "Tempo");
+  bpm.setAttribute("aria-label", `Tempo of ${scene.name || "song " + (scene.index + 1)}`);
   bpm.value = scene.tempo ?? "";
   bpm.addEventListener("change", () => {
     const value = parseFloat(bpm.value);
     if (value >= 20 && value <= 999) liveCmd("set_scene", { scene_index: scene.index, bpm: value }).catch(() => {});
   });
-  li.append(bpm);
+  const bpmCell = el("div", "song-bpm-cell");
+  bpmCell.append(bpm, el("span", "bpm-unit", "BPM"));
+  li.append(bpmCell);
 
   li.append(transposer(scene));
 
@@ -1771,7 +1936,8 @@ function songRow(scene, isPlaying) {
     ? "<span>Playing</span>"
     : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1v10l9-5z"/></svg><span>Start</span>';
   start.addEventListener("click", () => liveCmd("fire_scene", { scene_index: scene.index }).catch(() => {}));
-  start.setAttribute("aria-label", `Start ${scene.name || "song " + (scene.index + 1)}`);
+  start.setAttribute("aria-label", isPlaying ? `${scene.name || "Song " + (scene.index + 1)}, playing` : `Start ${scene.name || "song " + (scene.index + 1)}`);
+  if (isPlaying) li.setAttribute("aria-current", "true");
   li.append(start);
   return li;
 }
@@ -1792,10 +1958,11 @@ function transposer(scene) {
   const up = button("+", "key key-step", () => set((key ?? 0) + 1));
   down.setAttribute("aria-label", `Transpose ${name} down a semitone`);
   up.setAttribute("aria-label", `Transpose ${name} up a semitone`);
-  value.title = "Back to the original key";
+  value.title = "Raises or lowers every part in the song. Press to go back to the original key.";
   let key = scene.transpose;
   const show = () => {
-    const text = key === null ? "Mixed keys" : key === 0 ? "Original key" : (key > 0 ? "Up " : "Down ") + Math.abs(key);
+    const n = Math.abs(key ?? 0);
+    const text = key === null ? "Mixed keys" : key === 0 ? "Original key" : `${key > 0 ? "Up" : "Down"} ${n} half step${n === 1 ? "" : "s"}`;
     value.textContent = text;
     value.setAttribute("aria-label", `Key of ${name}: ${text}. Press to go back to the original key.`);
     box.classList.toggle("shifted", key !== 0);
@@ -1863,9 +2030,12 @@ $("#add-fact").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("#fact-text").value.trim();
   if (!text) return;
+  const before = (state.room || []).length;
   try {
-    render(await api("/api/room", { add: text }));
-    $("#fact-text").value = "";
+    const next = await api("/api/room", { add: text });
+    render(next);
+    if ((next.room || []).length > before) $("#fact-text").value = "";
+    else toast(before >= 60 ? "Room is full (60 notes). Forget one first." : "That is already saved.", "error");
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1876,6 +2046,7 @@ $("#add-fact").addEventListener("submit", async (e) => {
 let currentTab = "mixer";
 
 function setTab(tab) {
+  if (tab !== currentTab) $("#pane-session").scrollTop = 0;
   currentTab = tab;
   $$(".tab").forEach((t) => {
     const on = t.dataset.tab === tab;
@@ -1894,6 +2065,7 @@ function setView(view) {
   if (view !== "chat") setTab(view);
   chatSig = "";
   if (state) renderChat();
+  paintActivity();
 }
 
 $$(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
@@ -1914,7 +2086,9 @@ $$(".bottom-nav button").forEach((b) => b.addEventListener("click", () => setVie
 function toast(message, kind = "info") {
   const node = el("div", "toast " + kind, message);
   $("#toasts").append(node);
-  setTimeout(() => node.remove(), kind === "error" ? 8000 : 4000);
+  let timer = setTimeout(() => node.remove(), kind === "error" ? 8000 : 4000);
+  node.addEventListener("mouseenter", () => clearTimeout(timer));
+  node.addEventListener("mouseleave", () => { timer = setTimeout(() => node.remove(), 2500); });
 }
 
 listen();

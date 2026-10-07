@@ -475,7 +475,7 @@ class ServerTest(FakeLiveCase):
         ]}).actions
         results = run_all(self.live, actions, folders=self.folders)
         self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
-        self.assertEqual(results[0]["text"], "Moved Mystery to Click & playback, teal in Live.")
+        self.assertEqual(results[0]["text"], "Moved Mystery to Click & playback, teal in Ableton.")
         state = self.request("GET", "/api/state")[1]
         self.assertEqual(self.folder_of(state, "Loop"), "playback")  # kept through the rename
         loop = next(t for t in state["live"]["snapshot"]["tracks"] if t["name"] == "Loop")
@@ -530,7 +530,7 @@ class ServerTest(FakeLiveCase):
         status, state = self.request("POST", "/api/chat", {"message": "Add a click"})
         self.assertEqual(status, 200)
         proposal = state["chat"][-1]["proposal"]
-        self.assertEqual(proposal["steps"][0]["text"], "Add an audio track “Click” with no input going to outputs 3/4")
+        self.assertEqual(proposal["steps"][0]["text"], "Add a track “Click” with no input going to outputs 3/4")
         self.assertTrue(proposal["exportable"])
 
         status, state = self.request("POST", f"/api/proposals/{proposal['id']}/apply", {})
@@ -1112,7 +1112,7 @@ class AddTrackWordingTest(unittest.TestCase):
     def test_describe(self):
         track = AddTrack(action="add_track", name="Keys", input="5/6", pan=-0.5,
                          devices=[{"device": "Reverb", "preset": "Large Hall"}])
-        self.assertEqual(track.describe(), "Add an audio track “Keys” on input 5/6, with Reverb (Large Hall), panned 25L")
+        self.assertEqual(track.describe(), "Add a track “Keys” on input 5/6, with Reverb (Large Hall), balance 50% left")
 
 
 if __name__ == "__main__":
