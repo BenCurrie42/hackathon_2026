@@ -11,8 +11,6 @@
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/big-shoulders-display-latin-700-normal.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/atkinson-hyperlegible-latin-400-normal.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/atkinson-hyperlegible-latin-700-normal.woff2">
-  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/b612-mono-latin-400-normal.woff2">
-  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/b612-mono-latin-700-normal.woff2">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -39,10 +37,6 @@
         <input id="tempo-input" type="number" inputmode="decimal" min="20" max="999" step="1" aria-label="Tempo in BPM">
         <span>BPM</span>
       </label>
-      <div class="main-meter" aria-label="Main level">
-        <span class="main-legend">Main</span>
-        <div class="ladder" id="master-meter" aria-hidden="true"><i></i></div>
-      </div>
     </div>
   </header>
 
@@ -120,11 +114,7 @@
       </div>
 
       <div class="tab-panel" id="panel-mixer">
-        <div class="phone-main" aria-label="Main level">
-          <span class="main-legend">Main</span>
-          <div class="ladder" id="master-meter-phone" aria-hidden="true"><i></i></div>
-        </div>
-        <div class="bank" id="groups"><div class="rail" id="rail" aria-hidden="true"></div></div>
+        <div class="bank" id="groups"></div>
         <section class="drawer" id="drawer" aria-label="Selected channel"></section>
         <p class="empty" id="mixer-empty" hidden>No tracks yet. Describe your inputs in the chat, for example “lead vocal on input 1”.</p>
         <div class="mixer-foot">
@@ -218,35 +208,19 @@
 
   <template id="strip-template">
     <article class="strip" role="group" tabindex="0">
-      <div class="strip-head">
-        <button class="sel" type="button" aria-pressed="false"></button>
-        <span class="strip-grip" draggable="true" title="Drag to another folder" aria-hidden="true"><i></i><i></i><i></i></span>
-      </div>
-      <div class="plate">
-        <textarea class="strip-name" rows="2" maxlength="24" aria-label="Track name" spellcheck="false"></textarea>
-        <div class="legends">
-          <span class="legend-in"></span>
-          <span class="legend-out" hidden></span>
-        </div>
+      <div class="plate" draggable="true" title="Drag to another folder">
+        <p class="strip-name"></p>
+        <p class="strip-note"></p>
         <i class="tape"></i>
-      </div>
-      <div class="strip-toggles">
-        <button class="mute" type="button" aria-pressed="false" title="Mute">M</button>
-        <button class="solo" type="button" aria-pressed="false" title="Solo">S</button>
-      </div>
-      <div class="pan">
-        <div class="pan-ruler"><i class="needle"></i><input type="range" min="-1" max="1" step="0.02" aria-label="Pan"></div>
-        <output></output>
       </div>
       <div class="fader-zone">
         <i class="slot"></i>
         <i class="ghost"></i>
         <i class="cap"></i>
         <div class="meter" aria-hidden="true"><i></i></div>
-        <span class="clip-lamp" aria-hidden="true"></span>
-        <input class="fader" type="range" min="0" max="1000" step="1" aria-label="Level" orient="vertical">
+        <input class="fader" type="range" min="0" max="1000" step="1" aria-label="Volume" orient="vertical">
       </div>
-      <div class="readout"><output class="vol-out"></output><span class="was"></span></div>
+      <button class="mute" type="button" aria-pressed="false">Mute</button>
       <svg class="run" aria-hidden="true"><rect/><rect/><rect/></svg>
     </article>
   </template>

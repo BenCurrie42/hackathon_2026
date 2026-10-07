@@ -164,8 +164,6 @@ function renderLive() {
     play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
     const tempo = $("#tempo-input");
     if (document.activeElement !== tempo) tempo.value = Math.round(snap.song.tempo * 100) / 100;
-    paintMeter($("#master-meter"), snap.master?.meter, 22);
-    paintMeter($("#master-meter-phone"), snap.master?.meter, 22);
     setCount("mixer", snap.tracks.length);
     setCount("songs", snap.scenes.length);
   }
@@ -768,15 +766,12 @@ function posToDb(pos) {
   return 6;
 }
 
-function levelHtml(db) {
-  if (db === null || db === undefined || db <= -70) return "Off";
-  const text = (db > 0 ? "+" : db < 0 ? MINUS : "") + Math.abs(db).toFixed(1);
-  return numHtml(text) + '<span class="unit">dB</span>';
+function percent(db) {
+  return Math.round(dbToPos(db) * 100);
 }
 
-function levelPlain(db) {
-  if (db === null || db === undefined || db <= -70) return "Off";
-  return (db > 0 ? "+" : db < 0 ? MINUS : "") + Math.abs(db).toFixed(1);
+function sendText(db) {
+  return db === null || db === undefined || db <= -70 ? "Off" : `${percent(db)}%`;
 }
 
 function dbText(db) {
@@ -785,7 +780,7 @@ function dbText(db) {
 
 function panText(pan) {
   const amount = Math.round(Math.abs(pan) * 50);
-  return amount === 0 ? "C" : `${pan < 0 ? "L" : "R"}${amount}`;
+  return amount === 0 ? "Centre" : `${pan < 0 ? "Left" : "Right"} ${amount}`;
 }
 
 function panFromText(text) {
@@ -818,7 +813,7 @@ function startRun(strip) {
   strip.classList.add("is-run");
   clearTimeout(strip._stopTimer);
   strip._stopTimer = null;
-  paintLegend(strip);
+  paintNote(strip);
   const name = strip._row?.name || "channel";
   $("#sr-status").textContent = `Editing ${name}`;
 
@@ -857,7 +852,7 @@ function stopRun(strip) {
   const name = strip._row?.name || "channel";
   $("#sr-status").textContent = `Changed ${name}`;
 
-  // landing: the cap glides to where the change put it, and a ghost marks where it was
+  // landing: the cap glides to where the change put it, and a tick marks where it was
   const was = strip._heldDb;
   strip._heldDb = undefined;
   const now = strip._lastDb;
@@ -867,17 +862,15 @@ function stopRun(strip) {
   }
   setFaderPosition(strip, now);
   if (was !== undefined && was !== now) {
-    const r = strip._r;
-    r.ghost.style.bottom = `calc((var(--throw) - var(--cap-h)) * ${dbToPos(was)} + var(--cap-h) / 2)`;
-    r.was.textContent = `was ${levelPlain(was)}`;
+    strip._r.ghost.style.bottom = `calc((var(--throw) - var(--cap-h)) * ${dbToPos(was)} + var(--cap-h) / 2)`;
     strip.classList.add("has-ghost");
     clearTimeout(strip._ghostTimer);
     strip._ghostTimer = setTimeout(() => strip.classList.remove("has-ghost"), 6000);
   }
   strip._changedUntil = performance.now() + 4000;
   clearTimeout(strip._changedTimer);
-  strip._changedTimer = setTimeout(() => paintLegend(strip), 4050);
-  paintLegend(strip);
+  strip._changedTimer = setTimeout(() => paintNote(strip), 4050);
+  paintNote(strip);
 }
 
 function paintActivity() {
@@ -925,30 +918,15 @@ const groupEls = new Map(); // folder key (or "returns") -> dom refs
 let dragging = null;        // the strip being dragged to another folder
 let selectedKey = null;     // "t0" / "r1": the channel shown in the drawer
 
-const RAIL = [[1, "+6"], [0.8, "0"], [0.6, `${MINUS}10`], [0.42, `${MINUS}20`], [0.28, `${MINUS}30`], [0.16, `${MINUS}40`], [0, "Off"]];
-
-function buildRail() {
-  const rail = $("#rail");
-  if (rail.firstChild) return;
-  const scale = el("div", "rail-scale");
-  for (const [p, label] of RAIL) {
-    const mark = el("span", p === 0.8 ? "zero" : "", label);
-    mark.style.bottom = `calc((var(--throw) - var(--cap-h)) * ${p} + var(--cap-h) / 2)`;
-    scale.append(mark);
-  }
-  rail.append(scale);
-}
-
 function renderMixer(snap) {
-  buildRail();
   const groups = buildMixerGroups(snap);
   const groupsEl = $("#groups");
   const keepGroups = new Set();
   const keepStrips = new Set();
 
-  // The rail stays first. A folder is only moved when it is out of place: moving an element
-  // takes the focus away from anything inside it, and this runs on every poll.
-  let at = 1;
+  // A folder is only moved when it is out of place: moving an element takes the focus away
+  // from anything inside it, and this runs on every poll.
+  let at = 0;
   groups.forEach((group) => {
     keepGroups.add(group.key);
     const g = ensureGroup(group.key);
@@ -1148,7 +1126,8 @@ function keepSelection(groups) {
   }
   for (const [key, strip] of strips) {
     const on = key === selectedKey;
-    strip._r.sel.setAttribute("aria-pressed", String(on));
+    strip.classList.toggle("is-selected", on);
+    strip.setAttribute("aria-current", on ? "true" : "false");
   }
   const strip = strips.get(selectedKey);
   const drawer = $("#drawer");
@@ -1173,7 +1152,7 @@ function buildMore(strip) {
   const name = el("input", "drawer-name");
   name.setAttribute("aria-label", "Track name");
   name.maxLength = 24;
-  const summary = el("div", "route-summary");
+  const summary = el("p", "route-summary");
   const colourKey = el("button", "key colour-key");
   colourKey.type = "button";
   const chip = el("i", "colour-chip");
@@ -1181,14 +1160,21 @@ function buildMore(strip) {
   colourKey.addEventListener("click", () => openColorDialog(strip));
   channel.append(title, name, summary, colourKey);
 
+  const sound = el("section", "m-sound");
+  const keys = el("div", "sound-keys");
+  const mute = el("button", "key mute-key", "Mute");
+  const solo = el("button", "key solo", "Solo");
+  for (const key of [mute, solo]) { key.type = "button"; key.setAttribute("aria-pressed", "false"); }
+  keys.append(mute, solo);
+  const balance = el("div", "control balance");
+  balance.innerHTML = '<span class="control-label">Balance</span><input type="range" min="-1" max="1" step="0.02" aria-label="Balance, left to right"><output></output>';
+  sound.append(el("h3", "", "Sound"), keys, balance);
+
   const effects = el("section", "m-effects");
   const devices = el("div", "devices");
   const addDevice = button("Add effect", "add-device", () => openDeviceDialog(strip));
-  effects.append(el("h3", "", "Effects, in order"), devices, addDevice);
-
-  const sendsSection = el("section", "m-sends");
   const sends = el("div", "sends");
-  sendsSection.append(el("h3", "", "Sends"), sends);
+  effects.append(el("h3", "", "Effects"), devices, addDevice, el("h3", "again", "Reverb and delay"), sends);
 
   const routing = el("section", "m-routing");
   const folderLine = el("label", "folder-line");
@@ -1197,59 +1183,54 @@ function buildMore(strip) {
   folderLine.append(el("span", "", "Folder"), folderSel);
   const routeLine = el("div", "route-line");
   const clipGains = el("div", "clip-gains");
-  routing.append(el("h3", "", "Routing"), folderLine, routeLine, clipGains);
+  routing.append(el("h3", "", "Where it plays"), folderLine, routeLine, clipGains);
 
-  more.append(channel, effects, sendsSection, routing);
+  more.append(channel, sound, effects, routing);
   strip._more = more;
-  return { title, name, summary, colourChip: chip, devices, addDevice, sends, folderLine, folderSel, routeLine, clipGains };
+  return {
+    title, name, summary, colourChip: chip, mute, solo,
+    balance, balanceInput: $("input", balance), balanceOut: $("output", balance),
+    devices, addDevice, sends, folderLine, folderSel, routeLine, clipGains,
+  };
 }
 
 function createStrip() {
   const strip = $("#strip-template").content.firstElementChild.cloneNode(true);
   const m = buildMore(strip);
   const r = {
-    sel: $(".sel", strip), grip: $(".strip-grip", strip), name: $(".strip-name", strip),
-    legendIn: $(".legend-in", strip), legendOut: $(".legend-out", strip),
-    mute: $(".mute", strip), solo: $(".solo", strip),
-    pan: $(".pan", strip), panInput: $(".pan input", strip), panOut: $(".pan output", strip),
-    zone: $(".fader-zone", strip), fader: $(".fader", strip), ghost: $(".ghost", strip),
-    meter: $(".meter", strip), clipLamp: $(".clip-lamp", strip),
-    volOut: $(".vol-out", strip), was: $(".was", strip),
-    more: m,
+    plate: $(".plate", strip), name: $(".strip-name", strip), note: $(".strip-note", strip),
+    mute: $(".mute", strip), zone: $(".fader-zone", strip), fader: $(".fader", strip),
+    ghost: $(".ghost", strip), meter: $(".meter", strip), more: m,
   };
   strip._r = r;
 
-  // selecting
-  r.sel.addEventListener("click", () => selectStrip(strip, true));
+  // selecting: tap anywhere on the channel except the fader and Mute
   strip.addEventListener("click", (e) => {
-    if (e.target.closest(".strip-toggles, .pan, .fader-zone, .strip-grip, .sel, .strip-name")) return;
+    if (e.target.closest(".mute, .fader-zone")) return;
     selectStrip(strip, true);
   });
-  strip.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === strip) selectStrip(strip, true); });
-  r.name.addEventListener("focus", () => selectStrip(strip));
-  // the whole name plate is the target for editing the name, not just its first line
-  $(".plate", strip).addEventListener("click", (e) => { if (e.target !== r.name) r.name.focus(); });
+  strip.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target === strip) { e.preventDefault(); selectStrip(strip, true); }
+  });
 
-  // naming: the strip and the drawer share one commit
-  const rename = (value) => {
-    value = value.trim();
+  // naming happens in the drawer
+  const rename = () => {
+    const value = m.name.value.trim();
     if (value && value !== strip._row.name) liveCmd("set_track_name", { ...target(strip), name: value }).catch(() => {});
   };
-  r.name.addEventListener("change", () => rename(r.name.value));
-  r.name.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); if (!e.shiftKey) r.name.blur(); }
-  });
-  m.name.addEventListener("change", () => rename(m.name.value));
+  m.name.addEventListener("change", rename);
   m.name.addEventListener("keydown", (e) => { if (e.key === "Enter") m.name.blur(); });
 
-  r.mute.addEventListener("click", () => liveCmd("set_mute", { ...target(strip), on: !strip._row.mute }).catch(() => {}));
-  r.solo.addEventListener("click", () => liveCmd("set_solo", { ...target(strip), on: !strip._row.solo }).catch(() => {}));
+  const toggleMute = () => liveCmd("set_mute", { ...target(strip), on: !strip._row.mute }).catch(() => {});
+  r.mute.addEventListener("click", toggleMute);
+  m.mute.addEventListener("click", toggleMute);
+  m.solo.addEventListener("click", () => liveCmd("set_solo", { ...target(strip), on: !strip._row.solo }).catch(() => {}));
+  slider(m.balanceInput, m.balanceOut, (pan) => ({ cmd: "set_pan", args: { ...target(strip), pan } }), panText);
 
   wireFader(strip);
-  wirePan(strip);
 
-  // moving a track between folders: drag the grip (computers), or pick from the list (drawer)
-  r.grip.addEventListener("dragstart", (e) => {
+  // moving a track between folders: drag the name plate (computers), or pick from the list (drawer)
+  r.plate.addEventListener("dragstart", (e) => {
     if (strip._row.is_return) return e.preventDefault();
     dragging = strip;
     e.dataTransfer.effectAllowed = "move";
@@ -1258,10 +1239,8 @@ function createStrip() {
     strip.classList.add("is-dragging");
     $("#groups").classList.add("dragging");
   });
-  r.grip.addEventListener("dragend", endDrag);
+  r.plate.addEventListener("dragend", endDrag);
   m.folderSel.addEventListener("change", (e) => moveTrack(strip, e.target.value));
-
-  r.clipLamp.addEventListener("click", () => { strip._clipUntil = 0; r.clipLamp.classList.remove("on"); });
   return strip;
 }
 
@@ -1282,8 +1261,7 @@ function wireFader(strip) {
   const show = (db) => {
     strip._lastDb = db;
     r.zone.style.setProperty("--p", String(dbToPos(db)));
-    r.volOut.innerHTML = levelHtml(db);
-    input.setAttribute("aria-valuetext", db <= -70 ? "Off" : `${levelPlain(db)} decibels`);
+    input.setAttribute("aria-valuetext", db <= -70 ? "Off" : `${percent(db)} percent`);
   };
   const apply = (db, vibrate) => {
     input.value = String(Math.round(dbToPos(db) * 1000));
@@ -1324,39 +1302,7 @@ function setFaderPosition(strip, db) {
   const r = strip._r;
   r.fader.value = String(Math.round(dbToPos(db) * 1000));
   r.zone.style.setProperty("--p", String(dbToPos(db)));
-  r.volOut.innerHTML = levelHtml(db);
-  r.fader.setAttribute("aria-valuetext", db === null || db <= -70 ? "Off" : `${levelPlain(db)} decibels`);
-}
-
-function wirePan(strip) {
-  const r = strip._r;
-  const input = r.panInput;
-  let last = 0;
-  let timer = null;
-  const push = () => {
-    liveCmd("set_pan", { ...target(strip), pan: parseFloat(input.value) }).catch(() => {});
-    last = Date.now();
-  };
-  const show = () => {
-    const pan = parseFloat(input.value);
-    r.pan.style.setProperty("--p", String((pan + 1) / 2));
-    r.panOut.textContent = panText(pan);
-  };
-  const change = () => {
-    holding.add(input);
-    show();
-    clearTimeout(timer);
-    if (Date.now() - last > 150) push();
-    else timer = setTimeout(push, 150);
-  };
-  input.addEventListener("pointerdown", () => holding.add(input));
-  input.addEventListener("input", change);
-  input.addEventListener("change", () => {
-    clearTimeout(timer);
-    push();
-    setTimeout(() => holding.delete(input), 1200);
-  });
-  input.addEventListener("dblclick", () => { input.value = "0"; change(); setTimeout(() => holding.delete(input), 1200); });
+  r.fader.setAttribute("aria-valuetext", db === null || db <= -70 ? "Off" : `${percent(db)} percent`);
 }
 
 /* A range input that talks to Live while dragging, without fighting the poll. */
@@ -1383,47 +1329,25 @@ function slider(input, output, command, format) {
   });
 }
 
-function legendText(row) {
-  if (row.is_return) return "RETURN";
-  if (row.is_midi) return "MIDI";
-  const side = row.input;
-  if (!side || side.type === "No Input") return "NO IN";
-  if (side.type === "Ext. In") return `IN ${side.channel}`;
-  return side.type.toUpperCase();
+/* What the input and output mean, in a sentence a volunteer would say. */
+function describeRouting(row) {
+  if (row.is_return) return "A shared effect. Other channels send to it.";
+  const input = row.is_midi ? "MIDI instrument"
+    : !row.input || row.input.type === "No Input" ? "Playback track"
+    : row.input.type === "Ext. In" ? `Input ${row.input.channel}` : row.input.type;
+  const out = row.output;
+  const output = !out || out.type === "Master" ? "Plays in the room"
+    : out.type === "Ext. Out" ? `Plays to outputs ${out.channel}`
+    : out.type === "Sends Only" ? "Only feeds the shared effects" : `Plays to ${out.type}`;
+  return `${input}. ${output}.`;
 }
 
-function outLegend(row) {
-  const side = row.output;
-  if (!side || side.type === "Master") return "";
-  if (side.type === "Ext. Out") return `OUT ${side.channel}`;
-  if (side.type === "Sends Only") return "SENDS";
-  return side.type.toUpperCase().slice(0, 8);
-}
-
-function routeSentence(side, isInput) {
-  if (!side) return "";
-  if (side.type === "No Input") return "No input";
-  if (side.type === "Ext. In") return `Input ${side.channel}`;
-  if (side.type === "Ext. Out") return `Outputs ${side.channel}`;
-  if (side.type === "Master") return "Main";
-  return side.channel && !isInput ? `${side.type} ${side.channel}` : side.type;
-}
-
-function paintLegend(strip) {
-  const r = strip._r;
-  const row = strip._row;
-  if (!row) return;
-  r.legendIn.classList.toggle("editing", !!strip._running);
-  if (strip._running) {
-    r.legendIn.textContent = "EDITING";
-  } else if (strip._changedUntil && performance.now() < strip._changedUntil) {
-    r.legendIn.textContent = "CHANGED";
-  } else {
-    r.legendIn.textContent = legendText(row);
-  }
-  const out = outLegend(row);
-  r.legendOut.hidden = !out;
-  r.legendOut.textContent = out;
+/* The line under a channel's name: what the assistant is doing to it, then that it did it. */
+function paintNote(strip) {
+  const note = strip._r.note;
+  if (strip._running) note.textContent = "Editing\u2026";
+  else if (strip._changedUntil && performance.now() < strip._changedUntil) note.textContent = "Changed";
+  else note.textContent = "";
 }
 
 function updateStrip(strip, row, snap) {
@@ -1439,21 +1363,15 @@ function updateStrip(strip, row, snap) {
   }
 
   const number = row.is_return ? String.fromCharCode(65 + row.index) : String(row.index + 1);
-  r.sel.textContent = number;
-  r.sel.setAttribute("aria-label", `Select ${row.name}`);
-  strip.setAttribute("aria-label", `${row.name}, ${row.is_return ? "return " : "track "}${number}`);
-
-  if (document.activeElement !== r.name) r.name.value = row.name;
+  if (r.name.textContent !== row.name) r.name.textContent = row.name;
+  strip.setAttribute("aria-label", `${row.name}, ${row.is_return ? "shared effect " : "track "}${number}`);
   if (document.activeElement !== m.name) m.name.value = row.name;
   m.title.textContent = `Channel ${number}`;
-  m.summary.innerHTML = "";
-  m.summary.append(document.createTextNode(row.is_return ? "Shared effect" : routeSentence(row.input, true)));
-  m.summary.insertAdjacentHTML("beforeend", ARROW_SVG);
-  m.summary.append(document.createTextNode(routeSentence(row.output, false)));
-  paintLegend(strip);
+  m.summary.textContent = describeRouting(row);
+  paintNote(strip);
 
   // Return tracks (shared effects) aren't sorted into instrument folders.
-  r.grip.hidden = row.is_return;
+  r.plate.draggable = !row.is_return;
   m.folderLine.hidden = row.is_return;
   const folders = state.folders || [];
   const folderSig = folders.map((f) => f.key + f.label).join("|");
@@ -1463,10 +1381,9 @@ function updateStrip(strip, row, snap) {
   }
   if (!row.is_return && document.activeElement !== m.folderSel) m.folderSel.value = row.folder;
 
-  r.mute.setAttribute("aria-pressed", row.mute);
-  r.solo.setAttribute("aria-pressed", row.solo);
-  paintMeter(r.meter, row.meter, 24);
-  paintClip(strip, row.meter);
+  for (const key of [r.mute, m.mute]) key.setAttribute("aria-pressed", row.mute);
+  m.solo.setAttribute("aria-pressed", row.solo);
+  paintMeter(r.meter, row.meter);
 
   // the level: while the assistant's light is running, hold what was there before
   const db = row.volume_db === null || row.volume_db === undefined ? -70 : row.volume_db;
@@ -1483,10 +1400,9 @@ function updateStrip(strip, row, snap) {
   if (!holding.has(r.fader)) setFaderPosition(strip, held ? strip._heldDb : db);
 
   const pan = row.pan_value ?? panFromText(row.pan);
-  if (!holding.has(r.panInput)) {
-    r.panInput.value = String(pan);
-    r.pan.style.setProperty("--p", String((pan + 1) / 2));
-    r.panOut.textContent = panText(pan);
+  if (!holding.has(m.balanceInput)) {
+    m.balanceInput.value = String(pan);
+    m.balanceOut.textContent = panText(pan);
   }
 
   const devSig = JSON.stringify(row.devices);
@@ -1501,34 +1417,22 @@ function updateStrip(strip, row, snap) {
   row.sends.forEach((s, i) => {
     const control = m.sends.children[i];
     const label = $(".control-label", control);
-    label.textContent = s.return.replace(/^([A-Z])-/, "$1 ");
+    label.textContent = s.return.replace(/^[A-Z]-/, "");
     label.title = s.return;
     const input = $("input", control);
     if (!holding.has(input)) {
       input.value = s.level_db ?? -70;
-      $("output", control).textContent = s.level_db === null || s.level_db === undefined || s.level_db <= -70 ? "Off" : levelPlain(s.level_db);
+      $("output", control).textContent = sendText(s.level_db);
     }
   });
   updateClips(strip, row, snap);
 }
 
-function paintClip(strip, reading) {
-  const r = strip._r;
-  const now = performance.now();
-  if ((reading?.peak ?? 0) >= 0.95) {
-    strip._clipUntil = now + 4000;
-    clearTimeout(strip._clipTimer);
-    strip._clipTimer = setTimeout(() => r.clipLamp.classList.remove("on"), 4050);
-  }
-  r.clipLamp.classList.toggle("on", !!strip._clipUntil && now < strip._clipUntil);
-}
-
 /* Live's meters run 0-1 (after the fader). Peak since the last poll, shown in n segments. */
-function paintMeter(meter, reading, segments) {
+function paintMeter(meter, reading) {
   if (!meter) return;
   meter.hidden = reading == null;
-  const peak = Math.min(1, reading?.peak ?? 0);
-  meter.style.setProperty("--lit", String(Math.round(peak * segments)));
+  meter.style.setProperty("--lit", String(Math.min(1, reading?.peak ?? 0)));
 }
 
 function songName(snap, sceneIndex) {
@@ -1544,7 +1448,7 @@ function updateClips(strip, row, snap) {
   if (gains._sig !== gainSig) {
     gains._sig = gainSig;
     const rows = clips.filter((c) => c.is_audio).map((c) => clipGainControl(strip, c, snap));
-    gains.replaceChildren(...(rows.length ? [el("h3", "", "Clip levels"), ...rows] : []));
+    gains.replaceChildren(...(rows.length ? [el("h3", "", "Level in each song"), ...rows] : []));
   }
   for (const control of gains.querySelectorAll(".clip-gain")) {
     const clip = clips.find((c) => c.scene_index === control._scene);
@@ -1586,14 +1490,13 @@ function sendControl(strip, returnIndex) {
   control.innerHTML = `<span class="control-label"></span><input type="range" min="-70" max="6" step="0.5"><output></output>`;
   const input = $("input", control);
   input.setAttribute("aria-label", `Send ${String.fromCharCode(65 + returnIndex)}`);
-  slider(input, $("output", control), (db) => ({ cmd: "set_send", args: { ...target(strip), return_index: returnIndex, db } }),
-    (db) => (db <= -70 ? "Off" : levelPlain(db)));
+  slider(input, $("output", control), (db) => ({ cmd: "set_send", args: { ...target(strip), return_index: returnIndex, db } }), sendText);
   return control;
 }
 
 async function loadRouting(strip) {
   const line = strip._r.more.routeLine;
-  line.replaceChildren(el("span", "", "Output"), el("span", "", "Loading…"));
+  line.replaceChildren(el("span", "", "Plays to"), el("span", "", "Loading…"));
   let routing;
   try {
     routing = await api("/api/live", { cmd: "get_routing", args: target(strip) }).then((d) => d.result);
@@ -1623,7 +1526,7 @@ async function loadRouting(strip) {
     }).catch(() => {}));
     pick.append(chanSel);
   }
-  line.append(el("span", "", "Output"), pick);
+  line.append(el("span", "", "Plays to"), pick);
 }
 
 function select(options, current) {
