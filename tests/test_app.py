@@ -8,6 +8,8 @@ pytest isn't an approved dependency yet (CLAUDE.md).
 
 import array
 import copy
+import os
+import gzip
 import http.client
 import http.client as http_client
 import json
@@ -22,7 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app import audio_files, fake_live, song_map
+from app import audio_files, fake_live, mixdown, parts, song_key, song_map, song_mixes, vendor_set
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.folders import FolderMemory, classify
@@ -30,12 +32,26 @@ from pydantic import ValidationError
 from rig import TRACK_COLORS
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
+from app import server as app_server
 from app.server import App, make_handler
 import rig
 from live_control.starting_fader import starting_fader_db
 from live_control.stem_level import StemLevel, pair_level
 from live_control.stereo_pairs import stereo_pairs
 from live_control.timecode import is_timecode
+
+
+_home = None
+
+
+def setUpModule():
+    """Anything that remembers to ~/.holysound writes to a scratch folder instead."""
+    global _home
+    _home = tempfile.TemporaryDirectory()
+    patcher = mock.patch.dict(os.environ, {"HOLYSOUND_HOME": _home.name})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    unittest.addModuleCleanup(_home.cleanup)
 
 
 class Block(SimpleNamespace):
@@ -137,6 +153,15 @@ class ActionsTest(FakeLiveCase):
         self.assertEqual(click["input"]["type"], "No Input")
         self.assertEqual(click["output"], {"type": "Ext. Out", "channel": "3/4"})
 
+    def test_steps_report_working_then_how_they_ended(self):
+        seen = []
+        actions = Proposal.model_validate({"actions": [
+            {"action": "add_track", "name": "Click", "input": None},
+            {"action": "set_volume", "track": "Nobody", "db": -3},
+        ]}).actions
+        run_all(self.live, actions, on_step=lambda n, state: seen.append((n, state)))
+        self.assertEqual(seen, [(0, "working"), (0, "done"), (1, "working"), (1, "failed")])
+
     def test_unknown_preset_falls_back_to_default_settings(self):
         results = self.run_actions(
             {"action": "add_track", "name": "Keys", "input": "5/6",
@@ -178,8 +203,90 @@ class ActionsTest(FakeLiveCase):
         )
         self.assertTrue(all(r["ok"] for r in results), results)
         snap = self.live.snapshot(max_age=0)
-        self.assertEqual(snap["scenes"][-1], {"index": 1, "name": "Way Maker", "tempo": 70.0})
+        self.assertEqual(snap["scenes"][-1], {"index": 1, "name": "Way Maker", "tempo": 70.0, "transpose": 0})
         self.assertEqual(snap["song"]["tempo"], 70)
+
+    def test_songs_go_in_a_chosen_slot_and_move_with_their_clips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Keys.wav"
+            write_song_stem(path, 2, [(0, 2)])
+            self.fake.create_audio_track("Keys")
+            results = self.run_actions(
+                {"action": "update_song", "song": "1", "new_name": "Opener"},
+                {"action": "add_song", "name": "Closer"},
+                {"action": "add_song", "name": "Way Maker", "bpm": 68, "position": 2},
+            )
+            self.assertTrue(all(r["ok"] for r in results), results)
+            self.assertEqual(results[2]["text"], "Added song 2: Way Maker.")
+            self.fake.import_audio(0, str(path), 1)  # Keys clip in Way Maker
+            self.assertEqual([s["name"] for s in self.fake.list_scenes()], ["Opener", "Way Maker", "Closer"])
+
+            results = self.run_actions({"action": "move_song", "song": "Way Maker", "position": 3})
+            self.assertEqual(results[0]["text"], "Moved Way Maker to slot 3.")
+            scenes = self.fake.list_scenes()
+            self.assertEqual([s["name"] for s in scenes], ["Opener", "Closer", "Way Maker"])
+            self.assertEqual(scenes[2]["tempo"], 68.0)
+            self.assertEqual(list(self.fake.tracks[0]["clips"]), [2])  # the clip went with it
+
+            self.run_actions({"action": "move_song", "song": "Way Maker", "position": 1})
+            self.assertEqual([s["name"] for s in self.fake.list_scenes()], ["Way Maker", "Opener", "Closer"])
+            self.assertEqual(list(self.fake.tracks[0]["clips"]), [0])
+
+            results = self.run_actions({"action": "move_song", "song": "Closer", "position": 9})
+            self.assertIn("only 3 song slots", results[0]["text"])
+
+    def test_transpose_song_moves_every_audio_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, name in enumerate(("Keys", "Bass")):
+                path = Path(tmp) / f"{name}.wav"
+                write_song_stem(path, 2, [(0, 2)])
+                self.fake.create_audio_track(name)
+                self.fake.import_audio(i, str(path), 0)
+            self.fake.set_scene(0, name="Way Maker")
+            results = self.run_actions({"action": "transpose_song", "song": "Way Maker", "semitones": -2})
+            self.assertEqual(results[0]["text"], "Way Maker is down 2 semitones now: 2 clips.")
+            snap = self.live.snapshot(max_age=0)
+            self.assertEqual(snap["scenes"][0]["transpose"], -2)
+            self.assertIn("1. Way Maker — transposed -2", session_notes(snap, None))
+            self.fake.transpose_song(0, 0)
+            self.fake.tracks[0]["clips"][0]["transpose"] = 3
+            self.fake.tracks[1]["clips"][0]["transpose"] = -1
+            self.assertIsNone(self.fake.list_scenes()[0]["transpose"])  # clips disagree
+
+    def test_click_and_opted_out_tracks_keep_their_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, name in enumerate(("Click", "Keys", "Loop Pad")):
+                path = Path(tmp) / f"{name}.wav"
+                write_song_stem(path, 2, [(0, 2)])
+                self.fake.create_audio_track(name)
+                self.fake.import_audio(i, str(path), 0)
+            self.fake.set_scene(0, name="Way Maker")
+            folders = FolderMemory(Path(tmp) / "folders.json")
+            self.assertTrue(folders.keeps_key("Click"))
+            folders.set_follows_key("Loop Pad", False)
+            actions = Proposal.model_validate({"actions": [
+                {"action": "transpose_song", "song": "Way Maker", "semitones": 3}]}).actions
+            result = run_all(self.live, actions, folders=folders)[0]
+            self.assertEqual(result["text"], "Way Maker is up 3 semitones now: 1 clip, 2 kept their key (like the click).")
+            self.assertEqual([t["clips"][0]["transpose"] for t in self.fake.tracks], [0, 3, 0])
+            self.assertEqual(self.fake.list_scenes()[0]["transpose"], 3)  # kept tracks don't make it "mixed"
+            # Opting a track back in, then resetting, puts everything at the original key.
+            folders.set_follows_key("Click", True)
+            self.assertFalse(folders.keeps_key("Click"))
+            folders.rename("Click", "Click Track")
+            self.assertFalse(folders.keeps_key("Click Track"))
+            self.assertEqual(FolderMemory(folders.path).keeps_key("Loop Pad"), True)
+            result = run_all(self.live, Proposal.model_validate({"actions": [
+                {"action": "transpose_song", "song": "Way Maker", "semitones": 0}]}).actions, folders=folders)[0]
+            self.assertTrue(result["ok"], result)
+            self.assertEqual([t["clips"][0]["transpose"] for t in self.fake.tracks], [0, 0, 0])
+
+    def test_transpose_needs_audio_and_a_sane_range(self):
+        results = self.run_actions({"action": "add_song", "name": "Empty"},
+                                   {"action": "transpose_song", "song": "Empty", "semitones": 1})
+        self.assertIn("has no audio clips", results[1]["text"])
+        with self.assertRaises(ValidationError):
+            Proposal.model_validate({"actions": [{"action": "transpose_song", "song": "1", "semitones": 13}]})
 
     def test_to_rigspec_keeps_tracks_and_explains_the_rest(self):
         actions = Proposal.model_validate({"actions": [
@@ -227,6 +334,27 @@ class SnapshotTest(FakeLiveCase):
 
 
 class ConversationTest(unittest.TestCase):
+    def test_promising_a_change_without_proposing_it_is_sent_back_once(self):
+        claude = ScriptedClaude(
+            reply(text("Sending the BGVs 3 dB more into the reverb in Washed.")),
+            reply(text("Here it is."), call("tu_1", [
+                {"action": "set_send", "track": "BGVs", "to_return": "Reverb", "by_db": 3, "song": "Washed"},
+            ])),
+        )
+        convo = Conversation(client_factory=lambda: claude)
+        convo.send("More reverb on the BGVs in Washed.", "notes")
+        [p] = convo.proposals.values()
+        self.assertEqual(p["actions"][0].by_db, 3)
+        nudge = convo.messages[2]["content"][0]["text"]
+        self.assertIn("didn't call propose_changes", nudge)
+
+    def test_a_question_back_is_not_a_promise(self):
+        claude = ScriptedClaude(reply(text("I'll need to know: which output feeds the in-ears?")))
+        convo = Conversation(client_factory=lambda: claude)
+        entries = convo.send("Send the click to the in-ears.", "notes")
+        self.assertEqual(entries[-1]["text"], "I'll need to know: which output feeds the in-ears?")
+        self.assertEqual(len(claude.requests), 1)
+
     def test_question_then_proposal_then_outcome_reported_back(self):
         claude = ScriptedClaude(
             reply(text("Which input is the lead vocal on?")),
@@ -340,6 +468,8 @@ class ConversationTest(unittest.TestCase):
         server, fake = fake_live.serve(port=0, latency=0)
         try:
             fake.create_audio_track("Lead Vocal")
+            self.assertEqual(fake.tracks[0]["input"], {"type": "No Input", "channel": ""})  # new tracks: no input
+            fake.set_routing(0, "input", "Ext. In", "1")
             fake.load_device(0, "Compressor")
             live = LiveLink(port=server.server_address[1])
             notes = session_notes(live.snapshot(), live.stock_devices())
@@ -352,6 +482,19 @@ class ConversationTest(unittest.TestCase):
         self.assertIn("A. A-Reverb", notes)
         self.assertIn("audio effects: Auto Filter", notes)
         self.assertIn("NOT connected", session_notes(None, None, "Live is closed"))
+
+    def test_session_notes_drop_a_picked_song_this_set_does_not_have(self):
+        server, fake = fake_live.serve(port=0, latency=0)
+        try:
+            fake.set_scene(0, name="Way Maker")
+            live = LiveLink(port=server.server_address[1])
+            snap = live.snapshot()
+            live.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertIn("Mixer is on: no song.", session_notes(snap, None, mix_song="Washed"))
+        self.assertIn("Mixer is on: Way Maker.", session_notes(snap, None, mix_song="Way Maker"))
 
     def test_session_notes_show_pan_as_a_number_and_list_outputs(self):
         server, fake = fake_live.serve(port=0, latency=0)
@@ -441,7 +584,7 @@ class ServerTest(FakeLiveCase):
         ]}).actions
         results = run_all(self.live, actions, folders=self.folders)
         self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
-        self.assertEqual(results[0]["text"], "Moved Mystery to Click & playback, teal in Live.")
+        self.assertEqual(results[0]["text"], "Moved Mystery to Click & playback, teal in Ableton.")
         state = self.request("GET", "/api/state")[1]
         self.assertEqual(self.folder_of(state, "Loop"), "playback")  # kept through the rename
         loop = next(t for t in state["live"]["snapshot"]["tracks"] if t["name"] == "Loop")
@@ -496,7 +639,7 @@ class ServerTest(FakeLiveCase):
         status, state = self.request("POST", "/api/chat", {"message": "Add a click"})
         self.assertEqual(status, 200)
         proposal = state["chat"][-1]["proposal"]
-        self.assertEqual(proposal["steps"][0]["text"], "Add an audio track “Click” with no input going to outputs 3/4")
+        self.assertEqual(proposal["steps"][0]["text"], "Add a track “Click” with no input going to outputs 3/4")
         self.assertTrue(proposal["exportable"])
 
         status, state = self.request("POST", f"/api/proposals/{proposal['id']}/apply", {})
@@ -509,6 +652,23 @@ class ServerTest(FakeLiveCase):
         status, body = self.request("POST", f"/api/proposals/{proposal['id']}/apply", {})
         self.assertEqual(status, 400)
         self.assertIn("already", body["error"])
+
+    def test_apply_reports_each_step_while_it_runs(self):
+        status, state = self.request("POST", "/api/chat", {"message": "Add a click"})
+        pid = state["chat"][-1]["proposal"]["id"]
+        self.assertIsNone(state["applying"])
+        seen = {}
+        real = app_server.run_all
+
+        def spy(live, actions, files=None, on_step=None, **kwargs):
+            on_step(0, "working")
+            seen["during"] = self.app.applying()
+            return real(live, actions, files, on_step=on_step, **kwargs)
+
+        with mock.patch.object(app_server, "run_all", spy):
+            status, state = self.request("POST", f"/api/proposals/{pid}/apply", {})
+        self.assertEqual(seen["during"], {"id": pid, "states": ["working"]})
+        self.assertIsNone(state["applying"])  # and nothing is left over afterwards
 
     def test_tracks_the_assistant_changes_are_lit_for_a_few_seconds(self):
         now = [100.0]
@@ -567,6 +727,13 @@ class ServerTest(FakeLiveCase):
         self.assertTrue(state["live"]["connected"])
         status, _ = self.request("GET", "/../rig.py")
         self.assertEqual(status, 404)
+
+    def test_a_bug_still_answers_in_a_sentence(self):
+        with mock.patch.object(self.app.chat, "reset", side_effect=KeyError("boom")), \
+                mock.patch("traceback.print_exc"):
+            status, body = self.request("POST", "/api/reset", {})
+        self.assertEqual(status, 500)
+        self.assertIn("Something went wrong", body["error"])
 
 
 def write_stem(folder, name, peak_db=-6.0, seconds=2.0, rate=8000, bits=24):
@@ -703,6 +870,181 @@ class ListenToStemsTest(unittest.TestCase):
         self.assertIsNone(note)
 
 
+def write_chords(path, chords, seconds_each=2.0, rate=8000):
+    """A mono stem playing each chord (a list of MIDI notes) in turn."""
+    frames = array.array("h")
+    for notes in chords:
+        freqs = [440 * 2 ** ((n - 69) / 12) for n in notes]
+        for i in range(int(seconds_each * rate)):
+            t = i / rate
+            frames.append(int(6000 * sum(math.sin(2 * math.pi * f * t) for f in freqs) / len(freqs)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames.tobytes())
+
+
+# I-V-vi-IV, the worship progression, as triads plus a bass note.
+E_MAJOR = [[52, 56, 59, 64], [47, 54, 59, 63], [49, 56, 61, 64], [45, 57, 61, 64]] * 4
+D_MAJOR = [[50, 54, 57, 62], [45, 57, 61, 64], [47, 54, 59, 62], [43, 55, 59, 62]] * 4
+
+
+class SongKeyTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_finds_the_key_from_pitched_stems_and_skips_the_click(self):
+        write_chords(self.root / "Keys.wav", E_MAJOR)
+        write_song_stem(self.root / "Click.wav", 32, clicks_per_second=2)
+        guess = song_key.detect([("Keys", str(self.root / "Keys.wav")), ("Click", str(self.root / "Click.wav"))])
+        self.assertEqual(guess["key"], "E major")
+        self.assertEqual(guess["stems"], ["Keys"])
+        self.assertIn("probably E major", song_key.describe(guess))
+
+    def test_another_key(self):
+        write_chords(self.root / "Pad.wav", D_MAJOR)
+        self.assertEqual(song_key.detect([("Pad", str(self.root / "Pad.wav"))])["key"], "D major")
+
+    def test_nothing_pitched_is_said_plainly(self):
+        write_song_stem(self.root / "Click.wav", 8, clicks_per_second=2)
+        self.assertIsNone(song_key.detect([("Click", str(self.root / "Click.wav"))]))
+        self.assertIn("couldn't tell", song_key.describe(None))
+
+    def test_import_lists_a_key_per_song(self):
+        write_chords(self.root / "Way Maker" / "Keys.wav", E_MAJOR)
+        write_chords(self.root / "Goodness" / "Bass.wav", D_MAJOR)
+        found = [("Stems/Way Maker/Keys.wav", str(self.root / "Way Maker" / "Keys.wav")),
+                 ("Stems/Goodness/Bass.wav", str(self.root / "Goodness" / "Bass.wav"))]
+        lines = App.song_keys(found)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith('- "Stems/Goodness": Key: probably D major'), lines)
+        self.assertTrue(lines[1].startswith('- "Stems/Way Maker": Key: probably E major'), lines)
+
+
+def write_vendor_set(path, stems, tempo=139, sections=(("Intro", 0), ("Verse 1", 16)), live8=True):
+    """A minimal vendor set: one AudioTrack per (track name, file under path's folder)."""
+    tracks = []
+    for name, rel in stems:
+        rel = Path(rel)
+        if live8:
+            ref = ("<RelativePath>" + "".join(f'<RelativePathElement Dir="{d}"/>' for d in rel.parent.parts)
+                   + f'</RelativePath><Name Value="{rel.name}"/>')
+        else:
+            ref = f'<RelativePath Value="{rel.as_posix()}"/><Path Value="/nowhere/{rel.name}"/>'
+        tracks.append(
+            f'<AudioTrack Id="{len(tracks)}"><Name><EffectiveName Value="{name}"/></Name><DeviceChain><MainSequencer>'
+            f'<Sample><ArrangerAutomation><Events><AudioClip Time="0"><IsWarped Value="false"/>'
+            f'<PitchCoarse Value="0"/><SampleRef><FileRef>{ref}</FileRef></SampleRef></AudioClip>'
+            f'</Events></ArrangerAutomation></Sample></MainSequencer></DeviceChain></AudioTrack>')
+    tempo_xml = (f'<ArrangerAutomation><Events><FloatEvent Time="-63072000" Value="{tempo}"/></Events></ArrangerAutomation>'
+                 if live8 else f'<Manual Value="{tempo}"/>')
+    locators = "".join(f'<Locator><Time Value="{t}"/><Name Value="{n}"/></Locator>' for n, t in sections)
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><Ableton Creator="Ableton Live {"8.4.2" if live8 else "12.4.5"}">'
+           f'<LiveSet><Tracks>{"".join(tracks)}</Tracks><MasterTrack><MasterChain><Mixer><Tempo>{tempo_xml}</Tempo>'
+           f'</Mixer></MasterChain></MasterTrack><Locators><Locators>{locators}</Locators></Locators></LiveSet></Ableton>')
+    path.write_bytes(gzip.compress(xml.encode()))
+
+
+class VendorSetTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(dir=Path.home())  # imports only look under home
+        self.addCleanup(self._tmp.cleanup)
+        self.song = Path(self._tmp.name) / "WASHED-WASHED-B-139.00bpm"
+        for name in ("Click Track", "Keys 1"):
+            write_song_stem(self.song / "MultiTracks" / f"{name}.wav", 2, [(0, 2)])
+        self.als = self.song / "MultiTrack.als"
+        write_vendor_set(self.als, [("Click Track", "MultiTracks/Click Track.wav"), ("Keys 1", "MultiTracks/Keys 1.wav")])
+
+    def test_finds_the_set_from_the_song_folder_or_its_stems_folder(self):
+        self.assertEqual(vendor_set.find(self.song), self.als)
+        self.assertEqual(vendor_set.find(self.song / "MultiTracks"), self.als)
+        self.assertIsNone(vendor_set.find(Path(self._tmp.name) / "elsewhere"))
+
+    def test_reads_tempo_sections_and_stems_without_changing_the_file(self):
+        before = self.als.read_bytes()
+        for live8 in (True, False):
+            write_vendor_set(self.als, [("Click Track", "MultiTracks/Click Track.wav"),
+                                        ("Keys 1", "MultiTracks/Keys 1.wav")], live8=live8)
+            info = vendor_set.read(self.als)
+            self.assertEqual(info["tempo"], 139)
+            self.assertEqual(info["sections"], [("Intro", 0.0), ("Verse 1", 16.0)])
+            self.assertEqual([t["name"] for t in info["tracks"]], ["Click Track", "Keys 1"])
+            self.assertEqual(info["tracks"][1]["file"], (self.song / "MultiTracks" / "Keys 1.wav").resolve())
+            self.assertEqual(info["layout_notes"], [])
+        write_vendor_set(self.als, [("Click Track", "MultiTracks/Click Track.wav"), ("Keys 1", "MultiTracks/Keys 1.wav")])
+        self.assertEqual(self.als.read_bytes(), before)  # reading never writes
+
+    def test_import_tells_the_assistant_about_the_set(self):
+        folder, found = audio_files.scan(self.song)
+        text = App.vendor_song(folder, found)
+        self.assertIn('<vendor_set file="MultiTrack.als" made_with="Ableton Live 8.4.2">', text)
+        self.assertIn("Tempo 139 BPM.", text)
+        self.assertIn("Sections: Intro 0:00, Verse 1 0:07", text)
+        self.assertIn('- "Keys 1": "WASHED-WASHED-B-139.00bpm/MultiTracks/Keys 1.wav"', text)
+
+    def test_a_set_for_other_stems_is_ignored_and_a_broken_one_is_a_sentence(self):
+        write_vendor_set(self.als, [("Other", "Elsewhere/Other.wav")])
+        folder, found = audio_files.scan(self.song)
+        self.assertIsNone(App.vendor_song(folder, found))
+        self.als.write_bytes(b"not a set")
+        self.assertIn("isn't an Ableton set Holy Sound can read", App.vendor_song(folder, found))
+
+
+class PartsTest(unittest.TestCase):
+    def test_vendor_names_land_on_the_same_parts(self):
+        washed = parts.plan(["W/AG 1.wav", "W/AG 2.wav", "W/EG 10.wav", "W/Keys 3.wav", "W/Synth Bass 2.wav",
+                             "W/Click Track.wav", "W/Drums (Live).wav", "W/BGVS.wav", "W/Sax.wav"])
+        church = parts.plan(["C/ACC 1.wav", "C/GTR 1 L.wav", "C/GTR 1 R.wav", "C/Keys 1 L.wav", "C/Kick In.wav",
+                             "C/OH L.wav", "C/Click.wav", "C/Count.wav", "C/SMPTE.wav", "C/Chloe Gall.wav"])
+        self.assertEqual(list(washed), ["Click", "Drums", "Synth Bass", "Acoustic", "Electric", "Keys", "Horns", "BGVs"])
+        self.assertEqual(list(church), ["Click", "Guide", "SMPTE", "Drums", "Acoustic", "Electric", "Keys", "Chloe Gall"])
+        self.assertEqual(church["Electric"], ["C/GTR 1 L.wav", "C/GTR 1 R.wav"])
+        self.assertEqual(parts.pans(church["Electric"]), {"C/GTR 1 L.wav": -1, "C/GTR 1 R.wav": 1})
+        self.assertIn("Chloe Gall (fits no part", parts.describe("C", church))
+
+    def test_mixdown_keeps_balance_and_sides_and_reports_its_scaling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_stem(tmp, "L.wav", peak_db=-12)
+            write_stem(tmp, "R.wav", peak_db=-12)
+            write_stem(tmp, "Mono.wav", peak_db=-6)
+            r = mixdown.mix([(tmp / "L.wav", 0, -1), (tmp / "R.wav", 0, 1), (tmp / "Mono.wav", 0, 0)], tmp / "out.wav")
+            self.assertEqual(r["channels"], 2)
+            m = audio_files.measure(tmp / "out.wav")
+            self.assertEqual((m["channels"], m["format"]), (2, "WAV 24-bit"))
+            self.assertAlmostEqual(m["peak_dbfs"], -1.0, places=1)
+            # The sum peaked above -6 dBFS (mono plus a side); scaling it to -1 means turning it up < 5 dB.
+            self.assertLess(r["gain_db"], 5)
+            self.assertGreater(r["gain_db"], 0)
+
+
+class TrackLayoutGuardTest(unittest.TestCase):
+    """The rules that keep a set from sprawling back to a track per stem. See CLAUDE.md."""
+
+    def test_the_assistant_cannot_import_onto_a_track_per_stem(self):
+        with self.assertRaises(ValidationError):  # the old one-file-per-track import is gone
+            Proposal.model_validate({"actions": [
+                {"action": "import_audio", "track": "Kick In", "file": "S/Kick In.wav", "song": "1"}]})
+        names = {s["properties"]["action"]["const"] for s in Proposal.model_json_schema()["$defs"].values()
+                 if "action" in s.get("properties", {})}
+        self.assertIn("import_part", names)
+        self.assertNotIn("import_audio", names)
+
+    def test_the_prompt_keeps_the_part_and_per_song_mix_rules(self):
+        from app.assistant import SYSTEM
+        self.assertIn("Never make a track per stem", SYSTEM)
+        self.assertIn("leave a part out of one song by muting it", SYSTEM)
+
+    def test_new_tracks_start_with_no_input(self):
+        fake = fake_live.FakeSet()
+        fake.create_audio_track("Click")
+        self.assertEqual(fake.tracks[-1]["input"], {"type": "No Input", "channel": ""})
+
+
 class StartingFaderTest(unittest.TestCase):
     def test_more_stems_start_lower(self):
         self.assertEqual(starting_fader_db(1), -3.0)
@@ -785,15 +1127,88 @@ class AudioActionsTest(StemFolderCase):
         with mock.patch("app.actions.time.sleep"):
             return run_all(self.live, parsed, self.files)
 
+    def test_several_stems_become_one_part_track_shared_by_songs(self):
+        for name, db in (("Kick In.wav", -10), ("Snare Top.wav", -14), ("OH L.wav", -20), ("OH R.wav", -20)):
+            write_stem(self.folder / "Way Maker", name, peak_db=db)
+        _, found = audio_files.scan(self.folder)
+        self.files = dict(found)
+        drums = [f"Sunday Stems/Way Maker/{n}" for n in ("Kick In.wav", "Snare Top.wav", "OH L.wav", "OH R.wav")]
+        with tempfile.TemporaryDirectory() as out:
+            parsed = Proposal.model_validate({"actions": [
+                {"action": "add_song", "name": "Way Maker"},
+                {"action": "add_song", "name": "Goodness"},
+                {"action": "import_part", "part": "Drums", "files": drums, "song": "Way Maker"},
+                {"action": "import_part", "part": "drums", "files": drums[:1], "song": "Goodness"},
+            ]}).actions
+            results = run_all(self.live, parsed, self.files, parts_dir=out)
+            self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
+            self.assertEqual(results[2]["text"], "Put 4 stems mixed on Drums (new track) in Way Maker.")
+            self.assertEqual(results[3]["text"], "Put Kick In on Drums in Goodness.")
+            snap = self.live.snapshot(max_age=0)
+            self.assertEqual([t["name"] for t in snap["tracks"]], ["Drums"])  # one track, not one per stem
+            drums_track = snap["tracks"][0]
+            self.assertEqual(drums_track["input"], {"type": "No Input", "channel": ""})
+            self.assertEqual(drums_track["color"], TRACK_COLORS["blue"])  # the Instruments folder colour
+            mixed = Path(out) / "Way Maker" / "Drums.wav"
+            self.assertTrue(mixed.is_file())
+            self.assertEqual(audio_files.measure(mixed)["channels"], 2)  # OH L/R kept their sides
+            way_maker = next(c for c in drums_track["clips"] if c["scene_index"] == 1)
+            # The stems sum to about -4.2 dBFS; the mix is written peaking at -1, so its clip gain
+            # takes those 3.2 dB back off and the part plays exactly as loud as the stems together.
+            self.assertAlmostEqual(way_maker["gain_db"], -3.2, delta=0.2)
+
+    def test_tidy_rebuilds_songs_on_part_tracks_and_keeps_their_sound(self):
+        song = self.folder / "Way Maker"
+        for name, db in (("Kick In.wav", -10), ("OH L.wav", -20), ("OH R.wav", -20), ("Sax.wav", -12)):
+            write_stem(song, name, peak_db=db)
+        f = lambda n: str(song / n)
+        self.fake.set_scene(0, name="Way Maker")
+        self.fake.create_scene("Goodness", 70)
+        layout = [("Click", ["Click.wav", "Click.wav"]), ("Kick In", ["Kick In.wav", None]),
+                  ("OH L", ["OH L.wav", "OH L.wav"]), ("OH R", ["OH R.wav", "OH R.wav"]),
+                  ("Sax", ["Sax.wav", None]), ("Pad", ["Pad.wav", "Pad.wav"])]
+        for i, (track, clips) in enumerate(layout):
+            self.fake.create_audio_track(track)
+            for scene, file in enumerate(clips):
+                if file:
+                    self.fake.import_audio(i, f(file), scene)
+        self.fake.set_volume(1, -6.0)                      # Kick In's fader: baked into the mix
+        self.fake.set_clip_gain(2, 0, 3.0)                 # OH L clip gain in Way Maker
+        self.fake.set_mute(4, True)                        # Sax muted everywhere: left out
+        self.fake.set_routing(0, "output", "Ext. Out", "3/4")  # click to the in-ears
+        self.fake.transpose_song(1, 2)                     # Goodness is up a step
+        with tempfile.TemporaryDirectory() as out:
+            parsed = Proposal.model_validate({"actions": [{"action": "tidy_into_parts", "assign": [
+                {"song": "Goodness", "track": "Pad", "part": "Keys"}]}]}).actions
+            [result] = run_all(self.live, parsed, self.files, parts_dir=out,
+                               folders=FolderMemory(Path(out) / "folders.json"))
+            self.assertTrue(result["ok"], result)
+            self.assertIn("Rebuilt 2 songs on part tracks: 7 part clips, 5 stem tracks removed.", result["text"])
+            self.assertIn("But in Way Maker, left Sax out of Horns", result["text"])
+            tracks = self.live.snapshot(max_age=0)["tracks"]
+            # Pad is Synths by name, but Keys in Goodness, where it was assigned.
+            self.assertEqual([t["name"] for t in tracks], ["Click", "Drums", "Horns", "Synths", "Keys"])
+            click, drums, horns, synths, keys = tracks
+            self.assertEqual(([c["scene_index"] for c in synths["clips"]], [c["scene_index"] for c in keys["clips"]]),
+                             ([0], [1]))
+            self.assertEqual(click["output"], {"type": "Ext. Out", "channel": "3/4"})
+            self.assertEqual([t["volume_db"] for t in tracks], [0.0] * 5)
+            self.assertEqual(sorted(c["scene_index"] for c in drums["clips"]), [0, 1])
+            self.assertTrue((Path(out) / "Way Maker" / "Drums.wav").is_file())
+            self.assertFalse(next(c for c in horns["clips"])["active"])  # a muted stem stays silent
+            scenes = self.fake.list_scenes()
+            self.assertEqual(scenes[1]["transpose"], 2)                      # transpose put back
+            self.assertEqual(self.fake.tracks[0]["clips"][1]["transpose"], 0)  # the click keeps its key
+
     def test_import_colour_gain_and_listen(self):
         results = self.run_actions(
             {"action": "add_song", "name": "Way Maker", "bpm": 68},
             {"action": "add_track", "name": "Click", "color": "grey",
              "output": {"destination": "Ext. Out", "channel": "3/4"}},
             {"action": "add_track", "name": "Pad", "color": "blue"},
-            {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+            {"action": "import_part", "part": "Click", "files": ["Sunday Stems/Way Maker/Click.wav"],
              "song": "Way Maker", "gain_db": -6},
-            {"action": "import_audio", "track": "Pad", "file": "sunday stems/way maker/pad.wav", "song": "Way Maker"},
+            {"action": "import_part", "part": "Pad", "files": ["sunday stems/way maker/pad.wav"], "song": "Way Maker"},
             {"action": "set_clip_gain", "track": "Pad", "song": "Way Maker", "db": 4},
             {"action": "set_color", "track": "Pad", "color": "teal"},
             {"action": "listen", "song": "Way Maker", "seconds": 5},
@@ -816,13 +1231,13 @@ class AudioActionsTest(StemFolderCase):
             {"action": "add_song", "name": "Way Maker"},
             {"action": "add_track", "name": "Click"},
             {"action": "add_track", "name": "Pad", "volume_db": -4},
-            {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+            {"action": "import_part", "part": "Click", "files": ["Sunday Stems/Way Maker/Click.wav"],
              "song": "Way Maker"},
-            {"action": "import_audio", "track": "Pad", "file": "Sunday Stems/Way Maker/Pad.wav",
+            {"action": "import_part", "part": "Pad", "files": ["Sunday Stems/Way Maker/Pad.wav"],
              "song": "Way Maker"},
         )
         self.assertTrue(all(r["ok"] and not r["partial"] for r in results), results)
-        self.assertIn("fader at -6 dB", results[1]["text"])
+        self.assertIn("fader at 68%", results[1]["text"])
         self.assertEqual(self.live.call("get_mixer", track_index=0)["volume"], "-6.0 dB")
         self.assertEqual(self.live.call("get_mixer", track_index=1)["volume"], "-4.0 dB")  # its own choice
 
@@ -830,7 +1245,7 @@ class AudioActionsTest(StemFolderCase):
         results = self.run_actions(
             {"action": "add_song", "name": "Way Maker"},
             {"action": "add_track", "name": "SMPTE"},
-            {"action": "import_audio", "track": "SMPTE", "file": "Sunday Stems/Way Maker/Click.wav",
+            {"action": "import_part", "part": "SMPTE", "files": ["Sunday Stems/Way Maker/Click.wav"],
              "song": "Way Maker"},
         )
         self.assertTrue(all(r["ok"] for r in results), results)
@@ -840,7 +1255,7 @@ class AudioActionsTest(StemFolderCase):
     def test_only_imported_files(self):
         results = self.run_actions(
             {"action": "add_track", "name": "Pad"},
-            {"action": "import_audio", "track": "Pad", "file": "/etc/passwd", "song": "1"},
+            {"action": "import_part", "part": "Pad", "files": ["/etc/passwd"], "song": "1"},
         )
         self.assertFalse(results[1]["ok"])
         self.assertIn("Import its folder first", results[1]["text"])
@@ -860,7 +1275,7 @@ class ImportServerTest(StemFolderCase):
             reply(text("Here's your stems."), call("tu_1", [
                 {"action": "add_song", "name": "Way Maker"},
                 {"action": "add_track", "name": "Click", "color": "grey"},
-                {"action": "import_audio", "track": "Click", "file": "Sunday Stems/Way Maker/Click.wav",
+                {"action": "import_part", "part": "Click", "files": ["Sunday Stems/Way Maker/Click.wav"],
                  "song": "Way Maker"},
                 {"action": "listen", "song": "Way Maker", "seconds": 3},
             ])),
@@ -873,6 +1288,14 @@ class ImportServerTest(StemFolderCase):
         self.server.shutdown()
         self.server.server_close()
         super().tearDown()
+
+    def test_an_import_is_saved_for_next_time(self):
+        saved = Path(self.folder).parent / "imports.json"
+        app = App(self.live, Conversation(client_factory=lambda: self.claude), imports_path=saved)
+        app.import_folder(str(self.folder))
+        again = App(self.live, Conversation(client_factory=lambda: None), imports_path=saved)
+        self.assertIn("Sunday Stems/Way Maker/Click.wav", again.files)
+        self.assertIsInstance(again.files["Sunday Stems/Way Maker/Click.wav"], str)
 
     def test_import_then_apply_then_automatic_follow_up(self):
         self.app.import_folder(str(self.folder), "Click goes to in-ears.")
@@ -1061,7 +1484,231 @@ class AddTrackWordingTest(unittest.TestCase):
     def test_describe(self):
         track = AddTrack(action="add_track", name="Keys", input="5/6", pan=-0.5,
                          devices=[{"device": "Reverb", "preset": "Large Hall"}])
-        self.assertEqual(track.describe(), "Add an audio track “Keys” on input 5/6, with Reverb (Large Hall), panned 25L")
+        self.assertEqual(track.describe(), "Add a track “Keys” on input 5/6, with Reverb (Large Hall), balance 50% left")
+
+
+class SongMixTest(FakeLiveCase):
+    """Faders, pan, mute and sends kept per song, put back when the song is picked."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.mixes = song_mixes.SongMixMemory(Path(self.home.name) / "song_mixes.json")
+        self.app = App(self.live, Conversation(client_factory=lambda: None),
+                       folders=FolderMemory(Path(self.home.name) / "folders.json"), mixes=self.mixes)
+        self.now = [100.0]
+        self.app.clock = lambda: self.now[0]
+        self.live.call("create_return_track", name="Reverb")
+        for name in ("Lead Vocal", "Keys"):
+            self.live.call("create_audio_track", name=name)
+        self.live.call("set_scene", scene_index=0, name="Living Hope")  # a new set starts with one empty song
+        self.live.call("create_scene", name="Gratitude")
+
+    def look(self):
+        """A poll, after any put-back has settled."""
+        self.now[0] += 10
+        return self.app.state()
+
+    def track(self, name):
+        return next(t for t in self.live.snapshot(max_age=0)["tracks"] if t["name"] == name)
+
+    def test_each_song_gets_its_own_faders_pan_mute_and_sends_back(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-6.0)
+        self.live.call("set_pan", track_index=1, pan=-0.5)
+        self.live.call("set_send", track_index=0, return_index=0, db=-12.0)
+        self.look()  # saved to Living Hope
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-1.0)
+        self.live.call("set_mute", track_index=1, on=True)
+        self.look()  # saved to Gratitude
+
+        self.app.pick_song_mix(0)
+        vocal, keys = self.track("Lead Vocal"), self.track("Keys")
+        self.assertAlmostEqual(vocal["volume_db"], -6.0, places=1)
+        self.assertAlmostEqual(vocal["sends"][0]["level_db"], -12.0, places=1)
+        self.assertAlmostEqual(keys["pan_value"], -0.5, places=2)
+        self.assertFalse(keys["mute"])
+        self.app.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -1.0, places=1)
+        self.assertTrue(self.track("Keys")["mute"])
+
+    def test_survives_a_restart_and_a_moved_song(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=-9.0)
+        self.look()
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=0.0)
+        self.look()
+        self.live.call("move_scene", scene_index=0, to_index=1)  # Living Hope is now second
+
+        again = App(self.live, Conversation(client_factory=lambda: None), mixes=song_mixes.SongMixMemory(self.mixes.path))
+        self.assertEqual(again.mix_state(self.live.snapshot(max_age=0))["song"], "Gratitude")
+        again.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], -9.0, places=1)
+
+    def test_a_change_while_putting_a_mix_back_is_not_saved_to_the_song(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-3.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-8.0)
+        self.look()
+        self.app.pick_song_mix(1)  # Gratitude's -3 goes back on
+        self.live.call("set_volume", track_index=0, db=-20.0)  # read while still settling
+        self.app.state()
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["volume_db"], -3.0, places=1)
+        self.look()
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["volume_db"], -20.0, places=1)
+
+    def test_no_song_picked_saves_nothing(self):
+        self.live.call("set_volume", track_index=0, db=-4.0)
+        self.look()
+        self.assertIsNone(self.mixes.saved("Living Hope"))
+        self.assertIn("Faders are shared by every song", self.app.notes())
+
+    def test_starting_a_song_in_live_puts_its_mix_on(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-15.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.look()
+        with tempfile.TemporaryDirectory() as folder:
+            wav = Path(folder) / "vocal.wav"
+            with wave.open(str(wav), "wb") as w:
+                w.setnchannels(1), w.setsampwidth(2), w.setframerate(8000), w.writeframes(b"\0\0" * 800)
+            self.live.call("import_audio", track_index=0, file_path=str(wav), scene_index=1)
+        self.live.call("fire_scene", scene_index=1)  # pressed in Live, not in the app
+        state = self.look()
+        self.assertEqual(state["song_mix"]["song"], "Gratitude")
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -15.0, places=1)
+
+    def test_checkpoints_restore_and_undo(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-2.0)
+        self.look()
+        self.app.checkpoint_song_mix("After soundcheck")
+        self.live.call("set_volume", track_index=0, db=-30.0)
+        self.look()
+
+        marks = self.app.mix_state()["checkpoints"]
+        self.assertEqual([m["label"] for m in marks], ["After soundcheck"])
+        self.app.restore_song_mix(marks[0]["id"])
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -2.0, places=1)
+        self.assertAlmostEqual(self.mixes.saved("Living Hope")["tracks"]["lead vocal"]["volume_db"], -2.0, places=1)
+        undo = self.app.mix_state()["checkpoints"][0]
+        self.assertEqual(undo["label"], "Before going back to After soundcheck")
+        self.app.restore_song_mix(undo["id"])
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -30.0, places=1)
+
+    def test_renaming_a_song_keeps_its_mix(self):
+        self.app.pick_song_mix(0)
+        self.look()
+        self.mixes.rename("Living Hope", "Living Hope (Acoustic)")
+        self.assertIsNotNone(self.mixes.saved("living hope (acoustic)"))
+        self.assertEqual(self.mixes.current, "Living Hope (Acoustic)")
+
+    def test_unnamed_song_is_refused_in_a_sentence(self):
+        self.live.call("create_scene")
+        from app.server import UserError
+        with self.assertRaisesRegex(UserError, "name"):
+            self.app.pick_song_mix(2)
+
+    def apply(self, *actions):
+        parsed = Proposal(actions=list(actions)).actions
+        return run_all(self.live, parsed, mixes=self.mixes, mix_control=self.app)
+
+    def test_ai_change_for_another_song_saves_it_without_moving_the_faders(self):
+        self.app.pick_song_mix(0)
+        self.look()
+        [result] = self.apply({"action": "set_volume", "track": "Keys", "db": -9, "song": "Gratitude"})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("in Gratitude", result["text"])
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], 0.0, places=1)  # Living Hope is playing
+        self.look()
+        self.assertIn("Keys -9 dB", self.app.notes())
+        self.app.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], -9.0, places=1)
+
+    def test_ai_change_for_the_song_on_the_mixer_happens_now(self):
+        self.app.pick_song_mix(0)
+        self.apply({"action": "set_mute", "track": "Keys", "on": True, "song": "Living Hope"},
+                 {"action": "set_send", "track": "Lead Vocal", "to_return": "Reverb", "db": -10, "song": "Gratitude"})
+        self.assertTrue(self.track("Keys")["mute"])
+        self.look()
+        self.assertTrue(self.mixes.saved("Living Hope")["tracks"]["keys"]["mute"])
+        self.assertEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["sends"]["Reverb"], -10.0)
+
+    def test_ai_can_put_the_mixer_on_a_song(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-12.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        [result] = self.apply({"action": "pick_song_mix", "song": "Gratitude"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.mixes.current, "Gratitude")
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -12.0, places=1)
+
+    def test_by_db_moves_from_that_songs_own_level(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=-6.0)  # Keys in Gratitude
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=-1.0)  # Keys in Living Hope
+        self.look()
+        results = self.apply({"action": "set_volume", "track": "Keys", "by_db": -3, "song": "Gratitude"},
+                             {"action": "set_volume", "track": "Keys", "by_db": 2},
+                             {"action": "set_send", "track": "Lead Vocal", "to_return": "Reverb", "by_db": 6})
+        self.assertTrue(all(r["ok"] for r in results), results)
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["keys"]["volume_db"], -9.0, places=1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], 1.0, places=1)
+        reverb = next(x for x in self.track("Lead Vocal")["sends"] if x["return"] == "Reverb")
+        self.assertAlmostEqual(reverb["level_db"], -64.0, places=1)  # from off
+
+    def test_loose_names_find_the_one_track_or_song_meant(self):
+        self.app.pick_song_mix(0)
+        [result] = self.apply({"action": "set_mute", "track": "lead vox", "on": True, "song": "the gratitude song"})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["mute"])
+
+    def test_assistant_saves_and_restores_checkpoints_by_name(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-2.0)
+        self.look()
+        [saved] = self.apply({"action": "save_checkpoint", "label": "After soundcheck"})
+        self.assertTrue(saved["ok"], saved)
+        self.assertIn('"After soundcheck"', self.app.notes())
+        self.live.call("set_volume", track_index=0, db=-20.0)
+        self.look()
+        [back] = self.apply({"action": "restore_checkpoint", "label": "after soundcheck"})
+        self.assertTrue(back["ok"], back)
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -2.0, places=1)
+        [missing] = self.apply({"action": "restore_checkpoint", "label": "Rehearsal"})
+        self.assertIn("After soundcheck", missing["text"])
+
+    def test_notes_spell_out_every_songs_mix(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=-6.0)
+        self.live.call("set_mute", track_index=0, on=True)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=0.0)
+        self.live.call("set_mute", track_index=0, on=False)
+        self.look()
+        notes = self.app.notes()
+        self.assertIn("1. Living Hope — MIXER IS ON THIS SONG", notes)
+        self.assertIn("mix: Lead Vocal 0 dB, Keys 0 dB", notes)
+        self.assertIn("mix: Lead Vocal 0 dB MUTED, Keys -6 dB", notes)
+
+    def test_only_differences_are_sent_and_new_tracks_are_left_alone(self):
+        snap = self.live.snapshot(max_age=0)
+        mix = song_mixes.mix_of(snap)
+        self.assertEqual(song_mixes.commands(mix, snap), [])
+        mix["tracks"]["lead vocal"]["volume_db"] = -5.0
+        del mix["tracks"]["keys"]
+        self.assertEqual(song_mixes.commands(mix, snap),
+                         [("set_volume", {"track_index": 0, "is_return": False, "db": -5.0})])
 
 
 if __name__ == "__main__":

@@ -157,14 +157,21 @@ def _runs(steps):
 
 
 def _tempo(path):
-    """BPM from a click stem: the typical gap between clicks."""
+    """BPM from a click stem: the typical gap between clicks.
+
+    Hits are timed to the nearest 10 ms, so one gap reads 0.21 or 0.22 s when it's
+    really 0.216. The median finds the beat; averaging the gaps near it cancels the
+    rounding (taking the median alone read a 139 BPM click as 136).
+    """
     onsets = audio_files.onsets(path)
     if onsets is None or len(onsets) < 8:
         return None
     gaps = [b - a for a, b in zip(onsets, onsets[1:]) if 0.2 <= b - a <= 2.0]  # 30-300 BPM
     if len(gaps) < 4:
         return None
-    return round(60 / statistics.median(gaps), 1)
+    beat = statistics.median(gaps)
+    steady = [g for g in gaps if abs(g - beat) <= 0.15 * beat]
+    return round(60 / statistics.fmean(steady), 1)
 
 
 # -- the whole song --------------------------------------------------------------

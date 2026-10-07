@@ -43,6 +43,10 @@ _RULES = [
 ]
 _COMPILED = [(key, re.compile(pattern, re.IGNORECASE)) for key, pattern in _RULES]
 
+# Tracks that keep their key when a song is transposed, unless the volunteer says
+# otherwise: a click or spoken cue shouldn't change pitch, and SMPTE breaks if it does.
+_KEEPS_KEY = re.compile(r"click|guide|\bcue|count|smpte|timecode|ltc|metronome", re.IGNORECASE)
+
 
 def classify(name):
     """The instrument family a track name suggests ("other" if it suggests none)."""
@@ -64,6 +68,7 @@ class FolderMemory:
         self.path = Path(path) if path else default_path()
         self._lock = threading.Lock()
         self._moved = {}  # track name (case-folded) -> family key
+        self._follows = {}  # track name (case-folded) -> follows the song key, where chosen by hand
         self._load()
 
     def _load(self):
@@ -73,11 +78,14 @@ class FolderMemory:
             return
         moved = data.get("moved", {}) if isinstance(data, dict) else {}
         self._moved = {str(k): v for k, v in moved.items() if v in KEYS}
+        follows = data.get("follows_key", {}) if isinstance(data, dict) else {}
+        self._follows = {str(k): v for k, v in follows.items() if isinstance(v, bool)}
 
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"moved": self._moved}, indent=2, ensure_ascii=False) + "\n")
+        data = {"moved": self._moved, "follows_key": self._follows}
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         tmp.replace(self.path)
 
     def folder_for(self, name):
@@ -96,10 +104,30 @@ class FolderMemory:
                 self._moved[key] = folder
             self._save()
 
-    def rename(self, old, new):
-        """A renamed track keeps the folder it was moved to."""
+    def keeps_key(self, name):
+        """True if transposing a song leaves this track alone."""
         with self._lock:
-            folder = self._moved.pop((old or "").casefold(), None)
+            chosen = self._follows.get((name or "").casefold())
+        return not chosen if chosen is not None else bool(_KEEPS_KEY.search(name or ""))
+
+    def set_follows_key(self, name, follows):
+        with self._lock:
+            self._follows[(name or "").casefold()] = bool(follows)
+            self._save()
+
+    def kept_tracks(self, tracks):
+        """Indexes of the tracks (rows with "index" and "name") a transpose leaves alone."""
+        return [t["index"] for t in tracks if self.keeps_key(t["name"])]
+
+    def rename(self, old, new):
+        """A renamed track keeps the folder it was moved to, and its key choice."""
+        with self._lock:
+            old, new = (old or "").casefold(), (new or "").casefold()
+            folder = self._moved.pop(old, None)
             if folder:
-                self._moved[(new or "").casefold()] = folder
+                self._moved[new] = folder
+            follows = self._follows.pop(old, None)
+            if follows is not None:
+                self._follows[new] = follows
+            if folder or follows is not None:
                 self._save()

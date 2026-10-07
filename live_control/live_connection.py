@@ -163,6 +163,12 @@ class LiveConnection:
     def set_clip_gain(self, track_index, scene_index, db):
         return self.send("set_clip_gain", track_index=track_index, scene_index=scene_index, db=db)
 
+    def delete_clip(self, track_index, scene_index):
+        return self.send("delete_clip", track_index=track_index, scene_index=scene_index)
+
+    def set_clip_active(self, track_index, scene_index, on):
+        return self.send("set_clip_active", track_index=track_index, scene_index=scene_index, on=on)
+
     def clip_markers(self, scene_index):
         return self.send("clip_markers", scene_index=scene_index)
 
@@ -181,11 +187,18 @@ class LiveConnection:
     def list_scenes(self):
         return self.send("list_scenes")
 
-    def create_scene(self, name=None, bpm=None):
-        return self.send("create_scene", name=name, bpm=bpm)
+    def create_scene(self, name=None, bpm=None, index=None):
+        return self.send("create_scene", name=name, bpm=bpm, index=index)
+
+    def move_scene(self, scene_index, to_index):
+        return self.send("move_scene", scene_index=scene_index, to_index=to_index)
 
     def set_scene(self, scene_index, name=None, bpm=None):
         return self.send("set_scene", scene_index=scene_index, name=name, bpm=bpm)
+
+    def transpose_song(self, scene_index, semitones, skip_tracks=None):
+        return self.send("transpose_song", scene_index=scene_index, semitones=semitones,
+                         skip_tracks=skip_tracks or [])
 
     def count_scene_clips(self, scene_index):
         return self.send("count_scene_clips", scene_index=scene_index)

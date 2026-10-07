@@ -128,7 +128,7 @@ class FakeSet:
             track["input"] = (
                 {"type": "All Ins", "channel": "All Channels"}
                 if is_midi
-                else {"type": "Ext. In", "channel": "1"}
+                else {"type": "No Input", "channel": ""}  # as RigLink creates them
             )
         return track
 
@@ -170,6 +170,7 @@ class FakeSet:
                     "length": c["length"],
                     "gain": _db_text(c["gain_db"]),
                     "gain_db": c["gain_db"],
+                    "active": c.get("active", True),
                 }
                 for si, c in sorted(t["clips"].items())
             ]
@@ -240,6 +241,7 @@ class FakeSet:
             "length": seconds * self.tempo / 60.0,
             "loudness": loudness,
             "file_path": os.path.abspath(file_path),
+            "transpose": 0,
         }
         track["clips"][scene_index] = clip
         return {"name": clip["name"], "gain": _db_text(clip["gain_db"]), "length": clip["length"],
@@ -250,6 +252,18 @@ class FakeSet:
             raise IndexError("list index out of range")
         return [{"track_index": i, "track": t["name"], "file_path": t["clips"][scene_index]["file_path"]}
                 for i, t in enumerate(self.tracks) if scene_index in t["clips"]]
+
+    def delete_clip(self, track_index, scene_index):
+        if self._track(track_index)["clips"].pop(scene_index, None) is None:
+            raise LookupError("there's no clip in that slot")
+        return {"deleted": True}
+
+    def set_clip_active(self, track_index, scene_index, on):
+        clip = self._track(track_index)["clips"].get(scene_index)
+        if clip is None:
+            raise LookupError("there's no clip in that slot")
+        clip["active"] = bool(on)
+        return {"active": clip["active"]}
 
     def set_clip_gain(self, track_index, scene_index, db):
         clip = self._track(track_index)["clips"].get(scene_index)
@@ -275,7 +289,9 @@ class FakeSet:
 
     def _scene_row(self, i):
         scene = self.scenes[i]
-        return {"index": i, "name": scene["name"], "tempo": scene["tempo"]}
+        pitches = {t["clips"][i]["transpose"] for t in self.tracks if i in t["clips"]} - {0}
+        transpose = 0 if not pitches else (pitches.pop() if len(pitches) == 1 else None)
+        return {"index": i, "name": scene["name"], "tempo": scene["tempo"], "transpose": transpose}
 
     # -- tracks ---------------------------------------------------------
 
@@ -437,9 +453,29 @@ class FakeSet:
     def list_scenes(self):
         return [self._scene_row(i) for i in range(len(self.scenes))]
 
-    def create_scene(self, name=None, bpm=None):
-        self.scenes.append({"name": name or "", "tempo": float(bpm) if bpm is not None else None})
-        return self._scene_row(len(self.scenes) - 1)
+    def create_scene(self, name=None, bpm=None, index=None):
+        scene = {"name": name or "", "tempo": float(bpm) if bpm is not None else None}
+        if index is None or not 0 <= int(index) < len(self.scenes):
+            index = len(self.scenes)
+        index = int(index)
+        self.scenes.insert(index, scene)
+        for t in self.tracks:
+            t["clips"] = {(i + 1 if i >= index else i): c for i, c in t["clips"].items()}
+        return self._scene_row(index)
+
+    def move_scene(self, scene_index, to_index):
+        count = len(self.scenes)
+        if not (0 <= scene_index < count and 0 <= to_index < count):
+            raise IndexError("there are %d song slots" % count)
+        order = list(range(count))
+        order.insert(to_index, order.pop(scene_index))  # order[new] = old
+        self.scenes = [self.scenes[i] for i in order]
+        new_of = {old: new for new, old in enumerate(order)}
+        copied = 0
+        for t in self.tracks:
+            copied += scene_index in t["clips"]
+            t["clips"] = {new_of[i]: c for i, c in t["clips"].items()}
+        return dict(self._scene_row(to_index), clips=copied if scene_index != to_index else 0)
 
     def set_scene(self, scene_index, name=None, bpm=None):
         scene = self.scenes[scene_index]
@@ -448,6 +484,21 @@ class FakeSet:
         if bpm is not None:
             scene["tempo"] = float(bpm)
         return self._scene_row(scene_index)
+
+    def transpose_song(self, scene_index, semitones, skip_tracks=None):
+        semitones = int(semitones)
+        if not -12 <= semitones <= 12:
+            raise ValueError("transpose is -12 to 12 semitones")
+        self.scenes[scene_index]  # IndexError for a song that isn't there
+        skip = set(skip_tracks or [])
+        moved = kept = 0
+        for i, t in enumerate(self.tracks):
+            clip = t["clips"].get(scene_index)
+            if clip is None:
+                continue
+            clip["transpose"] = 0 if i in skip else semitones
+            moved, kept = (moved, kept + 1) if i in skip else (moved + 1, kept)
+        return dict(self._scene_row(scene_index), clips=moved, kept=kept)
 
     def count_scene_clips(self, scene_index):
         return sum(1 for t in self.tracks if scene_index in t["clips"])

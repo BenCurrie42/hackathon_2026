@@ -4,6 +4,44 @@ All notable changes are documented here.
 
 ---
 
+## [1.1.0] — 2026-10-06
+
+### Added
+- **Song transpose** — `transpose_song` in RigLink sets `pitch_coarse` on every audio clip in a song (scene), -12 to 12 semitones; scene rows carry `transpose` (`None` when clips disagree). `rig.py song transpose <song> <semitones>`, a − / Key / + control on each song in the Songs tab (the middle button resets to the original key), and a `transpose_song` action the assistant can propose; session notes show each song's transpose.
+- **Transpose keeps tempo** — a transposed clip is warped (Complex Pro) and pinned 1:1 at the song's tempo with an added warp marker, since transposing an unwarped clip speeds it up like tape (verified in Live 12.4.6); back at the original key it's unwarped again. Click, guide, count and SMPTE tracks keep their key, and any track can opt in or out ("Changes with the song key", `/api/track-key`, `follows_key` in `~/.holysound/folders.json`).
+- **Key detection** — `app/song_key.py` guesses each imported song's key from its pitched stems (Krumhansl-Kessler profiles, stdlib only) and reports the runner-up; imports carry `<song_keys>`.
+- **Vendor sets** — `app/vendor_set.py` reads a Washed/MultiTracks one-song `.als` beside the stems (Live 8 and newer), read only: tempo, section locators and the stem on each track, sent with the import as `<vendor_set>`.
+- **Part tracks** — every song uses the same ~20 part tracks (`app/parts.py`); several stems for one part are mixed into one 24-bit WAV under `~/Music/Holy Sound/Parts` (`app/mixdown.py`), the -1 dBFS scaling handed back as clip gain. `import_part` replaces the per-stem `import_audio` action and makes missing part tracks itself; `rig.py song import` does the same.
+- **Tidy into parts** — `tidy_into_parts` / `rig.py track tidy [--assign "Song:Track=Part"]` (`app/tidy.py`) rebuilds a track-per-stem set on part tracks, baking clip gain and old faders into the mix, keeping transposes and outputs, and deleting the emptied stem tracks.
+- **Per-song mix** — a Song mix picker in the mixer shows one song's tracks, each with that song's level (clip gain) and a Playing / Left out switch. The switch is that song's mute, so it works at once while the song plays; Live's clip activator stops a playing clip but won't restart one mid-song (verified in Live 12.4.6). The assistant leaves a part out with `set_mute` and a song; the `set_clip_active` action is gone.
+- **Song mixes and checkpoints** — faders, pan, mute and sends are kept per song (`app/song_mixes.py`, `~/.holysound/song_mixes.json`, by song and track name). Picking a song in Song mix, pressing Start, or starting it in Live puts its mix back; changes from the volunteer, the assistant or Live are saved to the picked song as they happen. A Checkpoints dialog saves named copies to go back to; going back first checkpoints the mix it replaces. The assistant's `set_volume`, `set_pan`, `set_mute` and `set_send` take a `song`: for a song other than the one on the mixer they change only its saved mix; `pick_song_mix` puts the mixer on a song, and the session notes show how each saved song differs. `POST /api/song-mix`, `song_mix` in `/api/state`.
+- **Song order** — `move_song` and `add_song` with a position; `rig.py song move` and `song add --at`. RigLink `move_scene` copies clips with `duplicate_clip_to` (keeps warp and transpose, verified in Live).
+- **RigLink** — `set_clip_active`, `delete_clip`, `move_scene`, `create_scene` at an index; clip rows carry `active`.
+
+### Changed
+- **New interface** — the page is redesigned as a console: neutral greys, scribble-strip name plates, Mute, Solo and a balance bar on every channel, and folders that fold. Tapping a channel opens a drawer below the mixer with its name, colour, sound, reverb and delay, effects and where it plays; with a song picked, the drawer also has that song's level and a Playing / Left out switch. The chat is a log, with the proposed changes docked above the message box; each step shows as working, done, partly done or failed while Apply runs (`applying` in `/api/state`, `run_all(on_step=)`). Songs read as a cue list, Room as a ledger. Fonts are bundled.
+- **Plain words** — results and proposals say how far up a fader is ("68%", "off") instead of dB, and "Ableton" instead of "Live"; clip gain and "turn it up 3 dB" stay in dB.
+- **Smaller models drive it reliably** — measured with `qwen3.8-flash` on 23 common requests against a demo set: 61/69 passing before, 69/69 after. The system prompt opens with a short map from requests to actions; every action has a one-line description in the tool schema; the session notes spell out each song's whole mix (`MIXER IS ON THIS SONG`, `PLAYING`, per-track fader, OFF, MUTED, sends, checkpoints) instead of differences; the volunteer's message is labelled after the notes.
+- **Relative levels** — `set_volume` and `set_send` take `by_db` ("down 3"), resolved from that song's own level, so the model never does the arithmetic.
+- **Promises without a proposal** — a reply that says it's making a change but proposes nothing (or is empty) is sent back once to the model.
+- **Loose names** — "lead vox", "backing vocals", "the Glad song" find the one track or song meant.
+- **Checkpoints for the assistant** — `save_checkpoint` and `restore_checkpoint` actions, by name, for any song.
+
+### Fixed
+- **Song from another set** — the session notes no longer say the mixer is on a song the open set doesn't have; the assistant took it at its word and pointed a whole import at a missing song.
+- **Song mix picker jumped back to Every track** — the page redrew from the server before sending the pick, so it sent "no song".
+- **Mixer strip layout** — the per-song level used the three-column control grid and spilled into the next strip; it's sized like pan now, and dB readouts no longer wrap.
+- **No Input on new tracks** — RigLink's `create_audio_track` gives every new track No Input; Live's default (input 1) left 51 playback tracks listening to a live input.
+- **Click tempo** — the stem listener averages click gaps near the median instead of taking the median of 10 ms-rounded gaps, which read a 139 BPM click as 136.
+- **Imports remembered between runs** — imported file paths are stored as strings (saving them crashed the import) and read back as paths.
+- **Renderer routing references** — a cloned track's `Track.N` routing strings now follow the clone only when they name the donor itself; references to return tracks are kept, and a reference to a track no longer in the set is refused instead of being silently pointed at the new track.
+- **Server errors** — an unexpected exception in any route now answers the page with a sentence (HTTP 500) and logs the traceback, instead of dropping the connection.
+- **Test discovery** — `uv run python -m unittest` now finds the suite (it ran 0 tests before), and the renderer has tests of its own (`tests/test_write_als.py`).
+
+### Changed
+- **Developer documentation** in `docs/documentation/`, now the source of the GitHub wiki (`scripts/publish_wiki.py`), including the user pages (getting started, weekly workflow, troubleshooting).
+- **Planning** — `docs/agents_of_flourishing.md`: what to add for the Gloo Agents of Flourishing judges, ranked.
+
 ## [1.0.0] — 2026-10-06
 
 First release, for the 2026 Gloo AI Hackathon (Ministry Resourcing track).

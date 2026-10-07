@@ -5,7 +5,7 @@ Ordered by how much it blocks a real service.
 
 Today RigLink can: add, rename, colour and delete tracks; set volume, pan,
 mute, solo and sends; route inputs and outputs; load stock effects and their
-presets; add, name, tempo and fire songs (scenes); import a folder of stems;
+presets; add, name, tempo, transpose and fire songs (scenes); import a folder of stems;
 add and jump to markers; read output levels.
 
 ## 1. Conversation → RigSpec — done in 1.0.0
