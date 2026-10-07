@@ -1,6 +1,6 @@
 # RigLink
 
-RigLink is a Live Control Surface (`ableton_script/RigLink/__init__.py`) that opens a local TCP socket inside Ableton Live and executes JSON commands against the open Set. `live_control/live_connection.py` (`LiveConnection`) is its Python client. It is the live-edit backend; see [architecture.md](architecture.md) for how it sits beside the [file renderer](file-renderer.md).
+RigLink is a Live Control Surface (`ableton_script/RigLink/__init__.py`) that opens a local TCP socket inside Ableton Live and executes JSON commands against the open Set. `live_control/live_connection.py` (`LiveConnection`) is its Python client. It is the live-edit backend; see [Architecture](architecture.md) for how it sits beside the [file renderer](file-renderer.md).
 
 Callers: the [CLI](cli-and-live-control.md) (`rig.py`) uses `LiveConnection` directly; the web app goes through `app/live.py`, a shared self-reconnecting wrapper ([web-server-api.md](web-server-api.md), [assistant-and-actions.md](assistant-and-actions.md)).
 
@@ -83,7 +83,7 @@ RigLink never uses a dB formula. `_set_db(param, db)` (volume, sends):
 
 ## Command reference
 
-All 46 entries of `COMMANDS`. `is_return` (bool, default false) selects return tracks wherever shown. "Display string" means Live's own text, e.g. `"-6.0 dB"`.
+All 49 entries of `COMMANDS`. `is_return` (bool, default false) selects return tracks wherever shown. "Display string" means Live's own text, e.g. `"-6.0 dB"`.
 
 ### Connection and introspection
 
@@ -94,7 +94,7 @@ All 46 entries of `COMMANDS`. `is_return` (bool, default false) selects return t
 | `get_snapshot` | none | See below | Whole set in one call. Newer than the other commands; clients fall back if `unknown cmd`. |
 | `list_stock_devices` | none | `{audio_effects, midi_effects, instruments: [names]}` | Browser search depth 2. |
 
-`get_snapshot` result: `song` (as `get_song`), `tracks[]` and `returns[]` (strips: `index, name, is_return, color, meter{peak,average}|null, volume, volume_db, pan, pan_value, mute, solo, sends[{return,level,level_db}], devices[names], output{type,channel}`; tracks add `is_midi, input{type,channel}, clips[{scene_index,name,is_audio,is_playing,length,gain,gain_db}]`), `master{volume,volume_db,meter}`, `scenes` (as `list_scenes`), `locators`, `ext_outputs` (Master's Ext. Out channel names, `[]` if Master isn't on Ext. Out). `*_db` is `null` for `-inf`. Meters are peak/average since the previous snapshot (uses the separate `_display_meters` window, which the call then resets).
+`get_snapshot` result: `song` (as `get_song`), `tracks[]` and `returns[]` (strips: `index, name, is_return, color, meter{peak,average}|null, volume, volume_db, pan, pan_value, mute, solo, sends[{return,level,level_db}], devices[names], output{type,channel}`; tracks add `is_midi, input{type,channel}, clips[{scene_index,name,is_audio,is_playing,length,gain,gain_db,active}]`), `master{volume,volume_db,meter}`, `scenes` (as `list_scenes`), `locators`, `ext_outputs` (Master's Ext. Out channel names, `[]` if Master isn't on Ext. Out). `*_db` is `null` for `-inf`. Meters are peak/average since the previous snapshot (uses the separate `_display_meters` window, which the call then resets).
 
 ### Tracks
 
@@ -102,7 +102,7 @@ All 46 entries of `COMMANDS`. `is_return` (bool, default false) selects return t
 |---|---|---|---|
 | `list_tracks` | none | `[{index, name, is_midi}]` | |
 | `list_returns` | none | `[{index, name}]` | |
-| `create_audio_track` | `name=None` | `{index, name}` | Appended at end. |
+| `create_audio_track` | `name=None` | `{index, name}` | Appended at end, with input routing set to **No Input** (Live's own default is input 1, which would make a playback track pick up whatever is plugged in). If this Live has no "No Input" type the default stays. Live sources get their input set explicitly afterwards. |
 | `create_midi_track` | `name=None` | `{index, name}` | |
 | `create_return_track` | `name=None` | `{index, name}` | |
 | `set_track_name` | `track_index, name, is_return` | `{index, name}` | |
@@ -150,12 +150,14 @@ All 46 entries of `COMMANDS`. `is_return` (bool, default false) selects return t
 |---|---|---|---|
 | `import_audio` | `track_index, file_path, scene_index, name=None, gain_db=None` | `{name, gain, length, warping, looping}` | Audio tracks only (`is_return` not accepted). Errors if the slot has a clip, or if Live lacks `create_audio_clip` (`NotImplementedError`). Sets warping off, looping off, `loop_start`/`start_marker` to 0, clip colour to the track's. |
 | `set_clip_gain` | `track_index, scene_index, db` | `{gain}` | `LookupError` if the slot is empty. |
+| `set_clip_active` | `track_index, scene_index, on` | `{active}` | Turns one song's clip on or off (Live's clip activator; sets `clip.muted`). Saved in the set, so it applies when the song starts. `LookupError` if the slot is empty. Clip rows in the snapshot carry `active`. |
+| `delete_clip` | `track_index, scene_index` | `{deleted: true}` | Empties one song's slot on a track. `LookupError` if there is no clip. Undo in Live with Cmd+Z. Used by `tidy_into_parts`. |
 | `clip_markers` | `scene_index` | `[{index, name, start_marker, end_marker, loop_start, loop_end, length, warping, looping, sample_length, sample_rate, warp_markers?}]` | Diagnostic: checks stems line up. First 4 warp markers as `[sample_time, beat_time]`. |
 | `song_files` | `scene_index` | `[{track_index, track, file_path}]` | Source file of each audio clip in a scene. Has no `LiveConnection` wrapper; callers use `send("song_files", ...)` (the app's `app/live.py` `call`). |
 
 ### Song, transport, scenes, locators
 
-A "song" in the app is a Session scene. `scene row = {index, name, tempo|null, transpose}`; `tempo` only if the scene's tempo is enabled; `transpose` is the shared `pitch_coarse` of the scene's audio clips, `0` if none, `null` if they differ.
+A "song" in the app is a Session scene. `scene row = {index, name, tempo|null, transpose}`; `tempo` only if the scene's tempo is enabled; `transpose` is the shared non-zero `pitch_coarse` of the scene's audio clips (clips at 0, such as click and guide, do not count), `0` if none are shifted, `null` if shifted clips disagree.
 
 | Command | Params | Returns | Notes |
 |---|---|---|---|
@@ -163,9 +165,10 @@ A "song" in the app is a Session scene. `scene row = {index, name, tempo|null, t
 | `set_tempo` | `bpm` | `{tempo}` | |
 | `play` / `stop` | none | `{is_playing}` | |
 | `list_scenes` | none | `[scene row]` | |
-| `create_scene` | `name=None, bpm=None` | scene row | Appended; `bpm` also enables scene tempo. |
+| `create_scene` | `name=None, bpm=None, index=None` | scene row | Appended, or inserted at 0-based `index` pushing later songs down (an out-of-range `index` appends); `bpm` also enables scene tempo. |
+| `move_scene` | `scene_index, to_index` | scene row + `clips` | Moves a song and its clips (0-based). Live has no move call, so RigLink inserts an empty scene at the target, copies each clip with `duplicate_clip_to`, copies name, tempo and colour, and deletes the original. Undoable in Live, one step per clip. `IndexError` if either index is out of range. |
 | `set_scene` | `scene_index, name=None, bpm=None` | scene row | Only provided fields change. |
-| `transpose_song` | `scene_index, semitones` | scene row + `clips` | Integer -12..12 else `ValueError`. Sets `pitch_coarse` on every audio clip. Effect on playback speed of unwarped stems is an open question (CLAUDE.md). |
+| `transpose_song` | `scene_index, semitones, skip_tracks=None` | scene row + `clips`, `kept`, `bpm`, `report[]` | Integer -12..12 else `ValueError`. Changes key **without changing speed**: transposing an unwarped clip also speeds it up like tape (confirmed by ear in Live 12.4.6), so each shifted clip is warped in Complex Pro (`warp_mode` 6, read back after setting) and pinned 1:1 at the song's tempo with a warp marker; at 0 the clip returns to unwarped and sample-locked. Tracks whose index is in `skip_tracks` (click, guide...) are put back at their original key and counted in `kept`. `report` has one row per audio clip with warp details and any `problems`. See [Part tracks, imports, key and transpose](part-tracks-and-imports.md#transpose-that-keeps-tempo). |
 | `count_scene_clips` | `scene_index` | int | Tracks (not returns) with a clip in that slot. |
 | `delete_scene` | `scene_index` | `{index}` | |
 | `fire_scene` | `scene_index` | `{index}` | Launches the scene. |
@@ -180,7 +183,7 @@ There is no version or capabilities command. `ping` returns only `"pong"`. Clien
 
 - `app/live.py` `_fetch_snapshot`: tries `get_snapshot`, on `unknown cmd` sets `_has_snapshot_cmd = False` and assembles the snapshot from many small calls.
 - `app/server.py`: `song_files` `unknown cmd` becomes "Live is running an older RigLink. Quit and reopen Live, then try again."
-- Field presence: `app/static/app.js` hides the key control when scenes lack `transpose`; `app/assistant.py` `_outputs_line` handles a snapshot without `ext_outputs`.
+- Field presence: `app/static/app.js` hides the key control when scenes lack `transpose`, and the Song mix switch needs `set_clip_active` (`unknown cmd` on old code); `app/assistant.py` `_outputs_line` handles a snapshot without `ext_outputs`.
 
 Within Live itself, features are probed with `hasattr`/`getattr` (`create_audio_clip`, `Scene.tempo_enabled` for Live 11+, `arrangement_clips`, `warp_markers`).
 
@@ -196,8 +199,8 @@ Within Live itself, features are probed with `hasattr`/`getattr` (`create_audio_
 | `get_routing`, `set_routing` | `(track_index, [direction, type_name, channel_name=None], is_return=False)` |
 | `get_mixer`, `set_volume`, `set_pan`, `set_mute`, `set_solo`, `set_send` | `(track_index, ..., is_return=False)` |
 | `list_presets`, `load_device`, `list_devices`, `delete_device` | as command table |
-| `import_audio`, `set_clip_gain`, `clip_markers` | as command table |
-| `set_tempo`, `create_scene`, `set_scene`, `transpose_song`, `count_scene_clips`, `delete_scene`, `fire_scene` | as command table |
+| `import_audio`, `set_clip_gain`, `set_clip_active`, `delete_clip`, `clip_markers` | as command table |
+| `set_tempo`, `create_scene`, `move_scene`, `set_scene`, `transpose_song`, `count_scene_clips`, `delete_scene`, `fire_scene` | as command table |
 | `add_locator`, `delete_locator`, `jump_to_locator` | as command table |
 
 Not wrapped: `song_files`. Optional args are always sent (as `null` when `None`); RigLink's handlers treat `None` as unset.
@@ -215,7 +218,7 @@ Keep in mind: `send` writes a request then blocks reading until a newline, and t
 - Stale-code failure mode after editing RigLink: needs Live restart.
 - Error messages from bad indices are raw Python text.
 - Loopback only, no auth, no request IDs, no protocol version.
-- Unverified: whether `transpose_song` alters speed of unwarped stems.
+- `transpose_song` depends on Live accepting a new warp marker; it tries three forms of marker and reports which one worked (`marker_form`) or what failed (`problems`).
 
 ## Discrepancies
 

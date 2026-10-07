@@ -1,6 +1,8 @@
 # CLI and Live Control Helpers
 
-`rig.py` is a typer CLI that edits the open Live Set through RigLink. The four small modules in `live_control/` (`stem_level.py`, `starting_fader.py`, `timecode.py`, `stereo_pairs.py`) are pure functions that `song import` uses to decide gains, faders and mutes.
+This is also the `rig.py` command reference. For the app workflow see [Weekly workflow](weekly-workflow.md); for first-time setup see [Getting started](getting-started.md).
+
+`rig.py` is a typer CLI that edits the open Live Set through RigLink. The four small modules in `live_control/` (`stem_level.py`, `starting_fader.py`, `timecode.py`, `stereo_pairs.py`) are pure functions that `song import` uses to decide gains, faders and mutes. `song import` and `track tidy` also use the app's part-track modules (`app/parts.py`, `app/mixdown.py`, `app/tidy.py`; see [Part tracks, imports, key and transpose](part-tracks-and-imports.md)).
 
 The socket client (`LiveConnection`, `RigLinkError`) and the in-Live script are documented in [riglink.md](riglink.md). The web app reaches the same RigLink commands through its own actions ([assistant-and-actions.md](assistant-and-actions.md)); the app reuses these helper modules too (`app/actions.py`, `app/song_map.py`, `app/folders.py`, `app/assistant.py` import from `live_control/`). For the system overview see [architecture.md](architecture.md).
 
@@ -40,9 +42,10 @@ Commands that take a `TRACK` accept a name, a 1-based number, or a return letter
 | Command | Args / options | Notes | Example |
 | --- | --- | --- | --- |
 | `track list` | none | One line per track: `index  name  (Audio\|MIDI)`, then returns as `A  name  (Return)`. Prints "This set has no tracks." if empty (and still loops over nothing). | `uv run rig.py track list` |
-| `track add` | `[NAME]`, `--midi`, `--return` | Appends a track. `--midi` and `--return` together fails. | `uv run rig.py track add "Click"` / `track add Reverb --return` |
+| `track add` | `[NAME]`, `--midi`, `--return` | Appends a track. `--midi` and `--return` together fails. An audio track made this way has No Input (RigLink sets it). | `uv run rig.py track add "Click"` / `track add Reverb --return` |
 | `track rename` | `TRACK NAME` | | `uv run rig.py track rename 3 "Lead Vocal"` |
 | `track color` | `TRACK NAME` | Colour is one of `TRACK_COLORS`: red, orange, yellow, green, teal, blue, purple, pink, grey (RGB ints). Live snaps to the nearest palette colour and recolours clips. Case-insensitive. | `uv run rig.py track color Click blue` |
+| `track tidy` | `[--assign "Song:Track=Part"]... [--yes]` | Rebuilds every song on the part tracks (Drums, Keys, BGVs...) and deletes the per-stem tracks they replace. Keeps how each song sounds (clip gain and old faders baked in, part faders end at 0 dB, transposed songs stay transposed). Mixed parts go under `~/Music/Holy Sound/Parts`. Asks "Saved a copy first?" unless `--yes`. Effects and sends on the old tracks are not carried over; the output lists the effects. Changes the open set; many undo steps. `--assign` names the part for a track whose name says nothing about it (a singer's name); `"Track=Part"` without a song applies in every song. | `uv run rig.py track tidy --assign "Washed:Chloe Gall=Lead Vocal"` |
 | `track delete` | `TRACK` | Works on returns too. Undo in Live with Cmd+Z. | `uv run rig.py track delete "Old Pad"` |
 
 ### `route`
@@ -82,18 +85,19 @@ No effect **parameter** control exists (see `docs/td_next.md`).
 
 ### `song`
 
-A song is one scene in Session view. `_song_line` renders `N  Name  (170 BPM)  [+2 semitones]`; the tempo shows only when the scene has one, and the key only when transpose is non-zero (`mixed transpose` when clips disagree, i.e. `transpose is None`).
+A song is one scene in Session view. `_song_line` renders `N  Name  (170 BPM)  [+2 semitones]`; the tempo shows only when the scene has one, and the key only when transpose is non-zero (`mixed transpose` when clips disagree, i.e. `transpose is None`). Tracks that keep their key do not count towards that.
 
 | Command | Args / options | Notes | Example |
 | --- | --- | --- | --- |
 | `song list` | none | Prints nothing if there are no scenes. | `uv run rig.py song list` |
-| `song add` | `[NAME] [--bpm FLOAT]` | Empty scene at the end. | `uv run rig.py song add "Doxology" --bpm 72` |
+| `song add` | `[NAME] [--bpm FLOAT] [--at N]` | Empty scene at the end, or in slot `N` (1 = first), pushing later songs down. | `uv run rig.py song add "Doxology" --bpm 72 --at 2` |
+| `song move` | `SONG TO` | Moves a song and its clips to slot `TO` (1 = first). RigLink inserts a scene, copies each clip, name, tempo and colour, then deletes the original. Undo with Cmd+Z, one step per clip. | `uv run rig.py song move "Doxology" 1` |
 | `song rename` | `SONG NAME` | | `uv run rig.py song rename 2 "Great Are You Lord"` |
 | `song tempo` | `SONG BPM` | Tempo Live switches to when the song starts. | `uv run rig.py song tempo 1 170` |
-| `song transpose` | `SONG SEMITONES` | Int, range -12..12 (typer `min`/`max`). Sets `pitch_coarse` on every audio clip in the scene; prints the clip count. | `uv run rig.py song transpose 1 -2` |
+| `song transpose` | `SONG SEMITONES` | Int, range -12..12 (typer `min`/`max`). Shifts every audio clip in the song to the new key **without changing its speed** (clips are warped in Complex Pro and pinned to the song's tempo; 0 returns them to unwarped). Click, guide, count and SMPTE tracks keep their key, as do tracks opted out in the web app (read from `~/.holysound/folders.json`). Prints the clip count and how many kept their key. | `uv run rig.py song transpose 1 -2` |
 | `song delete` | `SONG` | Removes the scene and its clips. Undo with Cmd+Z. | `uv run rig.py song delete 3` |
 | `song play` | `SONG` | Fires the scene. | `uv run rig.py song play "Let's Have Church"` |
-| `song import` | `FOLDER [--name] [--bpm] [--only PAT]... [--match-levels/--keep-levels]` | See below. | `uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170` |
+| `song import` | `FOLDER [--name] [--bpm] [--only PAT]... [--match-levels/--keep-levels]` | Adds a song from a folder of stems onto the part tracks. See below. | `uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170` |
 
 ### `marker`
 
@@ -108,7 +112,7 @@ Arrangement locators. Bars are 1-based; beats per bar is `numerator * 4 / denomi
 
 ## `song import` pipeline
 
-Source: `song_import` and helpers in `rig.py`. Entry: a folder of one-audio-file-per-track stems.
+Source: `song_import` and helpers in `rig.py`. Entry: a folder of stems. Since 1.1.0 stems are grouped into the church's **part tracks** (`app/parts.py`) instead of getting a track each; where a part has several stems they are mixed into one file (`app/mixdown.py`). Steps 9 to 11 below are the part of the pipeline that changed.
 
 ```mermaid
 flowchart TD
@@ -121,15 +125,19 @@ flowchart TD
     F --> G
     G --> H[duplicate-title check]
     H --> I[reuse blank scene or create one]
-    I --> J[per stem: reuse or create track<br/>new track: fader + timecode mute]
-    J --> K[import_audio:<br/>unwarped, no loop, start at 0, gain]
+    I --> J[parts.plan: group stems into parts]
+    J --> J2[per part: reuse or create part track<br/>new track: fader, folder colour, timecode mute]
+    J2 --> J3{several stems?}
+    J3 -- yes --> J4[mixdown.mix to Parts folder<br/>scaling goes back as clip gain]
+    J3 -- no --> K
+    J4 --> K[import_audio:<br/>unwarped, no loop, start at 0, gain]
 ```
 
 Steps, in order:
 
 1. **Validate folder.** Not a directory -> "There's no folder at ...". No files -> "There are no audio files in ...".
-2. **Stem discovery.** Non-recursive; files whose suffix (casefolded) is in `AUDIO_SUFFIXES = {.wav, .aif, .aiff, .flac, .mp3}`, sorted by path. Sort order is track creation order.
-3. **`--only` selection** (`_select_stems`). Each pattern is an `fnmatch` glob against the file stem, case-insensitive. Results are concatenated **in pattern order** (deduplicated), so `--only` also controls track order. A pattern with no match aborts and lists the stems found.
+2. **Stem discovery.** Non-recursive; files whose suffix (casefolded) is in `AUDIO_SUFFIXES = {.wav, .aif, .aiff, .flac, .mp3}`, sorted by path. Track creation order is part order (step 9), not file order.
+3. **`--only` selection** (`_select_stems`). Each pattern is an `fnmatch` glob against the file stem, case-insensitive. Results are concatenated **in pattern order** (deduplicated), so `--only` also sets the order of stems within a mixed part. A pattern with no match aborts and lists the stems found.
 4. **Song name.** `--name`, else the folder name.
 5. **Level matching** (`_level_match_gains`, skipped with `--keep-levels`, in which case `gain=None` is sent and RigLink leaves clip gain alone). Runs **before connecting to Live**, so a slow or failing measurement never leaves a half-built set.
    1. `stem_level(path)` for every stem (see [stem_level.py](#stem_levelpy)).
@@ -142,19 +150,20 @@ Steps, in order:
 6. **Gain math** (`_level_match_gain`): `wanted = STEM_LEVEL_DB - active_rms_db` (target -20 dBFS); `headroom = STEM_PEAK_CEILING_DB - peak_db` (ceiling -1 dBFS); `gain = clamp(min(wanted, headroom), -24, +24)`. If headroom is the binding limit the note is "held back to avoid clipping". A spiky stem (click) therefore ends up quieter than the target rather than clipping. The gain can be negative (loud stems are turned down).
 7. **Connect, then duplicate check.** `_song_title` strips a trailing `[170]`-style tempo tag and casefolds; any existing scene with the same title aborts with "There's already a song called ...". Nothing is overwritten.
 8. **Scene slot** (`_empty_song_slot`): first scene with an empty name and zero clips is reused (fresh Live sets ship blank scenes) via `set_scene(name, bpm)`; otherwise `create_scene(name, bpm)` appends one.
-9. **Per stem**, in order:
-   - Existing track whose name matches the stem name (casefold) gets the clip; its fader is **not** touched (that is the volunteer's mix).
-   - Otherwise `create_audio_track(name=stem)`, then `set_volume(index, starting_fader_db(len(stems)))`, then `set_mute(True)` if `is_timecode(stem)`.
-   - `import_audio(index, abs_path, scene, name, gain)`; the line printed shows the resulting clip gain and notes (`new track at -13 dB`, `muted, it's timecode`, level notes).
-10. Final line: `Added song N: name (X stems).`
+9. **Group into parts.** `parts.plan(stem names)` gives `{part: [stems]}` in part order (Click, Guide, SMPTE, Loops, Drums, ... Crowd). A stem that fits no part keeps its own name (minus a trailing take number).
+10. **Per part**, in order:
+    - An existing track whose name matches the part name (casefold) gets the clip; its fader is **not** touched (that is the volunteer's mix).
+    - Otherwise `create_audio_track(name=part)` (RigLink gives it No Input), then `set_volume(index, starting_fader_db(number of parts))`, then `set_track_color` with the part's folder colour, then `set_mute(True)` if `is_timecode(part)`.
+    - One stem: that file, with its level-matching gain. Several: `parts.pans` decides which side each L/R stem goes to, `mixdown.mix` writes `~/Music/Holy Sound/Parts/<song>/<part>.wav` (24-bit, peak -1 dBFS) from the stems at their level-matched gains, and the opposite of the scaling is the clip gain, so the part plays as loud as its stems did. A `MixdownError` (for example different sample rates) aborts with a sentence.
+    - `import_audio(index, abs_path, scene, part, gain)`; the line printed shows the resulting clip gain and notes (`new track at -13 dB`, `muted, it's timecode`, `N stems mixed`, level notes).
+11. Final line: `Added song N: name (X stems on Y part tracks).`
 
 Unwarped, play-once, start-at-zero behaviour lives in RigLink (`_import_audio` and `_play_from_file_start` in `ableton_script/RigLink/__init__.py`): `warping = False`, `looping = False`, then `loop_start = 0.0` and `start_marker = 0.0`. Warping off keeps stems sample-locked to each other and means song tempo does not stretch them; the start reset is needed because Auto-Warp's first-beat guess moves each clip's start differently (up to ~3 s). Clip gain is set by binary search (30 iterations) on the clip's `gain_display_string`, as Live exposes no public dB formula. `import_audio` raises if the slot already has a clip or if this Live build lacks `create_audio_clip`; see [riglink.md](riglink.md).
 
 Gotchas:
 
 - Not transactional. A failure mid-import leaves the scene, new tracks and already imported clips in place. Undo in Live.
-- Track matching is by exact (casefolded) name; a track called "Click" gets a stem called `click.wav`, but "Click Track" does not match "Click".
-- Duplicate stem names after casefolding would map to the same track and the second `import_audio` fails on the occupied slot.
+- Track matching is by exact (casefolded) part name; a track called "Click" gets the Click part, but "Click Track" does not match and a second "Click" track would be created.
 - Tempo is only set on the scene (`--bpm`); stem clips are never warped to it.
 
 ## Helper modules
@@ -188,7 +197,7 @@ Note: `app/audio_files.py` and `app/song_map.py` measure loudness differently; s
 
 `fader = -10*log10(n) - PEAK_MARGIN_DB` (`PEAK_MARGIN_DB = 3.0`, headroom for hits that coincide), rounded to the nearest 0.5 dB. `n < 1` -> `0.0`.
 
-| Stems | Fader (dB) |
+| n | Fader (dB) |
 | --- | --- |
 | 1 | -3.0 |
 | 4 | -9.0 |
@@ -196,7 +205,7 @@ Note: `app/audio_files.py` and `app/song_map.py` measure loudness differently; s
 | 30 | -17.5 |
 | 50 | -20.0 |
 
-`n` is the number of stems imported (after `--only`), not the number of new tracks. The fader is applied even with `--keep-levels`. Existing tracks are never changed.
+`n` is the number of part tracks the song uses (it was the number of stems before part tracks), not the number of new tracks. The fader is applied even with `--keep-levels`. Existing tracks are never changed.
 
 ### `timecode.py`
 

@@ -1,6 +1,6 @@
 # Assistant and Actions
 
-The chat layer of the web app. `app/assistant.py` runs the conversation, `app/providers.py` talks to whichever model answers, and `app/actions.py` defines the typed changes the model may propose and how each is carried out against Live through RigLink. See [web-server-api.md](web-server-api.md) for the HTTP endpoints that drive this, [riglink.md](riglink.md) for the commands actions call, and [audio-analysis-and-memory.md](audio-analysis-and-memory.md) for `song_map` and room memory.
+The chat layer of the web app. `app/assistant.py` runs the conversation, `app/providers.py` talks to whichever model answers, and `app/actions.py` defines the typed changes the model may propose and how each is carried out against Live through RigLink. See [web-server-api.md](web-server-api.md) for the HTTP endpoints that drive this, [riglink.md](riglink.md) for the commands actions call, [audio-analysis-and-memory.md](audio-analysis-and-memory.md) for `song_map` and room memory, and [part-tracks-and-imports.md](part-tracks-and-imports.md) for how `import_part` and `tidy_into_parts` work.
 
 ## End-to-end flow
 
@@ -27,16 +27,16 @@ sequenceDiagram
         end
     end
     V->>S: POST /api/proposals/{id}/apply
-    S->>L: run_all(live, actions, files, folders)
+    S->>L: run_all(live, actions, files, folders, parts_dir, mixes, on_step)
     S->>C: record_outcome(pid, "applied", results)
     Note over C: Next send() (or follow_up()) delivers the tool_result with the results
 ```
 
 1. `App.send_message` (`app/server.py`) builds the session notes (`App.notes` -> `session_notes`) and calls `Conversation.send(text, notes, attachment)`. Only one turn runs at a time (`_lock`); `/api/chat` rejects a message while `busy`.
-2. Each user message sent to the model is `<session>\n{notes}\n</session>\n\nThe volunteer says:\n{text}` plus an optional attachment (an imported folder's measurements; not shown in the chat transcript).
+2. Each user message sent to the model is `<session>\n{notes}\n</session>\n\nThe volunteer says:\n{text}` plus an optional attachment (an imported folder's measurements, a `<parts>` block with each song's stems grouped into part tracks, a `<song_keys>` block with a key guess per song, and a `<vendor_set>` block when a vendor's `.als` sits beside the stems; not shown in the chat transcript). An automatic follow-up (`follow_up`) has no "The volunteer says:" line, only an "(Automatic: ...)" body.
 3. The model answers with text and/or one tool call. History is kept in Anthropic content-block format regardless of provider (`_replayable` copies response blocks back verbatim, dropping `parsed_output`).
 4. `propose_changes` is validated with `Proposal.model_validate`. If valid, a proposal record is stored (`status: "pending"`) and the turn **ends there**. The tool call stays open (`_open_tool_use = (tool_use_id, proposal_id, other_results)`); nothing reaches Live.
-5. The volunteer presses Apply, Dismiss, or Download (export to `.als`). `App.apply` runs `run_all`, then `Conversation.record_outcome`. The `tool_result` is only built on the *next* `_send`, via `_tool_result`, so the model learns what happened (lines prefixed with check or cross, plus any `detail`).
+5. The volunteer presses Apply, Dismiss, or Download (export to `.als`). `App.apply` runs `run_all` (reporting each step's state to the page as it goes; see [web-server-api.md](web-server-api.md#apply-progress)), then `Conversation.record_outcome`. The `tool_result` is only built on the *next* `_send`, via `_tool_result`, so the model learns what happened (lines prefixed with check or cross, plus any `detail`).
 6. If the batch contained a `Listen` action, `App.apply` immediately calls `Conversation.follow_up(notes)`, which sends the results with an "(Automatic: ...)" body so the model can read the meter numbers without a new message.
 
 ### Proposal lifecycle
@@ -68,18 +68,18 @@ sequenceDiagram
 
 Two layers, both in `app/assistant.py`:
 
-**`SYSTEM`** (constant, sent as the system prompt every call; cached on Anthropic via `cache_control: ephemeral`). It opens with **What to use for what**, a short map from common requests to actions (questions answered from the notes, `by_db` for up/down, `song` for "in Washed", `set_clip_active` to leave a part out, checkpoints), written for smaller models. Then 37 numbered rules in sections: how to talk (short, plain sentences, no JSON/IDs, offer don't instruct), how changes happen (propose only; never claim done until a check-marked result), tool values and limits (dB, pan, "can't change effect settings / group tracks / delete clips / move Master"), importing audio, mixing guidance (click to in-ears, SMPTE muted, stereo pair rules, folders), remembering, safety (`listen`, `start_song`, `transport` make sound), and listening to stems. The colour list is interpolated from `rig.TRACK_COLORS`.
+**`SYSTEM`** (constant, sent as the system prompt every call; cached on Anthropic via `cache_control: ephemeral`). It opens with **What to use for what**, a short map from common requests to actions (questions answered from the notes, `by_db` for up/down, `song` for "in Washed", `set_clip_active` to leave a part out, checkpoints), written for smaller models. Then 37 numbered rules in sections: how to talk (short, plain sentences, no JSON/IDs, offer don't instruct), how changes happen (propose only; never claim done until a check-marked result), tool values and limits (dB, pan, each song's own mix, song order and `move_song`, what `transpose_song` leaves alone, "can't change effect settings / group tracks / delete clips / move Master"), importing audio (every song on the same part tracks, one `import_part` per part per song, never a track per stem, say the key guess and ask when it is unclear, offer `tidy_into_parts` once for a track-per-stem set and say to save a copy first), mixing guidance (click to in-ears, SMPTE muted, leave parts out of one song with `set_clip_active` rather than mute, part tracks stay centre, folders), remembering, safety (`listen`, `start_song`, `transport` make sound), and listening to stems. The colour list is interpolated from `rig.TRACK_COLORS`. The model still speaks in dB (rule 13); only the sentences actions show the volunteer turn fader levels into percentages (see [Wording](#wording)).
 
 **`<session>` notes** (rebuilt by `session_notes(snapshot, stock_devices, live_error, imports, room, mix_song, saved_mixes, checkpoints)` on every user message; the prompt tells the model to trust these over earlier chat):
 
 | Section | Source |
 | --- | --- |
 | Live connected? tempo, time signature, playing/stopped; or "Live is NOT connected (reason)" | `snapshot["song"]` / `live_error` |
-| `Tracks:` numbered, one line each via `_strip_line`: name, folder, colour name (`color_name`, nearest of `TRACK_COLORS`), audio/MIDI, input, output, volume, pan, MUTED/SOLO, effects, sends, clips per song with gain | snapshot + `FolderMemory` (`App.with_folders`) |
+| `Tracks:` numbered, one line each via `_strip_line`: name, folder, "keeps its key" (a track a transpose leaves alone), colour name (`color_name`, nearest of `TRACK_COLORS`), audio/MIDI, input, output, volume, pan, MUTED/SOLO, effects, sends, clips per song with gain and "OFF in this song" for a switched-off clip | snapshot + `FolderMemory` (`App.with_folders`) |
 | `Returns (shared effects):` lettered A, B, ... | snapshot |
 | `Mixer is on: <song>` (or no song), then `Songs (scenes)…`: index, name, BPM, transpose (`transposed +2`, or "clips at mixed keys"), `MIXER IS ON THIS SONG`, `PLAYING`; under each, `mix:` every track in that song with its fader, `OFF in this song`, `MUTED`, pan and sends (`song_mixes.describe_song`), from the live mixer for the current song, the saved mix for others, or "not saved yet"; and its `checkpoints` by name | snapshot scenes + `SongMixMemory` (`_songs_lines`) |
 | `Outputs:` `Master; Ext. Out ...` from `ext_outputs`; falls back to outputs in use with a "ask which ones feed in-ears" hint for older RigLink | `_outputs_line` |
-| `Imported audio folders (...)` name and file count | `App.imports` |
+| `Imported audio folders (import_part can use their files)` name and file count | `App.imports` (also remembered across runs in `imports.json`) |
 | `Stock devices in this Live:` by category; `FALLBACK_DEVICES` when Live is down or lists none | `App.live.stock_devices()` |
 | `What you remember about this church` (`#id. fact`), last | `RoomMemory.notes()` |
 
@@ -164,10 +164,10 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 
 | `action` | Fields | Runs (RigLink cmd) | Notes / validation | Flags |
 | --- | --- | --- | --- | --- |
-| `add_track` | `name` (1-64), `kind` audio/midi (default audio), `input?`, `output?`, `volume_db?`, `pan?`, `devices[]`, `color?` | `create_audio_track` / `create_midi_track`, then `set_routing` (input: `Ext. In` or `No Input`; output), `set_volume`, `set_mute`, `set_pan`, `set_track_color`, `load_device` | Sub-steps are best-effort via `try_step`: the track is created even if a sub-step fails, and the result reads "Added ... But couldn't ...". Audio tracks with no `volume_db` get `ex.new_track_fader_db` if the batch imports audio. Timecode-named tracks are muted in that case. Only action that can be exported to `.als`. | |
+| `add_track` | `name` (1-64), `kind` audio/midi (default audio), `input?`, `output?`, `volume_db?`, `pan?`, `devices[]`, `color?` | `create_audio_track` / `create_midi_track`, then `set_routing` (input: `Ext. In` or `No Input`; output), `set_volume`, `set_mute`, `set_pan`, `set_track_color`, `load_device` | Sub-steps are best-effort via `try_step`: the track is created even if a sub-step fails, and the result reads "Added ... But couldn't ...". A track with no `input` is set to No Input. Audio tracks with no `volume_db` get `ex.new_track_fader_db` if the batch imports audio. Timecode-named tracks are muted in that case. Only action that can be exported to `.als`. For imports use `import_part`, not this. | |
 | `add_return` | `name`, `devices[]` | `create_return_track`, `load_device` | Returns lettered by index. | |
 | `rename_track` | `track`, `new_name` | `set_track_name` | Also renames in `FolderMemory` so folder moves follow. | |
-| `delete_track` | `track` | `delete_track` | Result tells user Cmd+Z in Live restores it. | destructive |
+| `delete_track` | `track` | `delete_track` | Result says undo in Ableton brings it back. | destructive |
 | `set_volume` | `track`, `db` or `by_db`, `song?` | `set_volume` | Any track or return. A `song` other than the one on the mixer edits only that song's saved mix (`Executor.save_for_song`); Live isn't touched. Same `song` rule for `set_pan`, `set_mute`, `set_send`. | |
 | `set_pan` | `track`, `pan`, `song?` | `set_pan` | | |
 | `set_mute` | `track`, `on`, `song?` | `set_mute` | | |
@@ -178,50 +178,63 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `add_device` | `track`, `device{device, preset?}` | `load_device` | Appended at end of chain. A missing preset falls back to the device default with a note (`Executor.load_device`, matches RigLink's "no preset called" error). Any other load failure raises. | |
 | `remove_device` | `track`, `device` (name on the track) | `list_devices`, `delete_device` | Case-insensitive; removes the **last** matching device. Error lists the devices present. | destructive |
 | `set_tempo` | `bpm` | `set_tempo` | Whole-set tempo. | |
-| `add_song` | `name`, `bpm?` | `create_scene` | Songs are scenes. | |
+| `add_song` | `name`, `bpm?`, `position?` (1 = first) | `create_scene` (with `index`) | Songs are scenes. A position pushes later songs down; null adds at the end. | |
+| `move_song` | `song`, `position` (1 = first) | `list_scenes`, `move_scene` | Moves the song and its clips. Fails with a sentence if the position is past the last slot. | |
 | `update_song` | `song`, `new_name?`, `bpm?` | `set_scene` | Null keeps the field. | |
-| `transpose_song` | `song`, `semitones` (-12..12) | `transpose_song` | Fails ("has no audio clips") if RigLink reports zero clips. 0 resets. | |
+| `transpose_song` | `song`, `semitones` (-12..12) | `transpose_song` (with `skip_tracks` from `FolderMemory.kept_tracks`) | Keeps the song's tempo. Tracks that keep their key (click, guide, count, SMPTE by default, or per-track choice) are left at the original key; the result says how many. Fails ("has no audio clips") if RigLink reports zero clips. 0 resets. | |
 | `delete_song` | `song` | `delete_scene` | | destructive |
 | `start_song` | `song` | `fire_scene` | Launches the scene. | audible |
 | `save_checkpoint` | `label`, `song?` | `App.checkpoint_song_mix` | A named copy of the song's mix (the mixer's song unless named). | |
 | `restore_checkpoint` | `label`, `song?` | `SongMixMemory.find_checkpoint`, `App.restore_song_mix` | Matched by name (exact, then contains). Checkpoints the replaced mix first. For another song only its saved mix changes. | |
-| `pick_song_mix` | `song` (null = no song) | `App.pick_song_mix` | Puts the song's saved faders, pan, mute and sends back. Fails without the app (`ex.pick_song is None`). | |
+| `pick_song_mix` | `song` (null = no song) | `App.pick_song_mix` | Puts the song's saved faders, pan, mute and sends back. Fails with "Song mixes need the Holy Sound app." when `run_all` gets no `mixes`/`mix_control` (`Executor.need_mix_control`); same for the checkpoint actions. | |
 | `transport` | `playing` | `play` / `stop` | | audible when playing |
 | `set_color` | `track`, `color` | `set_track_color` | RGB from `TRACK_COLORS`. | |
 | `move_to_folder` | `track`, `folder` | `FolderMemory.move`, then `set_track_color` | Fails if `ex.folders is None`. Folder is app-side memory only; Live shows it as the folder's colour (colour failure is a partial "But"). Returns not allowed. | |
-| `import_audio` | `track`, `file`, `song`, `gain_db?` (-70..24) | `import_audio` | `file` must be an id from `Executor._files` (imported folders); resolved case-insensitively, never an arbitrary path. Needs an empty slot. | |
+| `import_part` | `part`, `files[]` (1-40), `song`, `gain_db?` (-70..24) | `create_audio_track` if the part track is missing (`Executor.part_track`), `mixdown.mix` if several files, `import_audio` | Replaces the old per-stem `import_audio` action, which is no longer proposable. Every `file` must be an id from `Executor._files` (imported folders); resolved case-insensitively, never an arbitrary path. Several files are mixed into one clip under `parts_dir`, keeping their balance and L/R sides, and the mix's scaling goes back as clip gain. Needs an empty slot in that song. | |
 | `set_clip_gain` | `track`, `song`, `db` | `set_clip_gain` | Clip gain, not the fader. | |
+| `set_clip_active` | `track`, `song`, `on` | `set_clip_active` | Leaves a part out of one song only (Live's clip activator), or brings it back. | |
+| `tidy_into_parts` | `assign[]` (up to 100 `{song?, track, part}`: parts for tracks whose names don't say, e.g. a singer's name; null song = every song) | many; see [part-tracks-and-imports.md](part-tracks-and-imports.md) | Rebuilds every song on the part tracks and deletes the per-stem tracks they replace. Takes a minute or two per song. | destructive |
 | `listen` | `song?`, `seconds` (3-30, default 10) | `get_song`, `fire_scene`, `reset_meters`, sleep, `get_meters`, `stop` | Fails if no song given and nothing is playing. Stops playback afterwards only if it started it. Sets `ex.detail` to a meter report (peak/average per track, Live's 0-1 meter scale, not dB). Blocks the apply request for the whole duration. | audible |
 
 ### Execution (`run_all`, `Executor`)
 
-- `run_all(live, actions, files, on_touch, folders, parts_dir, mixes, mix_control)` runs actions **in order, with no rollback**. A failed action yields `{"ok": False, "text": "<describe>: <reason>"}` and the rest continue.
-- `LiveUnavailable` (lost connection) aborts: that action and every remaining one are reported as failed ("not done — lost touch with Live.").
+- `run_all(live, actions, files, on_touch, folders, parts_dir, mixes, mix_control, on_step)` runs actions **in order, with no rollback**. A failed action yields `{"ok": False, "text": "<describe>: <reason>"}` and the rest continue.
+- `LiveUnavailable` (lost connection) aborts: that action and every remaining one are reported as failed ("not done. Lost touch with Ableton.").
 - Success results are `{"ok": True, "partial": " But " in text, "text": ..., "detail"?}`. A result containing " But " is partial success. `detail` carries extra facts for the model only (the `listen` meter report); `_tool_result` forwards it.
-- Bulk-import fader rule: if any action is `import_audio`, `ex.new_track_fader_db = starting_fader_db(max stems per song)`, so new audio tracks start low enough that all stems together don't clip, unless the model set `volume_db`.
+- `on_step(n, state)` reports progress: `"working"` as step `n` starts, then `"done"`, `"check"` (partial) or `"failed"`; when Live is lost, that step and all later ones are `"failed"`. `App.apply` uses it for `applying` in `/api/state`.
+- Bulk-import fader rule: if any action is `import_part`, `ex.new_track_fader_db = starting_fader_db(largest number of import_part steps for one song)`, so new part tracks start low enough that all parts together don't clip, unless the model set `volume_db`. `Executor.part_track` also gives a new part track its folder's colour and mutes it if it is timecode.
 - `Executor.call` wraps `RigLinkError` in `ActionFailed` using `_sentence`, which rewrites terse RigLink messages (`no input called ... (options: ...)`, `no stock device called`, `index out of range`) into sentences.
-- There is no undo. Safety comes from the approval step and the `destructive`/`audible` tags; `delete_track`'s message points to Cmd+Z in Live.
+- There is no undo. Safety comes from the approval step and the `destructive`/`audible` tags; `delete_track`'s message points to undo in Ableton.
 - `on_touch(name)` is called for each track an action works on so the page can highlight it (`App.touch`).
 - Names are matched loosely when there's no exact match (`_find_track`, `Executor.song`): case, `A-` return prefixes, "the"/"song", plurals, every word of the reference in one name ("the Glad song"), then `parts.part_for` ("lead vox" → Lead Vocal). Only a single match counts; otherwise the error lists the real names.
 - `by_db` on `set_volume` / `set_send` is resolved by `Executor.level_now`: that song's saved level for another song, the live level otherwise (off reads as -70), clamped to -70..+6. Exactly one of `db` / `by_db` (`_one_of`).
 
+### Wording
+
+Result and step sentences are for the volunteer, so they say "Ableton", not "Live", and avoid mixer jargon ("shared effect", not "return track"; "balance", not "pan").
+
+- **Fader and send levels** are shown as how far up the fader is, not dB. `_level(db)` interpolates `_FADER_LAW` (the page's fader travel: -70 dB is 0%, -40 is 16%, -30 is 28%, -20 is 42%, -10 is 60%, 0 dB is 80%, +6 is 100%) and returns e.g. `"68%"`, or `"off"` at -70 and below. `_level_text` does the same for Live's own display string (`"-4.0 dB"`, `"-inf dB"`) in `set_volume`/`set_send` results. Used by `add_track`, `set_volume`, `set_send` and their per-song variants.
+- **Relative changes stay in dB**: `by_db` steps read "Turn “Keys” down 3 dB", "2 dB more of “A-Reverb”".
+- **Clip gain stays in dB** (`_db`, e.g. `+2 dB`), in `import_part` and `set_clip_gain`.
+- **Pan** reads `centre` or `40% left` (`_pan`, -1..1 as a percentage).
+
 ### Export to `.als`
 
-`to_rigspec(actions)` converts only `AddTrack` actions to a `RigSpec` (see [file-renderer.md](file-renderer.md)) and returns notes for everything dropped: other actions ("only works with Live open"), stereo inputs, non-Master outputs, colours, and presets (default settings used). Returns `(None, notes)` if there are no tracks. `describe_proposal` sets `exportable` when any action is `add_track`.
+`to_rigspec(actions)` converts only `AddTrack` actions to a `RigSpec` (see [file-renderer.md](file-renderer.md)) and returns notes for everything dropped: other actions ("only works with Ableton open"), stereo inputs, non-Master outputs, colours, and presets (default settings used). Returns `(None, notes)` if there are no tracks. `describe_proposal` sets `exportable` when any action is `add_track`.
 
 ## Adding a new action
 
-1. **RigLink command** (if needed): implement in `ableton_script/RigLink/__init__.py`, add a client method in `live_control/live_connection.py` and optionally a `rig.py` command (see [riglink.md](riglink.md), [cli-and-live-control.md](cli-and-live-control.md)). Remember Live must be restarted after RigLink edits. Older-RigLink handling is the caller's job (`unknown cmd` surfaces through `_sentence` as "Live said: ...").
+1. **RigLink command** (if needed): implement in `ableton_script/RigLink/__init__.py`, add a client method in `live_control/live_connection.py` and optionally a `rig.py` command (see [riglink.md](riglink.md), [cli-and-live-control.md](cli-and-live-control.md)). Remember Live must be restarted after RigLink edits. Older-RigLink handling is the caller's job (`unknown cmd` surfaces through `_sentence` as "Ableton said: ...").
 2. **`app/actions.py`**: add a `BaseModel` with `action: Literal["your_action"]`, constrained fields with `Field(description=...)` (descriptions are the model's documentation), `describe()`, and `run(ex)` returning a sentence. Use `ex.track(...)`/`ex.song(...)` to resolve references, `ex.call(...)` for RigLink, raise `ActionFailed("sentence")` for failures. Set `destructive: ClassVar[bool] = True` or `audible: ClassVar[bool] = True` as appropriate.
 3. **Add the class to the `Action` Union.** The `Proposal` schema, discriminator and the tool schema all derive from it.
-4. **`SYSTEM` prompt** in `app/assistant.py`: add or amend a rule so the model knows when to use it, and remove any "you can't ..." rule it contradicts (rule 18 lists current limits). Rule 34 lists audible actions.
+4. **`SYSTEM` prompt** in `app/assistant.py`: add or amend a rule so the model knows when to use it, and remove any "you can't ..." rule it contradicts (rule 18 lists current limits; rules 21 to 24 cover imports). Rule 34 lists audible actions.
 5. **Session notes**: if the model needs to see new state to use the action well (like song transpose), extend `session_notes` / `_strip_line`, and the RigLink snapshot (`App.live.snapshot()` in `app/live.py`).
 6. **Fake Live**: add the command to `app/fake_live.py` so tests and `--fake-live` demo work.
-7. **Export**: if the action should appear in a `.als`, handle it in `to_rigspec` (and the renderer); otherwise it is reported as "only works with Live open" automatically.
+7. **Export**: if the action should appear in a `.als`, handle it in `to_rigspec` (and the renderer); otherwise it is reported as "only works with Ableton open" automatically.
 8. **Tests** in `tests/test_app.py` (pattern: `run_actions({...})` against fake Live, plus a `Proposal.model_validate` rejection case); see [testing-and-development.md](testing-and-development.md).
 9. **Docs**: `CHANGELOG.md`, and this table.
 
-No frontend change is needed for a normal action: the UI renders `describe_proposal` output (`text`, `destructive`, `audible`) generically. The mixer's direct-command allowlist in `app/server.py` (`transpose_song` appears there too) is separate from actions; it covers only controls the page calls without the assistant.
+No frontend change is needed for a normal action: the UI renders `describe_proposal` output (`id`, `status`, `results`, `steps` of `{text, destructive, audible}`, `exportable`) generically, and step progress comes from `applying`. Write `describe()` and `run()` sentences in the plain words above. The mixer's direct-command allowlist in `app/server.py` (`transpose_song` and `set_clip_active` appear there too) is separate from actions; it covers only controls the page calls without the assistant.
 
 ## Discrepancies
 

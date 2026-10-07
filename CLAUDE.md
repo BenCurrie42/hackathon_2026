@@ -18,7 +18,8 @@ no manual install steps, errors phrased as sentences.
 
 Product framing is in `README.md`. What's missing, ranked, is in
 `docs/td_next.md`. Module-by-module developer docs are in `docs/documentation/`
-(mirrored to the GitHub wiki); update the matching page when you change a module.
+(mirrored to the GitHub wiki by `scripts/publish_wiki.py`); update the matching page
+when you change a module, then republish. Edit the repo pages, never the wiki directly.
 
 ## Architecture
 
@@ -275,6 +276,8 @@ templates/test.reference.xml    Its decompressed XML, for diffing
 templates/probe_noinput.als     Live's own save of a generated set; source of
                                 truth for AudioIn/None
 docs/td_next.md                 What's missing, ranked by Sunday impact
+docs/agents_of_flourishing.md   What to add for the Gloo Challenge 1 judges, ranked
+scripts/publish_wiki.py         Copies docs/documentation into a wiki clone
 
 Run everything from the repo root: imports are package-relative to it
 (`from live_control.live_connection import ...`).

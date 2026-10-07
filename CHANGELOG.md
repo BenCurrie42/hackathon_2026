@@ -19,6 +19,8 @@ All notable changes are documented here.
 - **RigLink** — `set_clip_active`, `delete_clip`, `move_scene`, `create_scene` at an index; clip rows carry `active`.
 
 ### Changed
+- **New interface** — the page is redesigned as a console: neutral greys, scribble-strip name plates, Mute, Solo and a balance bar on every channel, and folders that fold. Tapping a channel opens a drawer below the mixer with its name, colour, sound, reverb and delay, effects and where it plays; with a song picked, the drawer also has that song's level and a Playing / Left out switch. The chat is a log, with the proposed changes docked above the message box; each step shows as working, done, partly done or failed while Apply runs (`applying` in `/api/state`, `run_all(on_step=)`). Songs read as a cue list, Room as a ledger. Fonts are bundled.
+- **Plain words** — results and proposals say how far up a fader is ("68%", "off") instead of dB, and "Ableton" instead of "Live"; clip gain and "turn it up 3 dB" stay in dB.
 - **Smaller models drive it reliably** — measured with `qwen3.8-flash` on 23 common requests against a demo set: 61/69 passing before, 69/69 after. The system prompt opens with a short map from requests to actions; every action has a one-line description in the tool schema; the session notes spell out each song's whole mix (`MIXER IS ON THIS SONG`, `PLAYING`, per-track fader, OFF, MUTED, sends, checkpoints) instead of differences; the volunteer's message is labelled after the notes.
 - **Relative levels** — `set_volume` and `set_send` take `by_db` ("down 3"), resolved from that song's own level, so the model never does the arithmetic.
 - **Promises without a proposal** — a reply that says it's making a change but proposes nothing (or is empty) is sent back once to the model.
@@ -36,7 +38,8 @@ All notable changes are documented here.
 - **Test discovery** — `uv run python -m unittest` now finds the suite (it ran 0 tests before), and the renderer has tests of its own (`tests/test_write_als.py`).
 
 ### Changed
-- **Developer documentation** in `docs/documentation/`.
+- **Developer documentation** in `docs/documentation/`, now the source of the GitHub wiki (`scripts/publish_wiki.py`), including the user pages (getting started, weekly workflow, troubleshooting).
+- **Planning** — `docs/agents_of_flourishing.md`: what to add for the Gloo Agents of Flourishing judges, ranked.
 
 ## [1.0.0] — 2026-10-06
 

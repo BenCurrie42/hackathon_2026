@@ -2,7 +2,7 @@
 
 The web app is a stdlib `http.server` process (`app/server.py`) that serves static files from `app/static/`, exposes a small JSON API over Live and the assistant conversation, and streams assistant replies over server-sent events. Live access goes through one shared, self-healing RigLink connection (`app/live.py`); `app/fake_live.py` stands in for Live when there is none.
 
-Related pages: [architecture.md](architecture.md), [riglink.md](riglink.md), [cli-and-live-control.md](cli-and-live-control.md), [assistant-and-actions.md](assistant-and-actions.md), [file-renderer.md](file-renderer.md), [frontend.md](frontend.md), [testing-and-development.md](testing-and-development.md).
+Related pages: [architecture.md](architecture.md), [riglink.md](riglink.md), [cli-and-live-control.md](cli-and-live-control.md), [assistant-and-actions.md](assistant-and-actions.md), [part-tracks-and-imports.md](part-tracks-and-imports.md), [file-renderer.md](file-renderer.md), [frontend.md](frontend.md), [testing-and-development.md](testing-and-development.md).
 
 ## Starting it
 
@@ -28,7 +28,7 @@ Environment: `load_dotenv()` reads `.env` from the repo root with `os.environ.se
 | Variable | Used by |
 | --- | --- |
 | `ANTHROPIC_API_KEY`, `HOLYSOUND_MODEL`, `HOLYSOUND_EFFORT`, `HOLYSOUND_PROVIDER`, `OPENCODE_API_KEY`, `HOLYSOUND_BASE_URL` | `app/providers.py` (see [assistant-and-actions.md](assistant-and-actions.md) and `.env.example`) |
-| `HOLYSOUND_HOME` | Directory for `room.json`, `folders.json`; `imports.json` sits next to `room.json`. Default `~/.holysound`. |
+| `HOLYSOUND_HOME` | Directory for `room.json`, `folders.json`, `song_mixes.json`; `imports.json` sits next to `room.json`. Default `~/.holysound`. Mixed parts go to `$HOLYSOUND_HOME/Parts` (default `~/Music/Holy Sound/Parts`). |
 
 The server is `ThreadingHTTPServer` with `daemon_threads = True`. Real Live is always expected at `127.0.0.1:9877` (`LiveLink` defaults); only `--fake-live` changes the port. There is no flag to point at a different Live host.
 
@@ -40,15 +40,16 @@ flowchart LR
   H --> A[App]
   A --> L[LiveLink app/live.py]
   A --> C[Conversation app/assistant.py]
-  A --> F[FolderMemory / RoomMemory]
+  A --> F[FolderMemory / RoomMemory / SongMixMemory]
   L -->|newline JSON, localhost:9877| R[RigLink in Live, or fake_live]
   A -->|export| W[to_rigspec + render]
 ```
 
 - `App` holds all state and logic; `make_handler(app)` returns a `BaseHTTPRequestHandler` subclass closed over it. Handlers contain routing only.
-- `App.state()` is the single payload most endpoints return. Keys: `live` (`connected`, `snapshot`, `message`), `ai` (`ready`, `message`), `chat` (transcript, proposals expanded via `describe_proposal`), `busy`, `usage`, `colors`, `folders`, `room`, `activity`, `demo`.
+- `App.state()` is the single payload most endpoints return. Keys: `live` (`connected`, `snapshot`, `message`), `ai` (`ready`, `message`), `chat` (transcript, proposals expanded via `describe_proposal`), `busy`, `usage`, `colors`, `folders`, `room`, `activity`, `demo`, `song_mix` (see [Song mixes](#song-mixes)), `applying` (see [Apply progress](#apply-progress)).
 - `activity` lists tracks the assistant touched in the last `AI_GLOW_SECONDS` (3 s); `App.touch` is passed to `run_all` as `on_touch`.
-- Snapshot tracks get a `folder` field added by `App.with_folders` (see [audio-analysis-and-memory.md](audio-analysis-and-memory.md)).
+- Snapshot tracks get a `folder` field and a `keeps_key` field (true if a song transpose leaves the track alone) added by `App.with_folders` (see [audio-analysis-and-memory.md](audio-analysis-and-memory.md)).
+- `App` takes a `parts_dir` (where mixed parts are written; `None` means the default above) and passes it to `run_all`. Imported folders are remembered in `imports.json` (folder name to file count, and file id to path, saved as strings) and loaded at start.
 
 ## Access control
 
@@ -88,25 +89,30 @@ All bodies are JSON objects (`{}` is assumed when empty).
 | Path | Request body | Response | Errors |
 | --- | --- | --- | --- |
 | `/api/chat` | `{"message": str}` | `App.state()` after the assistant finishes (the call blocks for the whole turn) | 400 empty message; 400 if `chat.busy`; 503 `AssistantUnavailable` (no API key etc.) |
-| `/api/import` | `{"folder": str, "note"?: str}` | `App.state()` | 400 empty folder / no audio found / unreadable folder / busy; 503 as above |
+| `/api/import` | `{"folder": str, "note"?: str}` | `App.state()` | 400 empty folder / no audio found / unreadable folder / busy; 503 as above. Sends the assistant the measurements plus `<parts>`, `<song_keys>` and, if matched, a `<vendor_set>` block (`App.import_folder`, `song_keys`, `vendor_song`). |
 | `/api/room` | `{"add"?: str, "remove"?: int}` | `App.state()` | 400 if memory unavailable |
 | `/api/track-folder` | `{"track": str, "folder": str\|null}` | `App.state()` | 400 missing track or invalid folder |
+| `/api/track-key` | `{"track": str, "follows": bool}` | `App.state()` | 400 "Say which track." if `track` is empty. Saves whether a song transpose moves this track (`FolderMemory.set_follows_key`). |
 | `/api/song-mix` | `{"action": "pick", "scene_index": int\|null}`, `{"action": "checkpoint", "label"?: str}`, `{"action": "restore"\|"delete", "id": str}` | `App.state()` | 400 unnamed song, no song picked, checkpoint gone |
 | `/api/reset` | `{}` | `App.state()` after `chat.reset()` | none |
-| `/api/proposals/<id>/apply` | `{}` | `App.state()` | 400 if proposal missing or not pending; 503 if Live unreachable |
+| `/api/proposals/<id>/apply` | `{}` | `App.state()` after every step has run (the call blocks; see [Apply progress](#apply-progress)) | 400 if proposal missing or not pending; 503 if Live unreachable |
 | `/api/proposals/<id>/dismiss` | `{}` | `App.state()` | 400 as above |
 | `/api/live` | `{"cmd": str, "args"?: object}` | `{"result": <RigLink result>, "live": <live_state>}` | 400 `The app can't do that from here.` if `cmd` is not in `DIRECT_COMMANDS`; 400 on bad args or RigLink error; 503 Live unreachable |
 | anything else | n/a | n/a | 404 `Not found.` |
 
-`/api/live` is the mixer's direct line, bypassing the assistant. Whitelist (`DIRECT_COMMANDS`): `set_volume`, `set_pan`, `set_mute`, `set_solo`, `set_send`, `set_tempo`, `play`, `stop`, `fire_scene`, `load_device`, `delete_device`, `set_track_name`, `create_scene`, `set_scene`, `set_routing`, `create_audio_track`, `create_midi_track`, `create_return_track`, `get_routing`, `set_track_color`, `set_clip_gain`, `transpose_song`. `args` are splatted as keyword arguments into `LiveLink.call`, so a wrong argument name surfaces as a `TypeError` and a 400 ("The page asked Live for something it didn't understand"). `set_track_name` also renames the track in `FolderMemory` so a manual folder move follows the track. `set_scene` with a name renames the song in `SongMixMemory`; `fire_scene` on a named song puts the mixer on that song's mix.
+`/api/live` is the mixer's direct line, bypassing the assistant. Whitelist (`DIRECT_COMMANDS`): `set_volume`, `set_pan`, `set_mute`, `set_solo`, `set_send`, `set_tempo`, `play`, `stop`, `fire_scene`, `load_device`, `delete_device`, `set_track_name`, `create_scene`, `set_scene`, `set_routing`, `create_audio_track`, `create_midi_track`, `create_return_track`, `get_routing`, `set_track_color`, `set_clip_gain`, `set_clip_active`, `transpose_song`. For `transpose_song` the server fills in `skip_tracks` itself from `FolderMemory.kept_tracks`, so click, guide and any track opted out keep their key. `args` are splatted as keyword arguments into `LiveLink.call`, so a wrong argument name surfaces as a `TypeError` and a 400 ("The page asked Ableton for something it didn't understand"). `set_track_name` also renames the track in `FolderMemory` so a manual folder move follows the track. `set_scene` with a name renames the song in `SongMixMemory`; `fire_scene` on a named song puts the mixer on that song's mix.
 
 ### Song mixes
 
 `App.state()` carries `song_mix`: `{song, scene_index, saved_at, checkpoints: [{id, label, at}]}`. `pick_song_mix` puts a song's saved faders, pan, mute and sends back through RigLink (only what differs, matched by track and return name), or saves the current mixer as the song's first mix. Every `live_state()` then runs `follow_mix`: if Live started a different song (the scene with the most playing clips), its mix goes on; otherwise the current mixer is saved to the picked song when it changed. Saving waits `MIX_SETTLE_SECONDS` after a put-back so a half-applied mix isn't saved. Restoring a checkpoint first checkpoints the mix it replaces. Solo and the Master fader aren't kept. `apply` passes the memory and the `App` itself (`mix_control`) to `run_all`, so the assistant's mixer actions with a `song` other than the current one edit that song's saved mix (`SongMixMemory.edit`) instead of Live, and `pick_song_mix`, `save_checkpoint` and `restore_checkpoint` are actions. `App.notes` passes every saved mix and its checkpoints to `session_notes`, which spells out each song's whole mix.
 
+### Apply progress
+
+`App.apply` sets `App.progress = {"id": pid, "states": [...]}`, one state per step, all starting `"waiting"`, and passes `run_all` an `on_step(n, state)` callback that updates them: `"working"` as a step starts, then `"done"`, `"check"` (it partly worked; the result has a " But ") or `"failed"`. If Live goes away mid-batch, that step and every one after it become `"failed"`. `App.applying()` copies this into `/api/state` as `applying: {"id", "states"}`, or `null` when nothing is running; `progress` is cleared in a `finally`, so it never outlives the call. The apply POST itself blocks until the batch ends, so the page reads progress by polling `/api/state` on another request (the server is threaded).
+
 Apply is serialised by `App._apply_lock` (a laptop and a phone can both press Apply). After a proposal containing a `Listen` action, `App.apply` calls `chat.follow_up(self.notes())` so the assistant reads the measurements.
 
-RigLink errors on POST are rephrased by `app.actions._sentence`. Any other exception, in GET or POST, is logged with its traceback and answered with a 500 `{"error": "Something went wrong inside Holy Sound. ..."}` (`_unexpected`); a dropped browser connection (`ConnectionError`) is re-raised, not answered.
+RigLink errors on POST are rephrased by `app.actions._sentence` ("Ableton has no input type called ...", "Ableton said: ..."); on GET they read "Ableton couldn't do that: ...". Any other exception, in GET or POST, is logged with its traceback and answered with a 500 `{"error": "Something went wrong inside Holy Sound. ..."}` (`_unexpected`); a dropped browser connection (`ConnectionError`) is re-raised, not answered.
 
 ### Examples
 
@@ -143,7 +149,7 @@ POST /api/chat {"message": ""}   -> 400 {"error": "Type a message first."}
 
 ## Static files
 
-`Handler._static` resolves the path under `app/static/` and requires the resolved target to be a file inside that directory (blocks `..` traversal; `STATIC not in target.parents` gives 404). MIME comes from `mimetypes`, `charset=utf-8` is appended for `text/*` and JavaScript, and `Cache-Control: no-cache` forces revalidation so edits show on reload. No build step. Page internals are in [frontend.md](frontend.md).
+`Handler._static` resolves the path under `app/static/` and requires the resolved target to be a file inside that directory (blocks `..` traversal; `STATIC not in target.parents` gives 404). MIME comes from `mimetypes`, `charset=utf-8` is appended for `text/*` and JavaScript, and `Cache-Control: no-cache` forces revalidation so edits show on reload. The exception is the vendored fonts in `app/static/fonts/`: `.woff2` is always served as `font/woff2` (the OS's MIME table varies) with `Cache-Control: public, max-age=86400`. No build step. Page internals are in [frontend.md](frontend.md).
 
 ## Shared RigLink connection (`app/live.py`)
 
@@ -187,7 +193,7 @@ An in-memory Live Set speaking RigLink's newline-delimited JSON protocol on a TC
 - `serve(host, port, latency=0.05)` runs a `ThreadingTCPServer` on a daemon thread and returns `(server, fake_set)`. `port=0` picks a free port (read `server.server_address[1]`). `latency` sleeps before each reply to imitate Live answering from `update_display` at about 10 Hz. Tests pass `latency=0`.
 - `python -m app.fake_live` runs it standalone on `127.0.0.1:9877`, so `rig.py` or a normally started app can talk to it.
 
-Simulated: tracks (audio, MIDI, returns, with default A-Reverb and B-Delay returns), mixer (dB volume clamped to -70..+6, pan, mute, solo, sends), routing options (Ext. In, Master, Ext. Out etc.), stock devices and a few presets (`load_device` sleeps 0.3 s), scenes with tempo, locators, `import_audio` (reads the real file via `app.audio_files.measure`, so imports need real WAV/AIFF), `set_clip_gain`, `transpose_song`, `song_files`, fake meters (random jitter around a level derived from clip loudness, gain and fader), `get_snapshot`, play/stop/fire_scene.
+Simulated: tracks (audio, MIDI, returns, with default A-Reverb and B-Delay returns), mixer (dB volume clamped to -70..+6, pan, mute, solo, sends), routing options (Ext. In, Master, Ext. Out etc.), stock devices and a few presets (`load_device` sleeps 0.3 s), scenes with tempo, locators, `import_audio` (reads the real file via `app.audio_files.measure`, so imports need real WAV/AIFF), `set_clip_gain`, `set_clip_active`, `delete_clip`, `move_scene`, `create_scene` at an index, `transpose_song` (with `skip_tracks`), `song_files`, fake meters (random jitter around a level derived from clip loudness, gain and fader), `get_snapshot`, play/stop/fire_scene.
 
 Used by: `--fake-live` (demo mode), and `tests/test_app.py` (`FakeLiveCase` and others start `serve(port=0, latency=0)` per test). See [testing-and-development.md](testing-and-development.md).
 
@@ -197,7 +203,7 @@ Fidelity gaps (the module says it is "not a model of Live's behaviour"; do not r
 - Volume is stored as dB directly, with no fader law or binary search.
 - Meters are random, with no first-play bogus readings like real Live.
 - Device list is a fixed small set; real Live exposes the full browser and rack internals. Presets are a handful per device. Compressor/Reverb etc. do nothing.
-- `transpose_song` only stores a number; it does not model whether pitch changes speed (an open question in CLAUDE.md).
+- `transpose_song` only stores a number per clip (0 for skipped tracks); it does not model warping or speed. New audio tracks have No Input, as RigLink makes them.
 - `import_audio` ignores warping/start-marker quirks; `delete_scene` and clip slots are simplified. There is no arrangement view; locators are a plain list.
 - `get_snapshot` always exists, so the "older RigLink" fallback in `LiveLink` is never hit against the fake in demo mode.
 - Nothing is persisted; state resets when the process ends.

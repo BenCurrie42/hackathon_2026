@@ -26,26 +26,31 @@ uv run python -m unittest tests.test_app.ServerTest                # one class
 uv run python -m unittest tests.test_app.RoomMemoryTest.test_xxx   # one test
 ```
 
-Result: **`Ran 105 tests in ~25s, OK`** (65 in `test_app.py`, 24 in `test_providers.py`, 16 in `test_write_als.py`). `tests/__init__.py` makes the folder discoverable; before 1.1.0 bare discovery silently ran 0 tests.
+Result: **`Ran 143 tests in ~40s, OK`** (103 in `test_app.py`, 24 in `test_providers.py`, 16 in `test_write_als.py`). `tests/__init__.py` makes the folder discoverable; before 1.1.0 bare discovery silently ran 0 tests.
 
-`tests/test_write_als.py` renders a click/pad/guide/keys spec against `templates/test.als` and checks formatting, the header, track order, input routing, gain, send holders, the pointee pool, `Track.N` references, and that the template is untouched. Its `DeviceTest` reads Live's `.adv` presets and skips when Live isn't installed. RigLink itself has no tests (see [riglink.md](riglink.md)).
+`tests/test_write_als.py` renders a click/pad/guide/keys spec against `templates/test.als` and checks formatting, the header, track order, input routing, gain, send holders, the pointee pool, `Track.N` references, and that the template is untouched. Its `DeviceTest` reads Live's `.adv` presets and skips when Live isn't installed. RigLink itself has no tests (see [riglink.md](riglink.md)); the fake Live stands in for it.
 
 ## What the tests cover
 
-`tests/test_app.py` (65 tests):
+`tests/test_app.py` (103 tests):
 
 | Class | Tests | Covers |
 | --- | --- | --- |
-| `ActionsTest` | 10 | Each proposable action running through `app/actions.py` against the fake Live; `run_all` |
+| `ActionsTest` | 13 | Each proposable action running through `app/actions.py` against the fake Live; `run_all`, including the `on_step` working/done/check/failed states |
 | `SnapshotTest` | 2 | The mixer/song snapshot read from Live |
-| `ConversationTest` | 9 | `app/assistant.py:Conversation` with `ScriptedClaude`: tool loop, streaming, thinking, request shape, `session_notes` |
-| `ServerTest` | 13 | Real `ThreadingHTTPServer` on an ephemeral port: JSON API, events, apply flow, 500 on an unexpected error |
+| `ConversationTest` | 11 | `app/assistant.py:Conversation` with `ScriptedClaude`: tool loop, streaming, thinking, request shape, `session_notes` |
+| `ServerTest` | 14 | Real `ThreadingHTTPServer` on an ephemeral port: JSON API, events, apply flow and its `applying` progress in `/api/state`, 500 on an unexpected error |
 | `ListenToStemsTest` | 5 | `app/song_map.py` on synthetic WAV stems |
 | `StartingFaderTest` | 1 | `live_control/starting_fader.py` |
 | `TimecodeTest` | 1 | `live_control/timecode.py` |
 | `AudioFilesTest` | 4 | `app/audio_files.py` folder browsing and WAV/AIFF levels |
-| `AudioActionsTest` | 5 | Import/audio actions against the fake Live |
-| `ImportServerTest` | 2 | Import endpoints on the real server |
+| `AudioActionsTest` | 7 | `import_part` and other audio actions against the fake Live |
+| `ImportServerTest` | 3 | Import endpoints on the real server |
+| `PartsTest` | 2 | `app/parts.py` grouping of stems into part tracks |
+| `SongKeyTest` | 4 | `app/song_key.py` key guess on synthetic stems |
+| `VendorSetTest` | 4 | `app/vendor_set.py` reading a vendor set (including the Live 8 layout) |
+| `TrackLayoutGuardTest` | 3 | The track layout rules (no track per stem, No Input, part tracks) hold in `import_part`, `song import` and `tidy_into_parts` |
+| `SongMixTest` | 16 | `app/song_mixes.py` and the server's song mixes: put back on pick or song start, only differences sent, survives restart and renames, checkpoints and undo, assistant actions for another song, `by_db` from a song's own level, loose names, notes |
 | `FolderTest` | 3 | `app/folders.py` classification and remembered moves |
 | `RoomMemoryTest` | 4 | `app/room.py` persistence |
 | `ProposalLimitTest` | 1 | `Proposal` size limit (pydantic `ValidationError`) |
@@ -84,7 +89,7 @@ Result: **`Ran 105 tests in ~25s, OK`** (65 in `test_app.py`, 24 in `test_provid
 1. Regenerate and reopen: `open -a "Ableton Live 12 Trial" out.als` (`out/` is gitignored).
 2. **Never generate over a set that is currently open.** Live reads the `.als` once and holds it in memory; the rewrite does nothing and is clobbered on Live's next save.
 3. **RigLink edits need a Live restart.** Live imports `ableton_script/RigLink` once at startup. Symptom of stale code: `unknown cmd`. Edits to `rig.py`, `live_control/` and `app/` need no restart.
-4. RigLink install: symlink `ableton_script/RigLink` into `~/Music/Ableton/User Library/Remote Scripts/`, select it under Preferences > Link/MIDI. Socket `localhost:9877`.
+4. RigLink install: symlink `ableton_script/RigLink` into `~/Music/Ableton/User Library/Remote Scripts/`, select it under Preferences > Link/MIDI. Socket `localhost:9877`. Step by step in [getting-started.md](getting-started.md); symptoms in [troubleshooting.md](troubleshooting.md).
 5. No Live handy: `uv run python -m app --fake-live`.
 
 ## Probe-and-diff loop for `.als` facts
@@ -96,7 +101,7 @@ Live is the source of truth; do not infer format facts from training data.
 3. Diff Live's save against ours (`templates/test.reference.xml` is the decompressed reference for diffing); the difference is the answer.
 4. Keep the saved probe in `templates/` as a fixture (e.g. `probe_noinput.als`, which established `AudioIn/None`). Fixtures are `chmod a-w`; never mutate `templates/`.
 
-Add only verified facts to the "Verified facts" list in `CLAUDE.md`. See [file-renderer.md](file-renderer.md).
+Add only verified facts to the "Verified facts" list in `CLAUDE.md`. See [file-renderer.md](file-renderer.md) and [ableton-format-notes.md](ableton-format-notes.md).
 
 ## Release process
 
@@ -113,10 +118,10 @@ There is no release script. The repo has a `release-docs` skill for this, and th
 - Docstring at the top of each module saying what it is and why (including the dependency constraints, e.g. the unittest rationale).
 - Intent-only actions: the model never emits device parameters; the renderer or RigLink translates (`app/actions.py`, `file_builder/rig_spec.py`).
 - Pydantic models are the contract at boundaries (`RigSpec`, `Proposal`); invalid states rejected by validation rather than policed later.
-- Errors are phrased as plain sentences for a non-technical volunteer (for example the setup messages in `app/providers.py`, `AssistantSetupError`, `AssistantUnavailable`).
+- Errors are phrased as plain sentences for a non-technical volunteer (for example the setup messages in `app/providers.py`, `AssistantSetupError`, `AssistantUnavailable`). User-facing text says "Ableton", not "Live", and fader levels are percentages ("68%", "off"), not dB; see [assistant-and-actions.md](assistant-and-actions.md#wording). Code comments and docs still say Live.
 - Stdlib first: `http.server`, `urllib`, `wave`, `unittest`; `.env` is parsed by hand.
 - Tests drive real client and server code against fakes at the socket/HTTP boundary rather than mocking internal functions.
-- Persistent user state lives under `~/.holysound/` (`room.json`, `folders.json`, `imports.json`, `song_mixes.json`); overridable with `HOLYSOUND_HOME`. `tests/test_app.py` points `HOLYSOUND_HOME` at a scratch folder for the whole run (`setUpModule`), so tests never read or write your real memory.
+- Persistent user state lives under `~/.holysound/` (`room.json`, `folders.json`, `imports.json`, `song_mixes.json`); overridable with `HOLYSOUND_HOME`. Mixed parts go under `~/Music/Holy Sound/Parts` (or `$HOLYSOUND_HOME/Parts`). `tests/test_app.py` points `HOLYSOUND_HOME` at a scratch folder for the whole run (`setUpModule`), so tests never read or write your real memory.
 - Env config: `ANTHROPIC_API_KEY`, `HOLYSOUND_PROVIDER` (`anthropic` | `opencode-go`), `HOLYSOUND_MODEL`, `HOLYSOUND_EFFORT`, `HOLYSOUND_BASE_URL`.
 
 ## Where to start
@@ -130,4 +135,4 @@ Ranked by Sunday impact from `docs/td_next.md`:
 5. **Song-to-song transitions**: blocked on asking the church whether the setlist is scenes or locators.
 6. MIDI mapping, clip editing (warping, loops), group tracks, renderer gaps (hardware output routing needs one probe).
 
-Cheap first contributions: a renderer test for a new format fact, or a unittest for RigLink-facing behavior in `app/fake_live.py`. Related pages: [assistant-and-actions.md](assistant-and-actions.md), [web-server-api.md](web-server-api.md), [audio-analysis-and-memory.md](audio-analysis-and-memory.md), [frontend.md](frontend.md).
+Cheap first contributions: a renderer test for a new format fact, or a unittest for RigLink-facing behavior in `app/fake_live.py`. Related pages: [assistant-and-actions.md](assistant-and-actions.md), [web-server-api.md](web-server-api.md), [audio-analysis-and-memory.md](audio-analysis-and-memory.md), [part-tracks-and-imports.md](part-tracks-and-imports.md), [frontend.md](frontend.md).

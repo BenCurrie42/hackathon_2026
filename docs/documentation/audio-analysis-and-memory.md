@@ -1,6 +1,6 @@
 # Audio analysis and memory
 
-Four stdlib-only modules in `app/` give the assistant ears and a memory: `audio_files.py` (browse folders, parse WAV/AIFF, measure levels), `song_map.py` (turn a song's stems into a text report), `room.py` (remembered room facts) and `folders.py` (mixer folder classification and remembered moves). The assistant cannot hear, so everything here converts audio or state into text or numbers it can read. See [assistant-and-actions.md](assistant-and-actions.md) for how the output is used and [web-server-api.md](web-server-api.md) for the endpoints.
+Four stdlib-only modules in `app/` give the assistant ears and a memory: `audio_files.py` (browse folders, parse WAV/AIFF, measure levels), `song_map.py` (turn a song's stems into a text report), `room.py` (remembered room facts) and `folders.py` (mixer folder classification, remembered moves, and which tracks keep their key on transpose). Four more analyse a song at import time (`song_key.py`, `vendor_set.py`) or build its part tracks (`parts.py`, `mixdown.py`); they are covered in [Part tracks, imports, key and transpose](part-tracks-and-imports.md). Per-song mixes and checkpoints (`song_mixes.py`) are covered in [Web server API](web-server-api.md). The assistant cannot hear, so everything here converts audio or state into text or numbers it can read. See [Assistant and actions](assistant-and-actions.md) for how the output is used and [Web server API](web-server-api.md) for the endpoints.
 
 ```mermaid
 flowchart LR
@@ -9,7 +9,7 @@ flowchart LR
   A -->|listen tool| song_map.listen --> envelope & onsets
   A -->|remember tool| RoomMemory
   UI -->|/api/room| RoomMemory
-  UI -->|/api/track-folder| FolderMemory
+  UI -->|/api/track-folder, /api/track-key| FolderMemory
 ```
 
 ## `app/audio_files.py`
@@ -76,7 +76,7 @@ Silent files print `SILENT (nothing above -60 dBFS)`; files with peak >= -0.1 dB
    - if more than `MAX_SECTIONS = 30` remain, the shortest (not the first) is repeatedly merged into its predecessor;
    - sections with nobody playing are omitted.
    Each section is described by which parts came `in:` and went `out:` relative to the previous section.
-5. **Tempo** (`_tempo`): from the click's `onsets`; needs at least 8 onsets and 4 gaps between 0.2 s and 2.0 s (30 to 300 BPM); BPM is `60 / median(gap)` rounded to 0.1. If the BPM is above 140 the report adds an "or half" hint for eighth-note clicks. Only the first stem whose *name* matches `CLICK` and has a tempo is used (note `_study` tests `path.stem`, the report tests the display name).
+5. **Tempo** (`_tempo`): from the click's `onsets`; needs at least 8 onsets and 4 gaps between 0.2 s and 2.0 s (30 to 300 BPM). Onsets are timed to the nearest 10 ms, so one gap can read 0.21 or 0.22 s when it is really 0.216. The median gap finds the beat, then the gaps within 15% of it are averaged to cancel the rounding (the median alone read a 139 BPM click as 136). BPM is `60 / mean(those gaps)` rounded to 0.1. If the BPM is above 140 the report adds an "or half" hint for eighth-note clicks. Only the first stem whose *name* matches `CLICK` and has a tempo is used (note `_study` tests `path.stem`, the report tests the display name).
 6. **Lead vocal** (`_likely_lead`): voices are musical parts that do not match `INSTRUMENT` (`_is_voice`), so a stem named after a person counts as a voice. Each voice's total sounding time is summed. The lead is the voice with the most sounding time among those not matching `BACKING`; if all are backing, the top one. Voices whose names match no `VOCAL` word are reported as "taken to be a singer from the name alone". It is a heuristic: most-sung, not verified.
 
 ### Output shape
@@ -154,18 +154,21 @@ Order matters: "Backing Track" hits playback before the `vocals` pattern could. 
 `FolderMemory` persists manual moves by track name in `$HOLYSOUND_HOME/folders.json` (default `~/.holysound/folders.json`):
 
 ```json
-{"moved": {"lead vox": "vocals", "tracks 1": "playback"}}
+{"moved": {"lead vox": "vocals", "tracks 1": "playback"}, "follows_key": {"pad": true}}
 ```
 
-Keys are `casefold()`ed track names; values must be one of the four family keys (others are dropped on load).
+Keys are `casefold()`ed track names; values in `moved` must be one of the four family keys (others are dropped on load). `follows_key` holds a per-track choice, set by hand, about whether a song transpose moves the track (`true`) or leaves it alone (`false`); non-boolean values are dropped on load.
 
 | Method | Behaviour |
 | --- | --- |
 | `folder_for(name)` | Remembered move if any, else `classify(name)`. Used by `server.with_folders` to add `folder` to every track in each snapshot. |
 | `move(name, folder)` | Sets the override; `folder=None` removes it (back to name-based). Unknown key raises `ValueError` ("There's no folder called ..."). Writes immediately. |
-| `rename(old, new)` | Carries a move from the old name to the new. Called when a rename action runs (`actions.py`) and from the server's rename route. Writes only if a move existed. |
+| `rename(old, new)` | Carries a move and a key choice from the old name to the new. Called when a rename action runs (`actions.py`) and from the server's rename route. Writes only if either existed. |
+| `keeps_key(name)` | True if a song transpose leaves this track alone. A hand-set choice wins; otherwise names matching click, guide, cue, count, SMPTE, timecode, LTC or metronome keep their key. |
+| `set_follows_key(name, follows)` | Records the hand-set choice. Writes immediately. |
+| `kept_tracks(tracks)` | Indexes of the rows (`index`, `name`) a transpose leaves alone; passed to RigLink as `skip_tracks`. |
 
-Endpoint: `POST /api/track-folder` with `{track, folder}`; `move_to_folder` is also an assistant action. Because moves are keyed by name, they apply to next week's set when the track names match. Same atomic-write and lock pattern as `RoomMemory`.
+Endpoints: `POST /api/track-folder` with `{track, folder}` (`move_to_folder` is also an assistant action) and `POST /api/track-key` with `{track, follows}`. Because moves are keyed by name, they apply to next week's set when the track names match. Same atomic-write and lock pattern as `RoomMemory`.
 
 ## Comparing the three loudness measures
 
@@ -192,4 +195,5 @@ Consequences:
 
 - CLAUDE.md says `app/audio_files.py` measures "90th percentile of 0.4 s windows" and `stem_level` "active RMS". Both true, but the silence floors differ (-60 vs -50 dBFS), which CLAUDE.md does not mention.
 - CLAUDE.md describes `stem_level.py` as only driving `song import`; `fake_live.py` and the assistant use `audio_files` instead, so the app never uses `stem_level`.
-- `HOLYSOUND_HOME` (used by `room.py` and `folders.py`) is not in CLAUDE.md, which mentions only `~/.holysound/room.json`.
+- `HOLYSOUND_HOME` (used by `room.py`, `folders.py`, `song_mixes.py`, `imports.json` and the Parts folder) is not in CLAUDE.md, which names the `~/.holysound/` files (`room.json`, `folders.json`, `song_mixes.json`) but not the override.
+- `app/mixdown.py` and `app/song_key.py` read audio through `audio_files` too, so they follow its WAV/AIFF support; `live_control/stem_level.py` is still the separate measure `rig.py song import` uses for clip gain.

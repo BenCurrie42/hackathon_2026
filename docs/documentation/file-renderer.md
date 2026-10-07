@@ -1,6 +1,6 @@
 # File renderer
 
-`file_builder/` turns a `RigSpec` into the bytes of a `.als` file with Live closed. `rig_spec.py` is the contract (44 lines); `write_als.py` is the renderer (about 250 lines). Part of the system described in [architecture.md](architecture.md).
+`file_builder/` turns a `RigSpec` into the bytes of a `.als` file with Live closed. `rig_spec.py` is the contract (44 lines); `write_als.py` is the renderer (about 265 lines). Part of the system described in [architecture.md](architecture.md). The verified format facts behind it are mapped in [ableton-format-notes.md](ableton-format-notes.md).
 
 ## RigSpec and TrackSpec
 
@@ -74,7 +74,7 @@ Step notes (all in `_Renderer`):
 
 `add_device`: gunzip the `.adv`, take its single child other than `OverwriteProtectionNumber` (error if not exactly one), `renumber` it, set `Id`, append to `DeviceChain/DeviceChain/Devices`. `.adv` element names are internal (`Compressor2`, `Eq8`), but lookup is by display/folder name, so the mapping never needs to be written down.
 
-If Live is not installed, `LookupError` propagates; `Server.export` in `app/server.py` converts it into a user-facing sentence. Only audio effects are supported (folder is `Audio Effects`).
+If Live is not installed, `LookupError` propagates; `App.export` in `app/server.py` converts it into a user-facing sentence. Only audio effects are supported (folder is `Audio Effects`).
 
 ## Routing
 
@@ -110,7 +110,7 @@ These match Ableton's own output out of caution, not proven necessity.
 | 2 | `NextPointeeId` > every pool ID | `next_pointee` increments in `renumber`; checked in `check_pointee_pool`; written in `finish` |
 | 3 | One `TrackSendHolder` per return, Ids `0..N-1` | `check_sends` per track; template returns are kept so `return_count` stays valid |
 | 4 | Track IDs global, device IDs context-scoped | `next_track_id` (max+1); `add_device` uses `len(Devices)+1` |
-| 5 | Routing targets embed track IDs `TRACK_REF.sub(remap, ...)` over `DeviceChain` `Target` values in `add_track`: donor → clone, returns kept, anything else refused |
+| 5 | Routing targets embed track IDs | `TRACK_REF.sub(remap, ...)` over `DeviceChain` `Target` values in `add_track`: donor → clone, returns kept, anything else refused |
 | 6 | Never synthesize the `<Ableton ...>` header | Not enforced by a check: the template root is parsed and re-serialized, never constructed |
 | 7 | `LomId` stays `0` | Nothing touches it; cloned values pass through |
 
@@ -133,7 +133,7 @@ Live is the source of truth, not training data:
 1. Generate a set containing the thing you are unsure of.
 2. Open it in Live, change that one thing by hand, save.
 3. Diff Live's save against yours; the difference is the answer.
-4. Keep the probe in `templates/`.
+4. Keep the probe in `templates/` and add the fact to [CLAUDE.md](../../CLAUDE.md).
 
 Known gaps: hardware output routing (only `AudioOut/Main` known), stereo input pairs, which of `EffectiveName`/`UserName` Live reads. Never generate over a set that is currently open in Live; it holds the file in memory and overwrites on save.
 

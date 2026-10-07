@@ -34,15 +34,16 @@ at understanding what a person means, so we let each side do its part.
 ## What works today
 
 **The web app.** You chat with Claude about your Sunday, it suggests changes, and
-nothing happens until you hit Apply. Next to the chat is a mixer and song list
-that follow your open set, and it works from a phone on the same Wi-Fi. It can
-also:
+nothing happens until you hit Apply, then each step shows as it runs. Next to the
+chat is a console-style mixer and song list that follow your open set: tap a
+channel to rename it, add an effect or change where it plays. It works from a
+phone on the same Wi-Fi. It can also:
 
 - import a folder of stems (or a Washed/MultiTracks download, reading its set
   for tempo and sections), guess the key, and put every song on the same part
   tracks (Drums, Keys, BGVs...), mixing a part's stems into one
 - give each song its own mix: pick a song in the mixer to set its levels and
-  switch parts off for that song only
+  switch parts off for that song only, and save checkpoints of a mix to go back to
 - change a song's key without changing its speed, leaving the click alone
 - play a song, listen to Live's meters, and follow up on what it heard
 - remember your room (interface, who's on which input, which outputs go to the
@@ -113,6 +114,11 @@ Tests don't need Ableton or an API key:
 ```sh
 uv run python -m unittest discover tests
 ```
+
+How the code works, page by page, is in [docs/documentation](docs/documentation/README.md)
+(mirrored to the [wiki](https://github.com/BenCurrie42/hackathon_2026/wiki)). What
+to add for the Gloo Agents of Flourishing judges is in
+[docs/agents_of_flourishing.md](docs/agents_of_flourishing.md).
 
 [CLAUDE.md](CLAUDE.md) has the deep stuff if you're into that: what we've figured
 out about Ableton's file format and the rules that keep generated sets from
