@@ -17,7 +17,8 @@ That single fact settles most design arguments here: no JSON in the UI, no CLI,
 no manual install steps, errors phrased as sentences.
 
 Product framing is in `README.md`. What's missing, ranked, is in
-`docs/td_next.md`.
+`docs/td_next.md`. Module-by-module developer docs are in `docs/documentation/`
+(mirrored to the GitHub wiki); update the matching page when you change a module.
 
 ## Architecture
 
@@ -175,10 +176,13 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
   without asking; pytest is not yet approved (tests use stdlib unittest).
   `anthropic` is for the chat. The web app itself is stdlib `http.server`
   plus static files, no framework or build step. OpenCode Go's
-  OpenAI-compatible models go over stdlib `urllib`, not the `openai` package.
+  OpenAI-compatible models go over stdlib `urllib`, not the `openai` package;
+  its Anthropic-format models reuse the `anthropic` SDK with a custom `base_url`.
 - Stock Ableton devices only. No third-party plugins.
-- **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop.
-- Golden-file tests must run without Ableton installed.
+- **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop. Git
+  doesn't record that bit, so a fresh clone needs `chmod a-w templates/*` again.
+- Renderer tests (`tests/test_write_als.py`) must run without Ableton installed;
+  the ones that read Live's `.adv` presets skip when it's absent.
 - We own the ID renumbering rather than depending on `kmontag/buildable`. Read
   that project for reference (it solved this first), but a 0-star dependency
   failing at hour 40 in Boulder is worse than 60 lines we control.
@@ -216,7 +220,8 @@ app/                            Web app: chat + mixer, `uv run python -m app`
                                 sorted by track name, plus moves remembered in ~/.holysound/folders.json
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
     static/                     The page: HTML/CSS/JS, served as-is
-tests/                          unittest suite; needs neither Live nor an API key
+tests/                          unittest suite; needs neither Live nor an API key.
+                                `uv run python -m unittest` runs all of it
 templates/test.als              Reference Live 12.4.5 set, read-only
 templates/test.reference.xml    Its decompressed XML, for diffing
 templates/probe_noinput.als     Live's own save of a generated set; source of

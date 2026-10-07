@@ -1,6 +1,6 @@
 [project]
 name = "rigforge"
-version = "1.0.0"
+version = "1.1.0"
 description = "Generate Ableton Live session files from a structured rig spec"
 requires-python = ">=3.11"
 dependencies = [

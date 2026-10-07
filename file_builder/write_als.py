@@ -4,7 +4,7 @@ Tracks are cloned from a donor track in the template rather than built from
 scratch: Live's track XML carries a lot of structure we have no documentation
 for, and copying a known-good one and rewriting the parts we understand is the
 only honest way to do this. Everything cloned gets renumbered — see
-AGENTS.md for the ID rules, which are not negotiable.
+CLAUDE.md for the ID rules, which are not negotiable.
 """
 
 from __future__ import annotations
@@ -169,12 +169,27 @@ class _Renderer:
             routing.find("LowerDisplayString").set("Value", lower)
 
         # A cloned track carries the donor's routing strings, which may name the
-        # donor by ID. Nothing we generate routes track-to-track yet, but a stale
-        # reference here is silent and would be miserable to find later.
+        # donor by ID. Only the donor's own ID becomes the clone's; a return
+        # track is still in the set and keeps its ID. Anything else names a
+        # track the template no longer has, and pointing it at the clone instead
+        # would silently route the track into itself.
+        donor_id = self.donor(spec.type).get("Id")
+        live_ids = {t.get("Id") for t in self.tracks.findall("ReturnTrack")}
+
+        def remap(match: re.Match) -> str:
+            ref = match.group(2)
+            if ref == donor_id:
+                return f"{match.group(1)}{track_id}"
+            if ref in live_ids:
+                return match.group(0)
+            raise ValueError(
+                f"track {spec.name!r} would route to track {ref}, which isn't in the set"
+            )
+
         for target in chain.iter("Target"):
             value = target.get("Value") or ""
             if TRACK_REF.search(value):
-                target.set("Value", TRACK_REF.sub(rf"\g<1>{track_id}", value))
+                target.set("Value", TRACK_REF.sub(remap, value))
 
         # Empty the device chain the donor came with before adding our own.
         devices = track.find("DeviceChain/DeviceChain/Devices")

@@ -4,10 +4,18 @@ All notable changes are documented here.
 
 ---
 
-## [Unreleased]
+## [1.1.0] — 2026-10-06
 
 ### Added
 - **Song transpose** — `transpose_song` in RigLink sets `pitch_coarse` on every audio clip in a song (scene), -12 to 12 semitones; scene rows carry `transpose` (`None` when clips disagree). `rig.py song transpose <song> <semitones>`, a − / Key / + control on each song in the Songs tab (the middle button resets to the original key), and a `transpose_song` action the assistant can propose; session notes show each song's transpose.
+
+### Fixed
+- **Renderer routing references** — a cloned track's `Track.N` routing strings now follow the clone only when they name the donor itself; references to return tracks are kept, and a reference to a track no longer in the set is refused instead of being silently pointed at the new track.
+- **Server errors** — an unexpected exception in any route now answers the page with a sentence (HTTP 500) and logs the traceback, instead of dropping the connection.
+- **Test discovery** — `uv run python -m unittest` now finds the suite (it ran 0 tests before), and the renderer has tests of its own (`tests/test_write_als.py`).
+
+### Changed
+- **Developer documentation** in `docs/documentation/`.
 
 ## [1.0.0] — 2026-10-06
 

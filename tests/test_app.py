@@ -592,6 +592,13 @@ class ServerTest(FakeLiveCase):
         status, _ = self.request("GET", "/../rig.py")
         self.assertEqual(status, 404)
 
+    def test_a_bug_still_answers_in_a_sentence(self):
+        with mock.patch.object(self.app.chat, "reset", side_effect=KeyError("boom")), \
+                mock.patch("traceback.print_exc"):
+            status, body = self.request("POST", "/api/reset", {})
+        self.assertEqual(status, 500)
+        self.assertIn("Something went wrong", body["error"])
+
 
 def write_stem(folder, name, peak_db=-6.0, seconds=2.0, rate=8000, bits=24):
     """A WAV whose first half is silence and second half a sine at peak_db."""

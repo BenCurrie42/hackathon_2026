@@ -23,6 +23,7 @@ import secrets
 import socket
 import threading
 import time
+import traceback
 import webbrowser
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -400,6 +401,10 @@ def make_handler(app):
                 return self._error(str(e))
             except RigLinkError as e:
                 return self._error(f"Live couldn't do that: {e}")
+            except ConnectionError:
+                raise  # the browser went away; nothing to answer
+            except Exception:
+                return self._unexpected()
 
         def do_POST(self):
             if not self._authorised() or not self._same_origin():
@@ -476,6 +481,18 @@ def make_handler(app):
                 return self._error(_sentence(e))
             except TypeError as e:
                 return self._error(f"The page asked Live for something it didn't understand ({e}).")
+            except ConnectionError:
+                raise  # the browser went away; nothing to answer
+            except Exception:
+                return self._unexpected()
+
+        def _unexpected(self):
+            """A bug, not a user mistake: log it, but still answer the page in a sentence."""
+            traceback.print_exc()
+            return self._error(
+                "Something went wrong inside Holy Sound. Try again; if it keeps happening, restart the app.",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         def _text(self, status, text):
             body = text.encode("utf-8")
