@@ -475,8 +475,12 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
 .song .song-bpm { text-align: right; font-variant-numeric: tabular-nums; }
 .song .btn { padding: 8px 14px; }
 .transpose { display: flex; align-items: center; gap: 2px; }
-.song .transpose .btn { padding: 8px 10px; min-width: 36px; font-variant-numeric: tabular-nums; }
-.song .transpose .key-value { min-width: 64px; }
+.song .transpose .btn { padding: 8px 10px; min-width: 40px; min-height: 40px; font-variant-numeric: tabular-nums; }
+.song .transpose .key-value { min-width: 84px; color: var(--muted); }
+.song .transpose .btn:disabled { opacity: 0.35; cursor: default; }
+.song .transpose.shifted .key-value {
+  color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700;
+}
 
 .add-song { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; }
 .add-song input { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); min-height: 44px; }

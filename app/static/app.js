@@ -1239,28 +1239,45 @@ function songRow(scene) {
   return li;
 }
 
-/* Key: − and + move every audio clip in the song a semitone; the number resets to the
-   original key. A song whose clips disagree shows "mixed" until it's set. */
+/* Key: − and + move every audio clip in the song a semitone; the middle button goes back
+   to the original key. A song off its original key is highlighted so nobody forgets it on
+   Sunday. Clips that disagree show "Mixed" until a key is picked. */
 function transposer(scene) {
   const el = document.createElement("div");
   el.className = "transpose";
-  const key = scene.transpose;
-  const label = (n) => (n === null || n === undefined ? "mixed" : n === 0 ? "Key 0" : `Key ${n > 0 ? "+" : ""}${n}`);
-  const set = (n) => {
-    if (n < -12 || n > 12) return;
-    liveCmd("transpose_song", { scene_index: scene.index, semitones: n })
-      .then((r) => { songsSig = ""; if (r && !r.clips) toast("That song has no audio clips to transpose."); })
-      .catch(() => {});
-  };
+  // An older RigLink doesn't report keys; Live needs a restart before this can work.
+  if (!("transpose" in scene)) {
+    el.hidden = true;
+    return el;
+  }
   const name = scene.name || "song " + (scene.index + 1);
   const down = button("−", "btn key-step", () => set((key ?? 0) - 1));
-  const reset = button(label(key), "btn key-value", () => set(0));
+  const value = button("", "btn key-value", () => set(0));
   const up = button("+", "btn key-step", () => set((key ?? 0) + 1));
   down.setAttribute("aria-label", `Transpose ${name} down a semitone`);
   up.setAttribute("aria-label", `Transpose ${name} up a semitone`);
-  reset.setAttribute("aria-label", `Key of ${name}: ${label(key)}. Press to go back to the original key.`);
-  reset.title = "Back to the original key";
-  el.append(down, reset, up);
+  value.title = "Back to the original key";
+  let key = scene.transpose;
+  const show = () => {
+    const text = key === null ? "Mixed" : key === 0 ? "Original" : (key > 0 ? "+" : "−") + Math.abs(key);
+    value.textContent = text;
+    value.setAttribute("aria-label", `Key of ${name}: ${text}. Press to go back to the original key.`);
+    el.classList.toggle("shifted", key !== 0);
+    down.disabled = key !== null && key <= -12;
+    up.disabled = key !== null && key >= 12;
+  };
+  // Show the new key straight away, so a quick second press counts from it.
+  const set = (n) => {
+    if (n < -12 || n > 12 || n === key) return;
+    const before = key;
+    key = n;
+    show();
+    liveCmd("transpose_song", { scene_index: scene.index, semitones: n })
+      .then((r) => { if (r && !r.clips) { toast("That song has no audio clips to transpose."); key = before; show(); } })
+      .catch(() => { key = before; show(); });
+  };
+  show();
+  el.append(down, value, up);
   return el;
 }
 
