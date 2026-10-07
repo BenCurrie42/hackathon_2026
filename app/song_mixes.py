@@ -93,29 +93,43 @@ def same(a, b):
     return True
 
 
-def differences(saved, snapshot):
-    """How a saved mix differs from the mixer now, as short phrases ("Keys -6 dB", "BGVs muted")."""
-    out = []
-    for kind in ("tracks", "returns"):
-        known = saved.get(kind, {})
-        for row in snapshot[kind]:
-            want = known.get(row["name"].casefold())
-            if want is None:
-                continue
-            if _db_differs(want.get("volume_db"), row.get("volume_db")):
-                db = want.get("volume_db")
-                out.append(f"{row['name']} {'off' if db is None or db <= SILENT_DB else f'{db:g} dB'}")
-            if "mute" in want and bool(want["mute"]) != bool(row.get("mute")):
-                out.append(f"{row['name']} {'muted' if want['mute'] else 'unmuted'}")
-            if "pan" in want and row.get("pan_value") is not None and abs(want["pan"] - row["pan_value"]) > PAN_STEP:
-                out.append(f"{row['name']} pan {want['pan']:+.2f}")
-            sends = want.get("sends", {})
-            for send in row.get("sends", []):
-                if send["return"] in sends and _db_differs(sends[send["return"]], send.get("level_db")):
-                    db = sends[send["return"]]
-                    out.append(f"{row['name']} to {send['return']} "
-                               + ("off" if db is None or db <= SILENT_DB else f"{db:g} dB"))
-    return out
+def describe_song(mix, snapshot, scene_index):
+    """One song's mix as the assistant reads it: every track in the song, with its level.
+
+    mix: the song's saved mix, or mix_of(snapshot) for the song on the mixer. Tracks with no
+    clip in this song but clips in others aren't in it and are left out; live inputs (tracks
+    with no clips at all) are in every song.
+    """
+    items = []
+    for row in snapshot["tracks"]:
+        clips = row.get("clips", [])
+        clip = next((c for c in clips if c["scene_index"] == scene_index), None)
+        if clips and clip is None:
+            continue
+        strip = mix.get("tracks", {}).get(row["name"].casefold())
+        if strip is None:
+            strip = mix_of({"tracks": [row], "returns": []})["tracks"][row["name"].casefold()]
+        items.append(row["name"] + " " + _strip_words(strip, clip_off=clip is not None and clip.get("active") is False))
+    for row in snapshot["returns"]:
+        strip = mix.get("returns", {}).get(row["name"].casefold())
+        if strip is not None:
+            items.append(f"{row['name']} (shared effect) " + _strip_words(strip))
+    return ", ".join(items)
+
+
+def _strip_words(strip, clip_off=False):
+    db = strip.get("volume_db")
+    words = ["off" if db is None or db <= SILENT_DB else f"{db:g} dB"]
+    if clip_off:
+        words.append("OFF in this song")
+    if strip.get("mute"):
+        words.append("MUTED")
+    if strip.get("pan") and abs(strip["pan"]) > PAN_STEP:
+        words.append(f"pan {strip['pan']:+.2f}")
+    sends = [f"{r} {v:g} dB" for r, v in strip.get("sends", {}).items() if v is not None and v > SILENT_DB]
+    if sends:
+        words.append("sends " + ", ".join(sends))
+    return " ".join(words)
 
 
 def _db(value):
@@ -230,6 +244,13 @@ class SongMixMemory:
                 if mark["id"] == mark_id:
                     return mark
             return None
+
+    def find_checkpoint(self, song, label):
+        """The newest checkpoint of a song whose name matches label (any case), or None."""
+        wanted = (label or "").strip().casefold()
+        marks = self.checkpoints(song)
+        return (next((m for m in marks if m["label"].casefold() == wanted), None)
+                or next((m for m in marks if wanted and wanted in m["label"].casefold()), None))
 
     def delete_checkpoint(self, song, mark_id):
         with self._lock:

@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import mixdown, parts
 from app.folders import FAMILIES, KEYS, classify
@@ -58,6 +58,8 @@ class ActionFailed(Exception):
 
 
 class Device(BaseModel):
+    """A stock effect or instrument, and optionally one of its presets."""
+
     device: str = Field(description='Stock Live device name as Live\'s browser shows it, e.g. "Compressor".')
     preset: str | None = Field(
         default=None,
@@ -69,6 +71,8 @@ class Device(BaseModel):
 
 
 class Output(BaseModel):
+    """Where a track's sound goes: Master (the main speakers) or an interface output."""
+
     destination: str = Field(description='Output type as Live shows it: "Master", "Ext. Out" or "Sends Only".')
     channel: str | None = Field(default=None, description='Output channel for Ext. Out, e.g. "3/4" or "5".')
 
@@ -82,6 +86,8 @@ class Output(BaseModel):
 
 
 class AddTrack(BaseModel):
+    """Make a new track: a live mic or instrument on an input, or an empty playback track. Not for imports (import_part makes part tracks)."""
+
     action: Literal["add_track"]
     name: str = Field(min_length=1, max_length=64, description="Track name. Must differ from every other track.")
     kind: Literal["audio", "midi"] = Field(
@@ -166,6 +172,8 @@ class AddTrack(BaseModel):
 
 
 class AddReturn(BaseModel):
+    """Make a shared effect (return track), such as one reverb every vocal can send to."""
+
     action: Literal["add_return"]
     name: str = Field(min_length=1, max_length=64, description='Name of the shared effect, e.g. "Vocal Reverb".')
     devices: list[Device] = Field(default_factory=list, description="Usually one reverb or delay.")
@@ -191,6 +199,8 @@ class AddReturn(BaseModel):
 
 
 class RenameTrack(BaseModel):
+    """Rename a track."""
+
     action: Literal["rename_track"]
     track: TrackRef
     new_name: str = Field(min_length=1, max_length=64, description="The new name. Must differ from every other track.")
@@ -209,6 +219,8 @@ class RenameTrack(BaseModel):
 
 
 class DeleteTrack(BaseModel):
+    """Delete a track and everything on it, in every song."""
+
     action: Literal["delete_track"]
     track: TrackRef
     destructive: ClassVar[bool] = True
@@ -224,25 +236,36 @@ class DeleteTrack(BaseModel):
 
 
 class SetVolume(BaseModel):
+    """A track's fader: set a level (db) or move it (by_db). Give exactly one of the two."""
+
     action: Literal["set_volume"]
     track: TrackRef
-    db: float = Field(ge=-70, le=6, description="Fader level in dB. 0 is unity; -70 is effectively off.")
+    db: float | None = Field(default=None, ge=-70, le=6, description=(
+        "The level to set, in dB: 0 is unity, -70 is off. Null when using by_db."))
+    by_db: float | None = Field(default=None, ge=-24, le=24, description=(
+        "How far to move it from where it is in that song now: -3 is 3 dB quieter, 2 is 2 dB louder. "
+        "Use this for 'up', 'down', 'a bit'; the app works out the new level."))
     song: MixSong
 
+    _one_level = model_validator(mode="after")(lambda self: _one_of(self, "db", "by_db"))
+
     def describe(self):
-        return _in_song(self.song, f"Set “{self.track}” to {_db(self.db)}")
+        return _in_song(self.song, f"{_level_change(self.track, self.db, self.by_db)}")
 
     def run(self, ex):
         t = ex.track(self.track)
         later = ex.later_song(self.song)
+        db = _moved(self.db, self.by_db, lambda: ex.level_now(t, later))
         if later:
-            ex.save_for_song(later, t, volume_db=self.db)
-            return f"{t.name} will be at {_db(self.db)} in {later}."
-        result = ex.call("set_volume", track_index=t.index, is_return=t.is_return, db=self.db)
+            ex.save_for_song(later, t, volume_db=db)
+            return f"{t.name} will be at {_db(db)} in {later}."
+        result = ex.call("set_volume", track_index=t.index, is_return=t.is_return, db=db)
         return f"{t.name} is now at {result['volume']}."
 
 
 class SetPan(BaseModel):
+    """Move a track left or right."""
+
     action: Literal["set_pan"]
     track: TrackRef
     pan: float = Field(ge=-1, le=1, description="-1 hard left, 0 centre, 1 hard right.")
@@ -262,6 +285,8 @@ class SetPan(BaseModel):
 
 
 class SetMute(BaseModel):
+    """Mute or unmute a track, in the song on the mixer (or a named song). To leave a part out of one song, set_clip_active is better."""
+
     action: Literal["set_mute"]
     track: TrackRef
     on: bool = Field(description="True mutes the track, false unmutes it.")
@@ -281,6 +306,8 @@ class SetMute(BaseModel):
 
 
 class SetSolo(BaseModel):
+    """Solo a track so only soloed tracks are heard. For checking a sound, not part of a mix."""
+
     action: Literal["set_solo"]
     track: TrackRef
     on: bool = Field(description="True solos the track (only soloed tracks are heard), false unsolos it.")
@@ -295,6 +322,8 @@ class SetSolo(BaseModel):
 
 
 class SetInput(BaseModel):
+    """Which interface input a track listens to; null for none (playback tracks)."""
+
     action: Literal["set_input"]
     track: TrackRef
     input: InputChannel | None = Field(description="Null to turn the track's input off.")
@@ -315,6 +344,8 @@ class SetInput(BaseModel):
 
 
 class SetOutput(BaseModel):
+    """Where a track's sound goes, e.g. the click to the in-ear output."""
+
     action: Literal["set_output"]
     track: TrackRef
     output: Output = Field(description="Where the track's sound goes.")
@@ -330,13 +361,24 @@ class SetOutput(BaseModel):
 
 
 class SetSend(BaseModel):
+    """How much of a track goes into a shared effect (reverb, delay): set a level (db) or move it (by_db). Give exactly one of the two."""
+
     action: Literal["set_send"]
     track: TrackRef
     to_return: TrackRef = Field(description="The return track (shared effect) to send to.")
-    db: float = Field(ge=-70, le=6, description="Send level in dB; -70 turns the send off.")
+    db: float | None = Field(default=None, ge=-70, le=6, description=(
+        "The send level to set, in dB; -70 turns the send off. Null when using by_db."))
+    by_db: float | None = Field(default=None, ge=-24, le=24, description=(
+        "How far to move the send from where it is in that song now: 3 is more effect, -3 less. "
+        "From off, it starts at -70."))
     song: MixSong
 
+    _one_level = model_validator(mode="after")(lambda self: _one_of(self, "db", "by_db"))
+
     def describe(self):
+        if self.by_db is not None:
+            more = "more" if self.by_db > 0 else "less"
+            return _in_song(self.song, f"{abs(self.by_db):g} dB {more} of “{self.to_return}” on “{self.track}”")
         return _in_song(self.song, f"Send “{self.track}” into “{self.to_return}” at {_db(self.db)}")
 
     def run(self, ex):
@@ -345,15 +387,18 @@ class SetSend(BaseModel):
         if not r.is_return:
             raise ActionFailed(f"{r.name} isn't a shared effect (return track), so nothing can be sent to it.")
         later = ex.later_song(self.song)
+        db = _moved(self.db, self.by_db, lambda: ex.level_now(t, later, send_to=r.name))
         if later:
-            ex.save_for_song(later, t, send=(r.name, self.db))
-            return f"{t.name} will send to {r.name} at {_db(self.db)} in {later}."
+            ex.save_for_song(later, t, send=(r.name, db))
+            return f"{t.name} will send to {r.name} at {_db(db)} in {later}."
         result = ex.call("set_send", track_index=t.index, is_return=t.is_return,
-                         return_index=r.index, db=self.db)
+                         return_index=r.index, db=db)
         return f"{t.name} sends to {r.name} at {result['level']}."
 
 
 class AddDevice(BaseModel):
+    """Put a stock effect on a track, at the end of its chain."""
+
     action: Literal["add_device"]
     track: TrackRef
     device: Device = Field(description="The stock effect to add at the end of the track's chain.")
@@ -371,6 +416,8 @@ class AddDevice(BaseModel):
 
 
 class RemoveDevice(BaseModel):
+    """Take an effect off a track."""
+
     action: Literal["remove_device"]
     track: TrackRef
     device: str = Field(description="The device's name as it appears on the track.")
@@ -391,6 +438,8 @@ class RemoveDevice(BaseModel):
 
 
 class SetTempo(BaseModel):
+    """The whole set's tempo now. A song's own tempo is update_song."""
+
     action: Literal["set_tempo"]
     bpm: float = Field(ge=20, le=999, description="The set's tempo in beats per minute, 20 to 999.")
 
@@ -403,6 +452,8 @@ class SetTempo(BaseModel):
 
 
 class AddSong(BaseModel):
+    """Add an empty song (a Live scene), at the end or at a slot."""
+
     action: Literal["add_song"]
     name: str = Field(min_length=1, max_length=64, description="The song title.")
     bpm: float | None = Field(default=None, ge=20, le=999, description="The song's tempo, if known.")
@@ -420,6 +471,8 @@ class AddSong(BaseModel):
 
 
 class MoveSong(BaseModel):
+    """Move a song and its clips to another slot in the set's order."""
+
     action: Literal["move_song"]
     song: SongRef
     position: int = Field(ge=1, description="The song slot number to move it to (1 = first).")
@@ -437,6 +490,8 @@ class MoveSong(BaseModel):
 
 
 class UpdateSong(BaseModel):
+    """Rename a song or change its tempo."""
+
     action: Literal["update_song"]
     song: SongRef
     new_name: str | None = Field(default=None, description="The new song title. Null keeps the name.")
@@ -459,6 +514,8 @@ class UpdateSong(BaseModel):
 
 
 class TransposeSong(BaseModel):
+    """Change a song's key by semitones from its original key, without changing its speed."""
+
     action: Literal["transpose_song"]
     song: SongRef
     semitones: int = Field(ge=-12, le=12, description=(
@@ -487,6 +544,8 @@ class TransposeSong(BaseModel):
 
 
 class DeleteSong(BaseModel):
+    """Delete a song and its clips."""
+
     action: Literal["delete_song"]
     song: SongRef
     destructive: ClassVar[bool] = True
@@ -501,6 +560,8 @@ class DeleteSong(BaseModel):
 
 
 class StartSong(BaseModel):
+    """Start playing a song in the room."""
+
     action: Literal["start_song"]
     song: SongRef
     audible: ClassVar[bool] = True
@@ -515,6 +576,8 @@ class StartSong(BaseModel):
 
 
 class PickSongMix(BaseModel):
+    """Put the mixer on a song: that song's saved faders, pan, mute and sends come back now."""
+
     action: Literal["pick_song_mix"]
     song: SongRef | None = Field(description=(
         "The song whose mix goes on the mixer now: its saved faders, pan, mute and sends come back. "
@@ -524,18 +587,57 @@ class PickSongMix(BaseModel):
         return f"Put the mixer on “{self.song}”’s mix" if self.song else "Take the mixer off every song’s mix"
 
     def run(self, ex):
-        if ex.pick_song is None:
-            raise ActionFailed("Song mixes need the Holy Sound app.")
+        control = ex.need_mix_control()
         if self.song is None:
-            ex.pick_song(None)
+            control.pick_song_mix(None)
             return "The mixer is on no song now: the faders are shared by every song."
         s = ex.song(self.song)
-        ex.pick_song(s["index"])
+        control.pick_song_mix(s["index"])
         ex.tracks_changed()
         return f"The mixer is on {_song_name(s)}'s mix now."
 
 
+class SaveCheckpoint(BaseModel):
+    """Keep a named copy of a song's whole mix (faders, pan, mute, sends) to go back to later."""
+
+    action: Literal["save_checkpoint"]
+    label: str = Field(min_length=1, max_length=60, description="A short name, e.g. 'After soundcheck'.")
+    song: MixSong
+
+    def describe(self):
+        return _in_song(self.song, f"Save a checkpoint “{self.label}”")
+
+    def run(self, ex):
+        song = ex.mix_song_name(self.song)
+        ex.need_mix_control().checkpoint_song_mix(self.label, song)
+        return f"Saved {song}'s mix as “{self.label}”."
+
+
+class RestoreCheckpoint(BaseModel):
+    """Put a song's mix back to a checkpoint the notes list. The mix it replaces is checkpointed first."""
+
+    action: Literal["restore_checkpoint"]
+    label: str = Field(description="The checkpoint's name as the notes list it.")
+    song: MixSong
+
+    def describe(self):
+        return _in_song(self.song, f"Go back to the checkpoint “{self.label}”")
+
+    def run(self, ex):
+        song = ex.mix_song_name(self.song)
+        mark = ex.mixes.find_checkpoint(song, self.label)
+        if mark is None:
+            names = ", ".join(m["label"] for m in ex.mixes.checkpoints(song)) or "none yet"
+            raise ActionFailed(f"{song} has no checkpoint called {self.label}. Its checkpoints: {names}.")
+        ex.need_mix_control().restore_song_mix(mark["id"], song)
+        ex.tracks_changed()
+        return (f"{song} is back to “{mark['label']}”. The mix before it is saved as a checkpoint, "
+                "so this can be undone.")
+
+
 class Transport(BaseModel):
+    """Start or stop playback."""
+
     action: Literal["transport"]
     playing: bool = Field(description="True starts playback, false stops it.")
 
@@ -552,6 +654,8 @@ class Transport(BaseModel):
 
 
 class SetColor(BaseModel):
+    """Change a track's colour."""
+
     action: Literal["set_color"]
     track: TrackRef
     color: ColorName = Field(description="Track colour, to group related tracks.")
@@ -566,6 +670,8 @@ class SetColor(BaseModel):
 
 
 class MoveToFolder(BaseModel):
+    """Move a track to another mixer folder (it also takes the folder's colour in Live)."""
+
     action: Literal["move_to_folder"]
     track: TrackRef = Field(description="A track (not a return).")
     folder: FolderKey = Field(description=(
@@ -641,6 +747,8 @@ class ImportPart(BaseModel):
 
 
 class SetClipGain(BaseModel):
+    """A clip's own level in one song, for evening out stems at import. For 'louder in this song', use set_volume."""
+
     action: Literal["set_clip_gain"]
     track: TrackRef
     song: SongRef
@@ -657,6 +765,8 @@ class SetClipGain(BaseModel):
 
 
 class SetClipActive(BaseModel):
+    """Leave a track's clip out of one song (on false), or bring it back (on true). Live applies it when the song starts, even without the app."""
+
     action: Literal["set_clip_active"]
     track: TrackRef
     song: SongRef
@@ -673,6 +783,8 @@ class SetClipActive(BaseModel):
 
 
 class PartChoice(BaseModel):
+    """Which part a track's stems go to, in one song or all of them."""
+
     song: str | None = Field(default=None, description="A song name, or null for every song.")
     track: str = Field(description="A current track whose name doesn't say its part, e.g. a singer's name.")
     part: str = Field(description='The part it belongs to in that song, e.g. "Lead Vocal" or "BGVs".')
@@ -699,6 +811,8 @@ class TidyIntoParts(BaseModel):
 
 
 class Listen(BaseModel):
+    """Play a song briefly and read the meters. Makes sound in the room."""
+
     action: Literal["listen"]
     song: SongRef | None = Field(
         default=None, description="A song to start and measure. Null to measure whatever is already playing.",
@@ -743,7 +857,8 @@ class Listen(BaseModel):
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    MoveSong, TransposeSong, DeleteSong, StartSong, PickSongMix, Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
+    MoveSong, TransposeSong, DeleteSong, StartSong, PickSongMix, SaveCheckpoint, RestoreCheckpoint,
+    Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
 ]
 
 
@@ -767,10 +882,12 @@ class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
     def __init__(self, live, files=None, on_touch=None, folders=None, parts_dir=None, mixes=None,
-                 pick_song=None):
+                 mix_control=None):
         self._live = live
         self.mixes = mixes  # the app's SongMixMemory, or None where there are no song mixes
-        self.pick_song = pick_song  # puts the mixer on a song (scene index, or None)
+        # The app, which puts a song's mix on the mixer and keeps checkpoints:
+        # pick_song_mix(scene index), checkpoint_song_mix(label, song), restore_song_mix(id, song).
+        self.mix_control = mix_control
         self._files = files or {}
         self.folders = folders  # the mixer's FolderMemory, or None where there is no mixer
         self.parts_dir = Path(parts_dir) if parts_dir else default_parts_dir()  # mixed parts go here
@@ -886,8 +1003,33 @@ class Executor:
         loose = [t for t in everything if _loose(t.name) == _loose(ref)]
         if len(loose) == 1:
             return loose[0]
+        # People (and smaller models) paraphrase: "lead vox", "backing vocals", "the keys".
+        guess = _one_named(everything, ref, lambda t: t.name)
+        if guess is not None:
+            return guess
+        part = parts.part_for(ref)
+        if part:
+            named = [t for t in everything if t.name.casefold() == part.casefold()]
+            if len(named) == 1:
+                return named[0]
         names = ", ".join(t.name for t in everything) or "none yet"
         raise ActionFailed(f"There's no track called {ref}. The tracks are: {names}.")
+
+    def need_mix_control(self):
+        if self.mix_control is None or self.mixes is None:
+            raise ActionFailed("Song mixes need the Holy Sound app.")
+        return self.mix_control
+
+    def mix_song_name(self, ref):
+        """The song a mix action is for: the named one, else the one on the mixer."""
+        if ref is not None:
+            name = self.song(ref)["name"]
+            if not name:
+                raise ActionFailed("Give that song a name first; its mix is kept by name.")
+            return name
+        if self.mixes is None or not self.mixes.current:
+            raise ActionFailed("The mixer isn't on a song. Say which song, or pick one first.")
+        return self.mixes.current
 
     def later_song(self, ref):
         """The song a mixer change is for, if it isn't the one the mixer is on now. Else None."""
@@ -900,6 +1042,21 @@ class Executor:
             raise ActionFailed("Song mixes need the Holy Sound app.")
         current = self.mixes.current
         return None if current and current.casefold() == name.casefold() else name
+
+    def level_now(self, target, song=None, send_to=None):
+        """A track's fader (or its send to a return) in dB: in a song's saved mix, else in Live now.
+
+        Off reads as -70.
+        """
+        from app import song_mixes
+
+        snap = self._live.snapshot(max_age=0)
+        mix = (self.mixes.saved(song) if song and self.mixes else None) or song_mixes.mix_of(snap)
+        strip = mix["returns" if target.is_return else "tracks"].get(target.name.casefold())
+        if strip is None:
+            strip = song_mixes.mix_of(snap)["returns" if target.is_return else "tracks"].get(target.name.casefold(), {})
+        value = strip.get("sends", {}).get(send_to) if send_to else strip.get("volume_db")
+        return song_mixes.SILENT_DB if value is None else float(value)
 
     def save_for_song(self, song, target, volume_db=None, pan=None, mute=None, send=None):
         """Change one track in a song's saved mix, without touching Live now."""
@@ -919,6 +1076,9 @@ class Executor:
             return named[0]
         if ref.isdigit() and 1 <= int(ref) <= len(rows):
             return rows[int(ref) - 1]
+        guess = _one_named([s for s in rows if s["name"]], ref, lambda s: s["name"])
+        if guess is not None:
+            return guess
         names = ", ".join(s["name"] or str(s["index"] + 1) for s in rows) or "none yet"
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
@@ -934,14 +1094,14 @@ def default_parts_dir():
 
 
 def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=None, mixes=None,
-            pick_song=None):
+            mix_control=None):
     """Run actions in order. One failure doesn't stop the rest.
 
     on_touch(name) is called for each track an action works on. folders is the
-    mixer's FolderMemory, for move_to_folder and renames. mixes and pick_song are
-    the app's song mixes, for mixer changes meant for one song.
+    mixer's FolderMemory, for move_to_folder and renames. mixes and mix_control are
+    the app's song mixes, for mixer changes meant for one song and checkpoints.
     """
-    ex = Executor(live, files, on_touch, folders, parts_dir, mixes, pick_song)
+    ex = Executor(live, files, on_touch, folders, parts_dir, mixes, mix_control)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
     per_song = {}
@@ -1036,6 +1196,53 @@ def _semitones(n):
 
 def _folder_label(key):
     return next(label for k, label, _colour in FAMILIES if k == key)
+
+
+_FILLER = re.compile(r"^(the|our|my)\s+|\s+(song|track|tracks|part)$", re.IGNORECASE)
+
+
+def _words(text):
+    """Lower-case words with a trailing plural s dropped, so 'Vocals' and 'vocal' match."""
+    return [w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in re.findall(r"[a-z0-9]+", text.casefold().replace("\u2019", "'").replace("'", ""))]
+
+
+def _one_named(rows, ref, name_of):
+    """The one row whose name matches a loose reference, or None if none or several do.
+
+    Tried in turn: same words ignoring "the" and plurals; every word of the reference in the
+    name ("Glad" for "I'm So Glad I Met Jesus").
+    """
+    want = _words(_FILLER.sub("", ref.strip()))
+    if not want:
+        return None
+    for test in (lambda have: have == want, lambda have: all(w in have for w in want)):
+        found = [r for r in rows if test(_words(name_of(r)))]
+        if len(found) == 1:
+            return found[0]
+        if found:
+            return None
+    return None
+
+
+def _one_of(model, *fields):
+    given = [f for f in fields if getattr(model, f) is not None]
+    if len(given) != 1:
+        raise ValueError(f"give exactly one of {' or '.join(fields)}")
+    return model
+
+
+def _moved(level, by, now):
+    """A level from either an absolute dB or a change from now(), kept to the fader's range."""
+    if level is not None:
+        return level
+    return max(-70.0, min(6.0, max(-70.0, now()) + by))
+
+
+def _level_change(track, db, by_db):
+    if by_db is not None:
+        return f"Turn “{track}” {'up' if by_db > 0 else 'down'} {abs(by_db):g} dB"
+    return f"Set “{track}” to {_db(db)}"
 
 
 def _db(db):

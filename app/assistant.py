@@ -49,6 +49,24 @@ You are Holy Sound. You help a church volunteer run Ableton Live for their worsh
 They are not an audio engineer. You work alongside them like a calm sound tech friend: \
 you help with what they ask, you don't run the show.
 
+## What to use for what
+Read the <session> notes first: every track, and every song with its whole mix. Then:
+- A question ("what's the keys at in Washed?", "which song am I on?"): answer from the notes. \
+Propose nothing.
+- Louder or quieter: set_volume with by_db (-3 = 3 dB down, 2 = 2 dB up); the app works out \
+the new level. Use db only for an exact level ("set it to -6").
+- More or less reverb or delay: set_send with by_db and to_return.
+- Which song: put song on set_volume, set_pan, set_mute and set_send when the volunteer names \
+one ("in Washed"). Leave it null for the song the mixer is on.
+- In every song: one step per song, each with its song.
+- Leave a part out of one song, or bring it back: set_clip_active with that song, on false or \
+true.
+- Show a song's mix on the mixer now: pick_song_mix. Keep or go back to a snapshot of a \
+song's mix: save_checkpoint, restore_checkpoint (names as the notes list them).
+- Song order, tempo, key: move_song, update_song (bpm), transpose_song.
+Every change goes in one propose_changes call. Saying "I'll..." or "Done" without calling it \
+changes nothing.
+
 ## How you talk
 1. Answer what was asked, nothing more. Default to 1-3 short sentences (under 60 words). \
 Go longer only when they ask for detail.
@@ -77,16 +95,12 @@ them as a session file.
 ## Tools: values and limits
 13. Fader and send levels are dB: 0 is unity, -70 is off, max +6. Pan is -1 (left) to 1 \
 (right). Change levels in 1-3 dB steps.
-14. Each song has its own mix, saved in its clips and applied the moment the song starts: \
-clip gain (set_clip_gain) for its level, and set_clip_active to leave a track out of that \
-song only (a part the band plays live, a sax nobody wants). Use these for "in Washed, \
-...". Clip gain (gain_db, set_clip_gain) evens out stems inside a song. Faders, pan, mute \
-and sends are kept per song too, by the app: while the mixer is on a song (the notes say \
-which), every change is saved to that song and put back when it's picked or starts. With no \
-song picked they're shared by every song. For "in Washed, ..." give set_volume, set_pan, \
-set_mute and set_send that song: for another song it changes only that song's saved mix \
-(the faders don't move now); leave it null for the song the mixer is on. pick_song_mix puts \
-the mixer on a song's mix now; the notes list how each other song's saved mix differs.
+14. Each song has its own mix. Faders, pan, mute and sends are saved per song by the app: \
+while the mixer is on a song, every change saves to it, and it comes back when that song is \
+picked or starts. A change for another song only changes its saved mix; the faders don't move \
+until it's on. With the mixer on no song, faders are shared by every song. A song's clips \
+also carry an on/off (set_clip_active) that Live applies even without the app. Clip gain \
+(set_clip_gain) evens out stems at import; for "louder in this song" use set_volume.
 15. Inputs are written as printed on the interface: "1" for a mic or DI, "3/4" for a stereo \
 pair. Playback tracks have no input.
 16. Songs are Live scenes, one per song, with that song's tempo. The set's order is the slot \
@@ -284,6 +298,26 @@ class ReplyFeed:
             return [e for e in self._events if e[0] > seq]
 
 
+# Smaller models often say they're making a change and then don't call the tool.
+PROMISE = re.compile(
+    r"\b(i'll|i will|i'm going to|let me|going to|i've (set|turned|moved|muted|unmuted|raised|lowered|"
+    r"dropped|added|changed|put|switched|saved|sent|brought|taken|left)|bumped|dropping|raising|"
+    r"lowering|turning|setting|muting|unmuting|moving|switching|saving|sending|bringing|taking|leaving|"
+    r"giving|adding|panning|putting|pulling|pushing|cutting|boosting|restoring|transposing)\b",
+    re.IGNORECASE)
+NUDGE_PROMISE = (
+    "(Automatic: your reply says a change is happening, but you didn't call propose_changes, so "
+    "nothing will change and the volunteer can't press Apply. If you meant to change something, call "
+    "propose_changes now with those steps. If you can't, say so plainly without claiming it's done.)")
+NUDGE_EMPTY = "(Automatic: your reply was empty. Answer the volunteer's last message.)"
+
+
+def promised_without_doing(reply):
+    """True if a reply with no tool call reads as if it's making a change."""
+    text = reply.replace("\u2019", "'").strip()
+    return bool(PROMISE.search(text)) and not text.endswith("?")
+
+
 ONE_PROPOSAL = ("Ignored: only one propose_changes call per reply. Put every change for this "
                 "request in a single call, in order.")
 
@@ -386,6 +420,8 @@ class Conversation:
             content.append(self._tool_result(tool_use_id, proposal_id))
             self._open_tool_use = None
         body = f"<session>\n{session_notes}\n</session>\n\n"
+        if text is not None:
+            body += "The volunteer says:\n"
         if text is None:
             body += ("(Automatic: the changes were applied and their results are above. The "
                      "volunteer hasn't said anything new. Tell them briefly what the results mean, "
@@ -409,6 +445,9 @@ class Conversation:
 
         try:
             fixes = 0
+            # Sent back once for promising a change without proposing it. Not when reporting
+            # applied results: "I've turned the keys down" is true then.
+            nudged = bool(reopen) or text is None
             unanswered = None  # tool results we gave up on, still to send
             for _step in range(MAX_STEPS):
                 response = self._create(client)
@@ -422,6 +461,11 @@ class Conversation:
                 reply = "\n\n".join(b["text"] for b in blocks if b["type"] == "text").strip()
                 calls = [b for b in blocks if b["type"] == "tool_use"]
                 if not calls:
+                    if not nudged and (not reply or promised_without_doing(reply)):
+                        nudged = True
+                        self.messages.append({"role": "user", "content": [
+                            {"type": "text", "text": NUDGE_PROMISE if reply else NUDGE_EMPTY}]})
+                        continue
                     return shown + [said(reply or "…")]
 
                 # Every tool call gets a result, in order. One proposal per reply:
@@ -632,11 +676,13 @@ def _errors(error):
 
 
 def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=None, mix_song=None,
-                  mix_notes=None):
+                  saved_mixes=None, checkpoints=None):
     """The set as Claude sees it at the top of each message.
 
     imports: {folder name: number of files} for folders imported this session.
     room: the RoomMemory, whose facts go last.
+    mix_song: the song the mixer is on, or None. saved_mixes: {song name (case-folded): saved mix}.
+    checkpoints: {song name (case-folded): [{"label", "at"}]}, newest first.
     """
     if snapshot is None:
         devices = FALLBACK_DEVICES
@@ -659,19 +705,9 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=N
         lines.append("Returns (shared effects):" if snapshot["returns"] else "Returns: none.")
         for r in snapshot["returns"]:
             lines.append(f"  {chr(ord('A') + r['index'])}. {_strip_line(r)}")
-        scenes = snapshot["scenes"]
-        lines.append("Songs (scenes):" if scenes else "Songs: none.")
-        for s in scenes:
-            bpm = f" — {s['tempo']:g} BPM" if s["tempo"] else ""
-            key = s.get("transpose", 0)
-            key = "" if key == 0 else " — clips at mixed keys" if key is None else f" — transposed {key:+d}"
-            lines.append(f"  {s['index'] + 1}. {s['name'] or '(unnamed)'}{bpm}{key}")
         lines.append(_outputs_line(snapshot))
-        lines.append(f"Mixer is on {mix_song}'s mix: fader, pan, mute and send changes are saved to "
-                     f"{mix_song}." if mix_song else "Mixer is on no song: faders are shared by every song.")
-        if mix_notes:
-            lines.append("Other songs' saved mixes (where they differ from the mixer now):")
-            lines.extend(mix_notes)
+        lines.append("")
+        lines.extend(_songs_lines(snapshot, mix_song, saved_mixes or {}, checkpoints or {}))
     if imports:
         lines.append("")
         lines.append("Imported audio folders (import_part can use their files): "
@@ -684,6 +720,57 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=N
         lines.append("")
         lines.append(room.notes())
     return "\n".join(lines)
+
+
+def _songs_lines(snapshot, mix_song, saved_mixes, checkpoints):
+    """Each song with its tempo, key and whole mix, so no level has to be worked out."""
+    from app import song_mixes
+
+    scenes = snapshot["scenes"]
+    if not scenes:
+        return ["Songs: none."]
+    playing = _playing_scene(snapshot)
+    on = (mix_song or "").casefold()
+    lines = [f"Mixer is on: {mix_song}. Fader, pan, mute and send changes save to it." if mix_song else
+             "Mixer is on: no song. Faders are shared by every song.",
+             "Songs (scenes), each with its mix (track fader; OFF in this song = clip switched off):"]
+    for s in scenes:
+        name = s["name"] or "(unnamed)"
+        tags = [f"{s['tempo']:g} BPM"] if s["tempo"] else []
+        key = s.get("transpose", 0)
+        if key is None:
+            tags.append("clips at mixed keys")
+        elif key:
+            tags.append(f"transposed {key:+d}")
+        if s["name"] and s["name"].casefold() == on:
+            tags.append("MIXER IS ON THIS SONG")
+        if s["index"] == playing:
+            tags.append("PLAYING")
+        lines.append(f"  {s['index'] + 1}. {name}" + "".join(f" — {t}" for t in tags))
+        if s["name"] and s["name"].casefold() == on:
+            mix = song_mixes.mix_of(snapshot)
+        else:
+            mix = saved_mixes.get((s["name"] or "").casefold())
+        if mix is None:
+            lines.append("     mix: not saved yet; it starts as the mixer is now: "
+                         + song_mixes.describe_song(song_mixes.mix_of(snapshot), snapshot, s["index"]))
+        else:
+            lines.append("     mix: " + song_mixes.describe_song(mix, snapshot, s["index"]))
+        marks = checkpoints.get((s["name"] or "").casefold())
+        if marks:
+            lines.append("     checkpoints (newest first): " + ", ".join(f'"{m["label"]}"' for m in marks[:8]))
+    return lines
+
+
+def _playing_scene(snapshot):
+    if not snapshot["song"].get("is_playing"):
+        return None
+    counts = {}
+    for t in snapshot["tracks"]:
+        for c in t.get("clips", []):
+            if c.get("is_playing"):
+                counts[c["scene_index"]] = counts.get(c["scene_index"], 0) + 1
+    return max(counts, key=counts.get) if counts else None
 
 
 def _outputs_line(snapshot):

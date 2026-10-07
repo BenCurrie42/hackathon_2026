@@ -18,7 +18,15 @@ All notable changes are documented here.
 - **Song order** — `move_song` and `add_song` with a position; `rig.py song move` and `song add --at`. RigLink `move_scene` copies clips with `duplicate_clip_to` (keeps warp and transpose, verified in Live).
 - **RigLink** — `set_clip_active`, `delete_clip`, `move_scene`, `create_scene` at an index; clip rows carry `active`.
 
+### Changed
+- **Smaller models drive it reliably** — measured with `qwen3.8-flash` on 23 common requests against a demo set: 61/69 passing before, 69/69 after. The system prompt opens with a short map from requests to actions; every action has a one-line description in the tool schema; the session notes spell out each song's whole mix (`MIXER IS ON THIS SONG`, `PLAYING`, per-track fader, OFF, MUTED, sends, checkpoints) instead of differences; the volunteer's message is labelled after the notes.
+- **Relative levels** — `set_volume` and `set_send` take `by_db` ("down 3"), resolved from that song's own level, so the model never does the arithmetic.
+- **Promises without a proposal** — a reply that says it's making a change but proposes nothing (or is empty) is sent back once to the model.
+- **Loose names** — "lead vox", "backing vocals", "the Glad song" find the one track or song meant.
+- **Checkpoints for the assistant** — `save_checkpoint` and `restore_checkpoint` actions, by name, for any song.
+
 ### Fixed
+- **Song mix picker jumped back to Every track** — the page redrew from the server before sending the pick, so it sent "no song".
 - **Mixer strip layout** — the per-song level used the three-column control grid and spilled into the next strip; it's sized like pan now, and dB readouts no longer wrap.
 - **No Input on new tracks** — RigLink's `create_audio_track` gives every new track No Input; Live's default (input 1) left 51 playback tracks listening to a live input.
 - **Click tempo** — the stem listener averages click gaps near the median instead of taking the median of 10 ms-rounded gaps, which read a 139 BPM click as 136.

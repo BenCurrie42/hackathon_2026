@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from app import audio_files, parts, song_key, song_mixes, vendor_set
 from app.actions import ActionFailed, Executor, Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
+from app.assistant import _playing_scene as _playing_scene_of
 from app.live import LiveLink, LiveUnavailable
 from app.folders import FAMILIES, FolderMemory
 from app.room import RoomMemory
@@ -169,20 +170,36 @@ class App:
         finally:
             self._mix_settled_at = self.clock() + MIX_SETTLE_SECONDS
 
-    def checkpoint_song_mix(self, label=None):
-        song = self._current_song()
-        self.mixes.checkpoint(song, song_mixes.mix_of(self.live.snapshot(max_age=0)), label)
+    def checkpoint_song_mix(self, label=None, song=None):
+        """Keep a named copy of a song's mix (the song on the mixer unless one is named)."""
+        song = song or self._current_song()
+        self.mixes.checkpoint(song, self._mix_for(song), label)
 
-    def restore_song_mix(self, mark_id):
-        song = self._current_song()
+    def restore_song_mix(self, mark_id, song=None):
+        """Go back to a checkpoint. The mix it replaces is checkpointed first, so this can be undone.
+
+        For the song on the mixer the faders move now; for another song only its saved mix changes.
+        """
+        song = song or self._current_song()
         mark = self.mixes.checkpoint_mix(song, mark_id)
         if mark is None:
             raise UserError("That checkpoint isn't there any more.")
         with self._mix_lock:
-            snap = self.live.snapshot(max_age=0)
-            self.mixes.checkpoint(song, song_mixes.mix_of(snap), f"Before going back to {mark['label']}")
-            self._put_back(mark["mix"], snap)
+            self.mixes.checkpoint(song, self._mix_for(song), f"Before going back to {mark['label']}")
+            if self._is_current(song):
+                self._put_back(mark["mix"], self.live.snapshot(max_age=0))
             self.mixes.record(song, mark["mix"])
+
+    def _mix_for(self, song):
+        """A song's mix now: the mixer for the song it's on, else the saved one (or the mixer)."""
+        if not self._is_current(song):
+            saved = self.mixes.saved(song)
+            if saved is not None:
+                return saved
+        return song_mixes.mix_of(self.live.snapshot(max_age=0))
+
+    def _is_current(self, song):
+        return bool(self.mixes.current) and self.mixes.current.casefold() == song.casefold()
 
     def _current_song(self):
         if not self.mixes.current:
@@ -260,20 +277,10 @@ class App:
     def notes(self):
         live = self.live_state()
         stock = self.live.stock_devices() if live["connected"] else None
+        saved = {song.casefold(): self.mixes.saved(song) for song in self.mixes.songs()}
+        marks = {song.casefold(): self.mixes.checkpoints(song) for song in self.mixes.songs()}
         return session_notes(live["snapshot"], stock, live["message"], self.imports, self.room,
-                             self.mixes.current, self.mix_notes(live["snapshot"]))
-
-    def mix_notes(self, snap):
-        """Each other song's saved mix, as how it differs from the mixer now."""
-        if not snap:
-            return []
-        lines = []
-        for song in self.mixes.songs():
-            if song.casefold() == (self.mixes.current or "").casefold() or not _scene_named(snap, song):
-                continue
-            changes = song_mixes.differences(self.mixes.saved(song), snap)
-            lines.append(f"  {song}: " + ("; ".join(changes) if changes else "same as the mixer now"))
-        return lines
+                             self.mixes.current, saved, marks)
 
     def send_message(self, text, attachment=None):
         self.chat.send(text, self.notes(), attachment)
@@ -382,7 +389,7 @@ class App:
             p = self._pending(pid)
             results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
                               folders=self.folders, parts_dir=self.parts_dir, mixes=self.mixes,
-                              pick_song=self.pick_song_mix)
+                              mix_control=self)
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -428,14 +435,7 @@ class App:
 
 def _playing_scene(snap):
     """The song (scene index) Live is playing, from its playing clips, or None."""
-    if not snap or not snap["song"].get("is_playing"):
-        return None
-    counts = {}
-    for t in snap["tracks"]:
-        for c in t.get("clips", []):
-            if c.get("is_playing"):
-                counts[c["scene_index"]] = counts.get(c["scene_index"], 0) + 1
-    return max(counts, key=counts.get) if counts else None
+    return _playing_scene_of(snap) if snap else None
 
 
 def _scene_named(snap, name):

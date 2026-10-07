@@ -324,6 +324,27 @@ class SnapshotTest(FakeLiveCase):
 
 
 class ConversationTest(unittest.TestCase):
+    def test_promising_a_change_without_proposing_it_is_sent_back_once(self):
+        claude = ScriptedClaude(
+            reply(text("Sending the BGVs 3 dB more into the reverb in Washed.")),
+            reply(text("Here it is."), call("tu_1", [
+                {"action": "set_send", "track": "BGVs", "to_return": "Reverb", "by_db": 3, "song": "Washed"},
+            ])),
+        )
+        convo = Conversation(client_factory=lambda: claude)
+        convo.send("More reverb on the BGVs in Washed.", "notes")
+        [p] = convo.proposals.values()
+        self.assertEqual(p["actions"][0].by_db, 3)
+        nudge = convo.messages[2]["content"][0]["text"]
+        self.assertIn("didn't call propose_changes", nudge)
+
+    def test_a_question_back_is_not_a_promise(self):
+        claude = ScriptedClaude(reply(text("I'll need to know: which output feeds the in-ears?")))
+        convo = Conversation(client_factory=lambda: claude)
+        entries = convo.send("Send the click to the in-ears.", "notes")
+        self.assertEqual(entries[-1]["text"], "I'll need to know: which output feeds the in-ears?")
+        self.assertEqual(len(claude.requests), 1)
+
     def test_question_then_proposal_then_outcome_reported_back(self):
         claude = ScriptedClaude(
             reply(text("Which input is the lead vocal on?")),
@@ -1505,7 +1526,7 @@ class SongMixTest(FakeLiveCase):
         self.live.call("set_volume", track_index=0, db=-4.0)
         self.look()
         self.assertIsNone(self.mixes.saved("Living Hope"))
-        self.assertIn("faders are shared", self.app.notes())
+        self.assertIn("Faders are shared by every song", self.app.notes())
 
     def test_starting_a_song_in_live_puts_its_mix_on(self):
         self.app.pick_song_mix(1)
@@ -1556,7 +1577,7 @@ class SongMixTest(FakeLiveCase):
 
     def apply(self, *actions):
         parsed = Proposal(actions=list(actions)).actions
-        return run_all(self.live, parsed, mixes=self.mixes, pick_song=self.app.pick_song_mix)
+        return run_all(self.live, parsed, mixes=self.mixes, mix_control=self.app)
 
     def test_ai_change_for_another_song_saves_it_without_moving_the_faders(self):
         self.app.pick_song_mix(0)
@@ -1588,6 +1609,57 @@ class SongMixTest(FakeLiveCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.mixes.current, "Gratitude")
         self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -12.0, places=1)
+
+    def test_by_db_moves_from_that_songs_own_level(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=-6.0)  # Keys in Gratitude
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=-1.0)  # Keys in Living Hope
+        self.look()
+        results = self.apply({"action": "set_volume", "track": "Keys", "by_db": -3, "song": "Gratitude"},
+                             {"action": "set_volume", "track": "Keys", "by_db": 2},
+                             {"action": "set_send", "track": "Lead Vocal", "to_return": "Reverb", "by_db": 6})
+        self.assertTrue(all(r["ok"] for r in results), results)
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["keys"]["volume_db"], -9.0, places=1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], 1.0, places=1)
+        reverb = next(x for x in self.track("Lead Vocal")["sends"] if x["return"] == "Reverb")
+        self.assertAlmostEqual(reverb["level_db"], -64.0, places=1)  # from off
+
+    def test_loose_names_find_the_one_track_or_song_meant(self):
+        self.app.pick_song_mix(0)
+        [result] = self.apply({"action": "set_mute", "track": "lead vox", "on": True, "song": "the gratitude song"})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["mute"])
+
+    def test_assistant_saves_and_restores_checkpoints_by_name(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-2.0)
+        self.look()
+        [saved] = self.apply({"action": "save_checkpoint", "label": "After soundcheck"})
+        self.assertTrue(saved["ok"], saved)
+        self.assertIn('"After soundcheck"', self.app.notes())
+        self.live.call("set_volume", track_index=0, db=-20.0)
+        self.look()
+        [back] = self.apply({"action": "restore_checkpoint", "label": "after soundcheck"})
+        self.assertTrue(back["ok"], back)
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -2.0, places=1)
+        [missing] = self.apply({"action": "restore_checkpoint", "label": "Rehearsal"})
+        self.assertIn("After soundcheck", missing["text"])
+
+    def test_notes_spell_out_every_songs_mix(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=-6.0)
+        self.live.call("set_mute", track_index=0, on=True)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=0.0)
+        self.live.call("set_mute", track_index=0, on=False)
+        self.look()
+        notes = self.app.notes()
+        self.assertIn("1. Living Hope — MIXER IS ON THIS SONG", notes)
+        self.assertIn("mix: Lead Vocal 0 dB, Keys 0 dB", notes)
+        self.assertIn("mix: Lead Vocal 0 dB MUTED, Keys -6 dB", notes)
 
     def test_only_differences_are_sent_and_new_tracks_are_left_alone(self):
         snap = self.live.snapshot(max_age=0)
