@@ -80,12 +80,16 @@
       </div>
       <div class="tab-panel" id="panel-mixer">
         <div class="mixer-tools">
-          <label class="song-mix-pick">
-            <span>Song mix</span>
-            <select id="mix-song" aria-label="Show one song's mix">
-              <option value="">Every track</option>
-            </select>
-          </label>
+          <div class="song-mix-bar">
+            <label class="song-mix-pick">
+              <span>Song mix</span>
+              <select id="mix-song" aria-label="Show one song's mix">
+                <option value="">Every track</option>
+              </select>
+            </label>
+            <span class="mix-saved" id="mix-saved" hidden></span>
+            <button class="btn ghost mix-checkpoints" id="mix-checkpoints" type="button" hidden>Checkpoints</button>
+          </div>
           <button class="link-btn" id="match-colors" type="button" title="Live can't show folders, so each folder gets its own colour there">Colour tracks in Live to match these folders</button>
         </div>
         <div class="groups" id="groups"></div>
@@ -151,6 +155,22 @@
       <div class="swatches" id="swatches"></div>
       <div class="sheet-actions">
         <button class="btn ghost" value="cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="checkpoint-dialog">
+    <form method="dialog" class="sheet checkpoint-sheet">
+      <h2>Checkpoints for <span id="checkpoint-song"></span></h2>
+      <p class="muted">Changes save to this song as you make them. A checkpoint keeps this exact mix so you can come back to it.</p>
+      <div class="checkpoint-new">
+        <input id="checkpoint-label" maxlength="60" placeholder="Name it (optional), e.g. After soundcheck" aria-label="Checkpoint name">
+        <button class="btn primary" id="checkpoint-save" type="button">Save checkpoint</button>
+      </div>
+      <ol class="checkpoint-list" id="checkpoint-list"></ol>
+      <p class="empty" id="checkpoint-empty">No checkpoints yet.</p>
+      <div class="sheet-actions">
+        <button class="btn ghost" value="close">Done</button>
       </div>
     </form>
   </dialog>

@@ -80,8 +80,13 @@ them as a session file.
 14. Each song has its own mix, saved in its clips and applied the moment the song starts: \
 clip gain (set_clip_gain) for its level, and set_clip_active to leave a track out of that \
 song only (a part the band plays live, a sax nobody wants). Use these for "in Washed, \
-...". The fader (set_volume) is the live mix. Clip gain (gain_db, set_clip_gain) evens out \
-stems inside a song.
+...". Clip gain (gain_db, set_clip_gain) evens out stems inside a song. Faders, pan, mute \
+and sends are kept per song too, by the app: while the mixer is on a song (the notes say \
+which), every change is saved to that song and put back when it's picked or starts. With no \
+song picked they're shared by every song. For "in Washed, ..." give set_volume, set_pan, \
+set_mute and set_send that song: for another song it changes only that song's saved mix \
+(the faders don't move now); leave it null for the song the mixer is on. pick_song_mix puts \
+the mixer on a song's mix now; the notes list how each other song's saved mix differs.
 15. Inputs are written as printed on the interface: "1" for a mic or DI, "3/4" for a stereo \
 pair. Playback tracks have no input.
 16. Songs are Live scenes, one per song, with that song's tempo. The set's order is the slot \
@@ -626,7 +631,8 @@ def _errors(error):
 # -- session notes ----------------------------------------------------------
 
 
-def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=None):
+def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=None, mix_song=None,
+                  mix_notes=None):
     """The set as Claude sees it at the top of each message.
 
     imports: {folder name: number of files} for folders imported this session.
@@ -661,6 +667,11 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=N
             key = "" if key == 0 else " — clips at mixed keys" if key is None else f" — transposed {key:+d}"
             lines.append(f"  {s['index'] + 1}. {s['name'] or '(unnamed)'}{bpm}{key}")
         lines.append(_outputs_line(snapshot))
+        lines.append(f"Mixer is on {mix_song}'s mix: fader, pan, mute and send changes are saved to "
+                     f"{mix_song}." if mix_song else "Mixer is on no song: faders are shared by every song.")
+        if mix_notes:
+            lines.append("Other songs' saved mixes (where they differ from the mixer now):")
+            lines.extend(mix_notes)
     if imports:
         lines.append("")
         lines.append("Imported audio folders (import_part can use their files): "

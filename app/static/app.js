@@ -52,11 +52,15 @@ async function liveCmd(cmd, args = {}) {
 // -- polling ------------------------------------------------------------------
 
 let pollTimer = null;
+let mixPickedAt = 0; // when the page last changed the song mix; older answers don't know about it
 
 async function poll() {
   clearTimeout(pollTimer);
   try {
-    render(await api("/api/state"));
+    const asked = performance.now();
+    const next = await api("/api/state");
+    if (asked < mixPickedAt && state) next.song_mix = state.song_mix;
+    render(next);
   } catch (e) {
     setStatus("bad", e.message);
   }
@@ -585,12 +589,10 @@ function renderMixer(snap) {
 /* Song mix: with a song picked, the mixer shows only the tracks that play in it, and
    each strip gets that song's own level (clip gain) and an on/off switch (Live's clip
    activator). Both are saved in the song's clips, so Live applies them when the song
-   starts, with or without Holy Sound open. The faders stay the live mix. */
+   starts, with or without Holy Sound open. Faders, pan, mute and sends are kept per song
+   by the server: picking a song (here, with Start, or by starting it in Live) puts its
+   mix back, and every change after that is saved to it. The server says which song. */
 let mixSong = null; // scene index, or null for every track
-try {
-  const saved = localStorage.getItem("holysound-mix-song");
-  mixSong = saved === null || saved === "" ? null : Number(saved);
-} catch {}
 
 function songClip(row) {
   if (mixSong === null || row.is_return) return null;
@@ -599,20 +601,93 @@ function songClip(row) {
 
 function renderMixSong(snap) {
   const pick = $("#mix-song");
-  if (mixSong !== null && !snap.scenes.some((s) => s.index === mixSong)) mixSong = null;
+  if (!pick._busy) mixSong = state.song_mix?.scene_index ?? null;
   const sig = JSON.stringify(snap.scenes.map((s) => [s.index, s.name]));
   if (pick._sig !== sig) {
     pick._sig = sig;
     pick.replaceChildren(new Option("Every track", ""),
       ...snap.scenes.filter((s) => s.name).map((s) => new Option(`${s.index + 1}. ${s.name}`, String(s.index))));
   }
-  if (document.activeElement !== pick) pick.value = mixSong === null ? "" : String(mixSong);
+  if (document.activeElement !== pick && !pick._busy) pick.value = mixSong === null ? "" : String(mixSong);
+
+  const info = state.song_mix || {};
+  const saved = $("#mix-saved");
+  saved.hidden = mixSong === null;
+  saved.textContent = info.song ? `Changes save to ${info.song}` : "";
+  const marks = $("#mix-checkpoints");
+  marks.hidden = mixSong === null;
+  marks.textContent = info.checkpoints?.length ? `Checkpoints (${info.checkpoints.length})` : "Checkpoints";
+  if ($("#checkpoint-dialog").open) renderCheckpoints();
 }
 
-$("#mix-song").addEventListener("change", (e) => {
-  mixSong = e.target.value === "" ? null : Number(e.target.value);
-  try { localStorage.setItem("holysound-mix-song", e.target.value); } catch {}
+async function songMix(body) {
+  try {
+    const next = await api("/api/song-mix", body);
+    mixPickedAt = performance.now();
+    render(next);
+    return true;
+  } catch (e) {
+    toast(e.message, "error");
+    return false;
+  }
+}
+
+$("#mix-song").addEventListener("change", async (e) => {
+  const pick = e.target;
+  const chosen = pick.value === "" ? null : Number(pick.value);
+  // Before any redraw: a redraw takes the song from the server, which doesn't know this pick yet.
+  // Putting the song's faders back takes a moment too; don't flick back meanwhile.
+  pick._busy = true;
+  mixSong = chosen;
   if (state?.live.snapshot) renderMixer(state.live.snapshot);
+  try {
+    await songMix({ action: "pick", scene_index: chosen });
+  } finally {
+    pick._busy = false;
+    if (state?.live.snapshot) renderMixer(state.live.snapshot);
+  }
+});
+
+// -- checkpoints ---------------------------------------------------------------
+
+function renderCheckpoints() {
+  const info = state.song_mix || {};
+  $("#checkpoint-song").textContent = info.song || "this song";
+  const marks = info.checkpoints || [];
+  $("#checkpoint-empty").hidden = marks.length > 0;
+  $("#checkpoint-list").replaceChildren(...marks.map((m) => {
+    const li = document.createElement("li");
+    li.className = "checkpoint";
+    const text = document.createElement("div");
+    text.className = "checkpoint-text";
+    const label = document.createElement("strong");
+    label.textContent = m.label;
+    const when = document.createElement("span");
+    when.className = "muted";
+    when.textContent = new Date(m.at * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+    text.append(label, when);
+    const restore = button("Go back to this", "btn", () => songMix({ action: "restore", id: m.id })
+      .then((ok) => ok && toast(`${info.song} is back to “${m.label}”. The mix before it is saved as a checkpoint.`)));
+    const remove = button("Delete", "btn ghost", () => songMix({ action: "delete", id: m.id }));
+    remove.setAttribute("aria-label", `Delete ${m.label}`);
+    li.append(text, restore, remove);
+    return li;
+  }));
+}
+
+$("#mix-checkpoints").addEventListener("click", () => {
+  $("#checkpoint-label").value = "";
+  renderCheckpoints();
+  $("#checkpoint-dialog").showModal();
+});
+
+$("#checkpoint-save").addEventListener("click", async () => {
+  const label = $("#checkpoint-label").value.trim();
+  await songMix({ action: "checkpoint", label });
+  $("#checkpoint-label").value = "";
+});
+$("#checkpoint-label").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("#checkpoint-save").click(); }
 });
 
 function buildMixerGroups(snap) {
@@ -903,7 +978,7 @@ function updateStrip(el, row, snap) {
     if (!holding.has(level)) {
       level.value = clip.gain_db ?? 0;
       paintFill(level);
-      $(".song-level output", el).textContent = (clip.gain || "").replace("-", "−");
+      $(".song-level output", el).textContent = dbText(clip.gain_db ?? 0);
     }
   }
   el.classList.toggle("is-return", row.is_return);
@@ -915,6 +990,7 @@ function updateStrip(el, row, snap) {
 
   const name = $(".strip-name", el);
   if (document.activeElement !== name) name.value = row.name;
+  name.title = row.name;
 
   // Return tracks (shared effects) aren't sorted into instrument folders.
   $(".strip-grip", el).hidden = row.is_return;
@@ -1302,7 +1378,8 @@ function songRow(scene) {
     if (value >= 20 && value <= 999) liveCmd("set_scene", { scene_index: scene.index, bpm: value }).catch(() => {});
   });
   li.append(transposer(scene));
-  const start = button("", "btn start", () => liveCmd("fire_scene", { scene_index: scene.index }).catch(() => {}));
+  // Starting a song here also puts the mixer on its mix.
+  const start = button("", "btn start", () => liveCmd("fire_scene", { scene_index: scene.index }).then(poll, () => {}));
   start.innerHTML = "▶<span> Start</span>";
   start.setAttribute("aria-label", `Start ${scene.name || "song " + (scene.index + 1)}`);
   li.append(start);

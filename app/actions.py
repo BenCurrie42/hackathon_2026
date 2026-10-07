@@ -40,6 +40,10 @@ TrackRef = Annotated[
     Field(description='A track name ("Lead Vocal"), its number in Live ("3"), or a return letter ("A").'),
 ]
 SongRef = Annotated[str, Field(description="A song (scene) name, or its number in the list.")]
+MixSong = Annotated[SongRef | None, Field(default=None, description=(
+    "Whose mix this is: a song's name or number changes that song's saved mix. Null: the song "
+    "the mixer is on, or every song when it's on none. For a song other than the one the mixer "
+    "is on, the faders don't move now; the change comes in when that song is picked or starts."))]
 InputChannel = Annotated[
     str,
     Field(
@@ -223,12 +227,17 @@ class SetVolume(BaseModel):
     action: Literal["set_volume"]
     track: TrackRef
     db: float = Field(ge=-70, le=6, description="Fader level in dB. 0 is unity; -70 is effectively off.")
+    song: MixSong
 
     def describe(self):
-        return f"Set “{self.track}” to {_db(self.db)}"
+        return _in_song(self.song, f"Set “{self.track}” to {_db(self.db)}")
 
     def run(self, ex):
         t = ex.track(self.track)
+        later = ex.later_song(self.song)
+        if later:
+            ex.save_for_song(later, t, volume_db=self.db)
+            return f"{t.name} will be at {_db(self.db)} in {later}."
         result = ex.call("set_volume", track_index=t.index, is_return=t.is_return, db=self.db)
         return f"{t.name} is now at {result['volume']}."
 
@@ -237,12 +246,17 @@ class SetPan(BaseModel):
     action: Literal["set_pan"]
     track: TrackRef
     pan: float = Field(ge=-1, le=1, description="-1 hard left, 0 centre, 1 hard right.")
+    song: MixSong
 
     def describe(self):
-        return f"Pan “{self.track}” {_pan(self.pan)}"
+        return _in_song(self.song, f"Pan “{self.track}” {_pan(self.pan)}")
 
     def run(self, ex):
         t = ex.track(self.track)
+        later = ex.later_song(self.song)
+        if later:
+            ex.save_for_song(later, t, pan=self.pan)
+            return f"{t.name} will be panned {_pan(self.pan)} in {later}."
         result = ex.call("set_pan", track_index=t.index, is_return=t.is_return, pan=self.pan)
         return f"{t.name} is panned {result['pan']}."
 
@@ -251,12 +265,17 @@ class SetMute(BaseModel):
     action: Literal["set_mute"]
     track: TrackRef
     on: bool = Field(description="True mutes the track, false unmutes it.")
+    song: MixSong
 
     def describe(self):
-        return f"{'Mute' if self.on else 'Unmute'} “{self.track}”"
+        return _in_song(self.song, f"{'Mute' if self.on else 'Unmute'} “{self.track}”")
 
     def run(self, ex):
         t = ex.track(self.track)
+        later = ex.later_song(self.song)
+        if later:
+            ex.save_for_song(later, t, mute=self.on)
+            return f"{t.name} will be {'muted' if self.on else 'unmuted'} in {later}."
         ex.call("set_mute", track_index=t.index, is_return=t.is_return, on=self.on)
         return f"{t.name} is {'muted' if self.on else 'unmuted'}."
 
@@ -315,15 +334,20 @@ class SetSend(BaseModel):
     track: TrackRef
     to_return: TrackRef = Field(description="The return track (shared effect) to send to.")
     db: float = Field(ge=-70, le=6, description="Send level in dB; -70 turns the send off.")
+    song: MixSong
 
     def describe(self):
-        return f"Send “{self.track}” into “{self.to_return}” at {_db(self.db)}"
+        return _in_song(self.song, f"Send “{self.track}” into “{self.to_return}” at {_db(self.db)}")
 
     def run(self, ex):
         t = ex.track(self.track)
         r = ex.track(self.to_return)
         if not r.is_return:
             raise ActionFailed(f"{r.name} isn't a shared effect (return track), so nothing can be sent to it.")
+        later = ex.later_song(self.song)
+        if later:
+            ex.save_for_song(later, t, send=(r.name, self.db))
+            return f"{t.name} will send to {r.name} at {_db(self.db)} in {later}."
         result = ex.call("set_send", track_index=t.index, is_return=t.is_return,
                          return_index=r.index, db=self.db)
         return f"{t.name} sends to {r.name} at {result['level']}."
@@ -488,6 +512,27 @@ class StartSong(BaseModel):
         s = ex.song(self.song)
         ex.call("fire_scene", scene_index=s["index"])
         return f"Started {s['name'] or 'song ' + str(s['index'] + 1)}."
+
+
+class PickSongMix(BaseModel):
+    action: Literal["pick_song_mix"]
+    song: SongRef | None = Field(description=(
+        "The song whose mix goes on the mixer now: its saved faders, pan, mute and sends come back. "
+        "Null takes the mixer off every song (faders shared again)."))
+
+    def describe(self):
+        return f"Put the mixer on “{self.song}”’s mix" if self.song else "Take the mixer off every song’s mix"
+
+    def run(self, ex):
+        if ex.pick_song is None:
+            raise ActionFailed("Song mixes need the Holy Sound app.")
+        if self.song is None:
+            ex.pick_song(None)
+            return "The mixer is on no song now: the faders are shared by every song."
+        s = ex.song(self.song)
+        ex.pick_song(s["index"])
+        ex.tracks_changed()
+        return f"The mixer is on {_song_name(s)}'s mix now."
 
 
 class Transport(BaseModel):
@@ -698,7 +743,7 @@ class Listen(BaseModel):
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    MoveSong, TransposeSong, DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
+    MoveSong, TransposeSong, DeleteSong, StartSong, PickSongMix, Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
 ]
 
 
@@ -721,8 +766,11 @@ class Target:
 class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
-    def __init__(self, live, files=None, on_touch=None, folders=None, parts_dir=None):
+    def __init__(self, live, files=None, on_touch=None, folders=None, parts_dir=None, mixes=None,
+                 pick_song=None):
         self._live = live
+        self.mixes = mixes  # the app's SongMixMemory, or None where there are no song mixes
+        self.pick_song = pick_song  # puts the mixer on a song (scene index, or None)
         self._files = files or {}
         self.folders = folders  # the mixer's FolderMemory, or None where there is no mixer
         self.parts_dir = Path(parts_dir) if parts_dir else default_parts_dir()  # mixed parts go here
@@ -841,6 +889,28 @@ class Executor:
         names = ", ".join(t.name for t in everything) or "none yet"
         raise ActionFailed(f"There's no track called {ref}. The tracks are: {names}.")
 
+    def later_song(self, ref):
+        """The song a mixer change is for, if it isn't the one the mixer is on now. Else None."""
+        if ref is None:
+            return None
+        name = self.song(ref)["name"]
+        if not name:
+            raise ActionFailed("Give that song a name first; its mix is kept by name.")
+        if self.mixes is None:
+            raise ActionFailed("Song mixes need the Holy Sound app.")
+        current = self.mixes.current
+        return None if current and current.casefold() == name.casefold() else name
+
+    def save_for_song(self, song, target, volume_db=None, pan=None, mute=None, send=None):
+        """Change one track in a song's saved mix, without touching Live now."""
+        from app import song_mixes
+
+        def seed():
+            return song_mixes.mix_of(self._live.snapshot(max_age=0))
+
+        self.mixes.edit(song, seed, target.is_return, target.name,
+                        volume_db=volume_db, pan=pan, mute=mute, send=send)
+
     def song(self, ref):
         rows = self.call("list_scenes")
         ref = ref.strip()
@@ -853,19 +923,25 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
+def _in_song(song, text):
+    return f"{text} in “{song}”" if song else text
+
+
 def default_parts_dir():
     """Where mixed parts are written: a folder people can find, not the vendor's."""
     home = os.environ.get("HOLYSOUND_HOME")
     return (Path(home) / "Parts") if home else Path.home() / "Music" / "Holy Sound" / "Parts"
 
 
-def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=None):
+def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=None, mixes=None,
+            pick_song=None):
     """Run actions in order. One failure doesn't stop the rest.
 
     on_touch(name) is called for each track an action works on. folders is the
-    mixer's FolderMemory, for move_to_folder and renames.
+    mixer's FolderMemory, for move_to_folder and renames. mixes and pick_song are
+    the app's song mixes, for mixer changes meant for one song.
     """
-    ex = Executor(live, files, on_touch, folders, parts_dir)
+    ex = Executor(live, files, on_touch, folders, parts_dir, mixes, pick_song)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
     per_song = {}

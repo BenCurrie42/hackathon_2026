@@ -167,13 +167,13 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `add_return` | `name`, `devices[]` | `create_return_track`, `load_device` | Returns lettered by index. | |
 | `rename_track` | `track`, `new_name` | `set_track_name` | Also renames in `FolderMemory` so folder moves follow. | |
 | `delete_track` | `track` | `delete_track` | Result tells user Cmd+Z in Live restores it. | destructive |
-| `set_volume` | `track`, `db` | `set_volume` | Any track or return. | |
-| `set_pan` | `track`, `pan` | `set_pan` | | |
-| `set_mute` | `track`, `on` | `set_mute` | | |
+| `set_volume` | `track`, `db`, `song?` | `set_volume` | Any track or return. A `song` other than the one on the mixer edits only that song's saved mix (`Executor.save_for_song`); Live isn't touched. Same `song` rule for `set_pan`, `set_mute`, `set_send`. | |
+| `set_pan` | `track`, `pan`, `song?` | `set_pan` | | |
+| `set_mute` | `track`, `on`, `song?` | `set_mute` | | |
 | `set_solo` | `track`, `on` | `set_solo` | | |
 | `set_input` | `track`, `input` (null = off) | `set_routing` direction input | Returns not allowed (`allow_return=False`). | |
 | `set_output` | `track`, `output` | `set_routing` direction output | `channel_name` passed through; Live validates the names. | |
-| `set_send` | `track`, `to_return`, `db` | `set_send` | Fails with a sentence if `to_return` is not a return track. | |
+| `set_send` | `track`, `to_return`, `db`, `song?` | `set_send` | Fails with a sentence if `to_return` is not a return track. | |
 | `add_device` | `track`, `device{device, preset?}` | `load_device` | Appended at end of chain. A missing preset falls back to the device default with a note (`Executor.load_device`, matches RigLink's "no preset called" error). Any other load failure raises. | |
 | `remove_device` | `track`, `device` (name on the track) | `list_devices`, `delete_device` | Case-insensitive; removes the **last** matching device. Error lists the devices present. | destructive |
 | `set_tempo` | `bpm` | `set_tempo` | Whole-set tempo. | |
@@ -182,6 +182,7 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `transpose_song` | `song`, `semitones` (-12..12) | `transpose_song` | Fails ("has no audio clips") if RigLink reports zero clips. 0 resets. | |
 | `delete_song` | `song` | `delete_scene` | | destructive |
 | `start_song` | `song` | `fire_scene` | Launches the scene. | audible |
+| `pick_song_mix` | `song` (null = no song) | `App.pick_song_mix` | Puts the song's saved faders, pan, mute and sends back. Fails without the app (`ex.pick_song is None`). | |
 | `transport` | `playing` | `play` / `stop` | | audible when playing |
 | `set_color` | `track`, `color` | `set_track_color` | RGB from `TRACK_COLORS`. | |
 | `move_to_folder` | `track`, `folder` | `FolderMemory.move`, then `set_track_color` | Fails if `ex.folders is None`. Folder is app-side memory only; Live shows it as the folder's colour (colour failure is a partial "But"). Returns not allowed. | |

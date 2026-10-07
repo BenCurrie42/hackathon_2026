@@ -66,6 +66,7 @@ Pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assist
 | `app/room.py` | Room memory, `room.json` |
 | `app/song_map.py` | Reads a song's stems as text (sections, tempo, likely lead vocal) |
 | `app/folders.py` | Mixer folders and remembered moves, `folders.json` |
+| `app/song_mixes.py` | Each song's faders, pan, mute and sends, and checkpoints, `song_mixes.json` |
 | `app/fake_live.py` | In-memory stand-in for Live + RigLink (`--fake-live`, tests) |
 | `app/static/` | HTML/CSS/JS, served as-is |
 | `tests/` | `unittest` suite (`test_app.py`, `test_providers.py`); needs neither Live nor an API key |
@@ -86,9 +87,10 @@ Pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assist
 |---|---|---|
 | `~/.holysound/room.json` | `app/room.py` | Room memory (interface, who is on which input, outputs) |
 | `~/.holysound/folders.json` | `app/folders.py` | Remembered moves between mixer folders |
+| `~/.holysound/song_mixes.json` | `app/song_mixes.py` | Each song's mixer state by song and track name, its checkpoints, and which song the mixer is on |
 | `.env` (repo root) | the user | `ANTHROPIC_API_KEY` or `HOLYSOUND_PROVIDER`/`OPENCODE_API_KEY`/`HOLYSOUND_MODEL`; read by `load_dotenv` in `app/server.py` using `setdefault`, so real env vars win |
 
-`$HOLYSOUND_HOME` overrides the `~/.holysound` directory for both JSON files.
+`$HOLYSOUND_HOME` overrides the `~/.holysound` directory for these JSON files.
 
 ## Running things
 

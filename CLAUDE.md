@@ -205,8 +205,10 @@ own track, each with Live's default input. These hold everywhere audio comes in
    live sources set their input explicitly afterwards.
 4. **A song's own mix lives in its clips**: clip gain for level, the clip activator
    (`set_clip_active`) to leave a part out of one song. Live applies both when the
-   song starts, app open or not. Faders are the live mix shared by every song;
-   muting a track silences it in every song.
+   song starts, app open or not. Faders, pan, mute and sends are per song only through
+   the app (`app/song_mixes.py`): it saves them while the mixer is on a song and puts
+   them back when that song is picked or starts. With no song picked, or the app closed,
+   they're shared by every song.
 
 ## Constraints
 
@@ -262,6 +264,8 @@ app/                            Web app: chat + mixer, `uv run python -m app`
                                 sections, tempo from the click, likely lead vocal
     folders.py                  Mixer folders (Vocals / Instruments / Click & playback / Other):
                                 sorted by track name, plus moves remembered in ~/.holysound/folders.json
+    song_mixes.py               Each song's faders, pan, mute and sends, and named checkpoints,
+                                in ~/.holysound/song_mixes.json; the server puts them back on a pick
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
     static/                     The page: HTML/CSS/JS, served as-is
 tests/                          unittest suite; needs neither Live nor an API key.

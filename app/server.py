@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app import audio_files, parts, song_key, vendor_set
+from app import audio_files, parts, song_key, song_mixes, vendor_set
 from app.actions import ActionFailed, Executor, Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
@@ -46,6 +46,7 @@ TEMPLATE = ROOT / "templates" / "test.als"
 DEFAULT_PORT = 8765
 KEEP_ALIVE = 15  # seconds between comments on a quiet event stream
 AI_GLOW_SECONDS = 3.0  # how long a track stays lit after the assistant last changed it
+MIX_SETTLE_SECONDS = 1.5  # after putting a song's mix back, don't save what Live reads mid-change
 
 # What the mixer panel may do directly, without going through the assistant.
 # Everything here is undoable in Live with Cmd+Z.
@@ -60,9 +61,13 @@ DIRECT_COMMANDS = {
 
 class App:
     def __init__(self, live, conversation, key=None, folders=None, demo=False, imports_path=None,
-                 parts_dir=None):
+                 parts_dir=None, mixes=None):
         self.room = conversation.room
         self.folders = folders or FolderMemory()
+        self.mixes = mixes or song_mixes.SongMixMemory()
+        self._mix_lock = threading.Lock()  # putting a mix back, so a poll doesn't save it half done
+        self._mix_settled_at = 0.0
+        self._last_playing = None  # the song Live was playing at the last look, to notice a new one
         self.parts_dir = parts_dir  # where mixed parts are written; None: ~/Music/Holy Sound/Parts
         self.demo = demo  # True when the "Live" behind this is the built-in pretend one
         self.clock = time.monotonic
@@ -106,7 +111,9 @@ class App:
 
     def live_state(self):
         try:
-            return {"connected": True, "snapshot": self.with_folders(self.live.snapshot()), "message": None}
+            snap = self.live.snapshot()
+            self.follow_mix(snap)
+            return {"connected": True, "snapshot": self.with_folders(snap), "message": None}
         except LiveUnavailable as e:
             return {"connected": False, "snapshot": None, "message": str(e)}
         except RigLinkError as e:
@@ -118,6 +125,95 @@ class App:
             snap = self.live.snapshot()
             rows = snap["returns"] if args.get("is_return") else snap["tracks"]
             return rows[int(args.get("track_index"))]["name"]
+        except (LiveUnavailable, RigLinkError, KeyError, IndexError, TypeError, ValueError):
+            return None
+
+    # -- song mixes -----------------------------------------------------
+
+    def mix_state(self, snap=None):
+        """Which song the mixer is on, for the page."""
+        song = self.mixes.current
+        scene = _scene_named(snap, song) if snap else None
+        return {
+            "song": song,
+            "scene_index": scene["index"] if scene else None,
+            "saved_at": self.mixes.saved_at(song) if song else None,
+            "checkpoints": self.mixes.checkpoints(song) if song else [],
+        }
+
+    def pick_song_mix(self, scene_index):
+        """Put the mixer on a song: its saved mix goes back on, or the current one becomes it.
+
+        scene_index None takes the mixer off every song; faders are then shared again.
+        """
+        with self._mix_lock:
+            snap = self.live.snapshot(max_age=0)
+            if scene_index is None:
+                self.mixes.pick(None)
+                return
+            scene = next((s for s in snap["scenes"] if s["index"] == int(scene_index)), None)
+            if scene is None or not scene["name"]:
+                raise UserError("Give that song a name first; its mix is kept by name.")
+            saved = self.mixes.saved(scene["name"])
+            if saved is None:
+                self.mixes.record(scene["name"], song_mixes.mix_of(snap))
+            else:
+                self._put_back(saved, snap)
+            self.mixes.pick(scene["name"])
+
+    def _put_back(self, mix, snap):
+        """Caller holds the mix lock."""
+        try:
+            for cmd, args in song_mixes.commands(mix, snap):
+                self.live.call(cmd, **args)
+        finally:
+            self._mix_settled_at = self.clock() + MIX_SETTLE_SECONDS
+
+    def checkpoint_song_mix(self, label=None):
+        song = self._current_song()
+        self.mixes.checkpoint(song, song_mixes.mix_of(self.live.snapshot(max_age=0)), label)
+
+    def restore_song_mix(self, mark_id):
+        song = self._current_song()
+        mark = self.mixes.checkpoint_mix(song, mark_id)
+        if mark is None:
+            raise UserError("That checkpoint isn't there any more.")
+        with self._mix_lock:
+            snap = self.live.snapshot(max_age=0)
+            self.mixes.checkpoint(song, song_mixes.mix_of(snap), f"Before going back to {mark['label']}")
+            self._put_back(mark["mix"], snap)
+            self.mixes.record(song, mark["mix"])
+
+    def _current_song(self):
+        if not self.mixes.current:
+            raise UserError("Pick a song in Song mix first.")
+        return self.mixes.current
+
+    def follow_mix(self, snap):
+        """On each look at Live: a song that just started gets its mix; otherwise save changes."""
+        playing = _playing_scene(snap)
+        started = playing is not None and playing != self._last_playing
+        self._last_playing = playing
+        try:
+            if started:
+                name = next((s["name"] for s in snap["scenes"] if s["index"] == playing), "")
+                if name and name.casefold() != (self.mixes.current or "").casefold():
+                    self.pick_song_mix(playing)
+                    return
+            if not self._mix_lock.acquire(blocking=False):
+                return  # a mix is being put back right now
+            try:
+                song = self.mixes.current
+                if song and self.clock() >= self._mix_settled_at and _scene_named(snap, song):
+                    self.mixes.record(song, song_mixes.mix_of(snap))
+            finally:
+                self._mix_lock.release()
+        except (LiveUnavailable, RigLinkError, UserError):
+            pass  # the next look tries again
+
+    def scene_name(self, args):
+        try:
+            return self.live.snapshot()["scenes"][int(args.get("scene_index"))]["name"] or None
         except (LiveUnavailable, RigLinkError, KeyError, IndexError, TypeError, ValueError):
             return None
 
@@ -141,8 +237,9 @@ class App:
         return out
 
     def state(self):
+        live = self.live_state()
         return {
-            "live": self.live_state(),
+            "live": live,
             "ai": self.ai_state(),
             "chat": self.transcript(),
             "busy": self.chat.busy,
@@ -155,6 +252,7 @@ class App:
             "room": self.room.facts() if self.room else [],
             "activity": self.activity(),
             "demo": self.demo,
+            "song_mix": self.mix_state(live["snapshot"]),
         }
 
     # -- actions --------------------------------------------------------
@@ -162,7 +260,20 @@ class App:
     def notes(self):
         live = self.live_state()
         stock = self.live.stock_devices() if live["connected"] else None
-        return session_notes(live["snapshot"], stock, live["message"], self.imports, self.room)
+        return session_notes(live["snapshot"], stock, live["message"], self.imports, self.room,
+                             self.mixes.current, self.mix_notes(live["snapshot"]))
+
+    def mix_notes(self, snap):
+        """Each other song's saved mix, as how it differs from the mixer now."""
+        if not snap:
+            return []
+        lines = []
+        for song in self.mixes.songs():
+            if song.casefold() == (self.mixes.current or "").casefold() or not _scene_named(snap, song):
+                continue
+            changes = song_mixes.differences(self.mixes.saved(song), snap)
+            lines.append(f"  {song}: " + ("; ".join(changes) if changes else "same as the mixer now"))
+        return lines
 
     def send_message(self, text, attachment=None):
         self.chat.send(text, self.notes(), attachment)
@@ -270,7 +381,8 @@ class App:
         with self._apply_lock:
             p = self._pending(pid)
             results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
-                              folders=self.folders, parts_dir=self.parts_dir)
+                              folders=self.folders, parts_dir=self.parts_dir, mixes=self.mixes,
+                              pick_song=self.pick_song_mix)
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -312,6 +424,24 @@ class App:
         if p["status"] != "pending":
             raise UserError("That suggestion has already been dealt with.")
         return p
+
+
+def _playing_scene(snap):
+    """The song (scene index) Live is playing, from its playing clips, or None."""
+    if not snap or not snap["song"].get("is_playing"):
+        return None
+    counts = {}
+    for t in snap["tracks"]:
+        for c in t.get("clips", []):
+            if c.get("is_playing"):
+                counts[c["scene_index"]] = counts.get(c["scene_index"], 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def _scene_named(snap, name):
+    if not name:
+        return None
+    return next((s for s in snap["scenes"] if (s["name"] or "").casefold() == name.casefold()), None)
 
 
 class UserError(Exception):
@@ -496,6 +626,20 @@ def make_handler(app):
                         raise UserError("Say which track.")
                     app.folders.set_follows_key(track, bool(body.get("follows")))
                     return self._json(app.state())
+                if path == "/api/song-mix":
+                    action = body.get("action")
+                    if action == "pick":
+                        index = body.get("scene_index")
+                        app.pick_song_mix(None if index is None or index == "" else int(index))
+                    elif action == "checkpoint":
+                        app.checkpoint_song_mix(str(body.get("label") or ""))
+                    elif action == "restore":
+                        app.restore_song_mix(str(body.get("id", "")))
+                    elif action == "delete":
+                        app.mixes.delete_checkpoint(app._current_song(), str(body.get("id", "")))
+                    else:
+                        raise UserError("The page asked for something the song mix can't do.")
+                    return self._json(app.state())
                 if path == "/api/reset":
                     app.chat.reset()
                     return self._json(app.state())
@@ -515,12 +659,17 @@ def make_handler(app):
                     if not isinstance(args, dict):
                         raise UserError("The page sent something the app couldn't read.")
                     old_name = app.track_name(args) if cmd == "set_track_name" else None
+                    old_song = app.scene_name(args) if cmd == "set_scene" and args.get("name") else None
                     if cmd == "transpose_song":
                         # Click, guide and anything the volunteer opted out keep their key.
                         args["skip_tracks"] = app.folders.kept_tracks(app.live.snapshot()["tracks"])
                     result = app.live.call(cmd, **args)
                     if old_name and args.get("name"):
                         app.folders.rename(old_name, str(args["name"]))
+                    if old_song:
+                        app.mixes.rename(old_song, str(args["name"]))
+                    if cmd == "fire_scene" and app.scene_name(args):
+                        app.pick_song_mix(int(args["scene_index"]))  # starting a song here puts its mix on
                     return self._json({"result": result, "live": app.live_state()})
                 return self._error("Not found.", HTTPStatus.NOT_FOUND)
             except UserError as e:

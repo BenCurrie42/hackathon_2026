@@ -8,6 +8,7 @@ pytest isn't an approved dependency yet (CLAUDE.md).
 
 import array
 import copy
+import os
 import gzip
 import http.client
 import http.client as http_client
@@ -23,7 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app import audio_files, fake_live, mixdown, parts, song_key, song_map, vendor_set
+from app import audio_files, fake_live, mixdown, parts, song_key, song_map, song_mixes, vendor_set
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.folders import FolderMemory, classify
@@ -37,6 +38,19 @@ from live_control.starting_fader import starting_fader_db
 from live_control.stem_level import StemLevel, pair_level
 from live_control.stereo_pairs import stereo_pairs
 from live_control.timecode import is_timecode
+
+
+_home = None
+
+
+def setUpModule():
+    """Anything that remembers to ~/.holysound writes to a scratch folder instead."""
+    global _home
+    _home = tempfile.TemporaryDirectory()
+    patcher = mock.patch.dict(os.environ, {"HOLYSOUND_HOME": _home.name})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    unittest.addModuleCleanup(_home.cleanup)
 
 
 class Block(SimpleNamespace):
@@ -1410,6 +1424,179 @@ class AddTrackWordingTest(unittest.TestCase):
         track = AddTrack(action="add_track", name="Keys", input="5/6", pan=-0.5,
                          devices=[{"device": "Reverb", "preset": "Large Hall"}])
         self.assertEqual(track.describe(), "Add an audio track “Keys” on input 5/6, with Reverb (Large Hall), panned 25L")
+
+
+class SongMixTest(FakeLiveCase):
+    """Faders, pan, mute and sends kept per song, put back when the song is picked."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.mixes = song_mixes.SongMixMemory(Path(self.home.name) / "song_mixes.json")
+        self.app = App(self.live, Conversation(client_factory=lambda: None),
+                       folders=FolderMemory(Path(self.home.name) / "folders.json"), mixes=self.mixes)
+        self.now = [100.0]
+        self.app.clock = lambda: self.now[0]
+        self.live.call("create_return_track", name="Reverb")
+        for name in ("Lead Vocal", "Keys"):
+            self.live.call("create_audio_track", name=name)
+        self.live.call("set_scene", scene_index=0, name="Living Hope")  # a new set starts with one empty song
+        self.live.call("create_scene", name="Gratitude")
+
+    def look(self):
+        """A poll, after any put-back has settled."""
+        self.now[0] += 10
+        return self.app.state()
+
+    def track(self, name):
+        return next(t for t in self.live.snapshot(max_age=0)["tracks"] if t["name"] == name)
+
+    def test_each_song_gets_its_own_faders_pan_mute_and_sends_back(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-6.0)
+        self.live.call("set_pan", track_index=1, pan=-0.5)
+        self.live.call("set_send", track_index=0, return_index=0, db=-12.0)
+        self.look()  # saved to Living Hope
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-1.0)
+        self.live.call("set_mute", track_index=1, on=True)
+        self.look()  # saved to Gratitude
+
+        self.app.pick_song_mix(0)
+        vocal, keys = self.track("Lead Vocal"), self.track("Keys")
+        self.assertAlmostEqual(vocal["volume_db"], -6.0, places=1)
+        self.assertAlmostEqual(vocal["sends"][0]["level_db"], -12.0, places=1)
+        self.assertAlmostEqual(keys["pan_value"], -0.5, places=2)
+        self.assertFalse(keys["mute"])
+        self.app.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -1.0, places=1)
+        self.assertTrue(self.track("Keys")["mute"])
+
+    def test_survives_a_restart_and_a_moved_song(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=1, db=-9.0)
+        self.look()
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=1, db=0.0)
+        self.look()
+        self.live.call("move_scene", scene_index=0, to_index=1)  # Living Hope is now second
+
+        again = App(self.live, Conversation(client_factory=lambda: None), mixes=song_mixes.SongMixMemory(self.mixes.path))
+        self.assertEqual(again.mix_state(self.live.snapshot(max_age=0))["song"], "Gratitude")
+        again.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], -9.0, places=1)
+
+    def test_a_change_while_putting_a_mix_back_is_not_saved_to_the_song(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-3.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-8.0)
+        self.look()
+        self.app.pick_song_mix(1)  # Gratitude's -3 goes back on
+        self.live.call("set_volume", track_index=0, db=-20.0)  # read while still settling
+        self.app.state()
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["volume_db"], -3.0, places=1)
+        self.look()
+        self.assertAlmostEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["volume_db"], -20.0, places=1)
+
+    def test_no_song_picked_saves_nothing(self):
+        self.live.call("set_volume", track_index=0, db=-4.0)
+        self.look()
+        self.assertIsNone(self.mixes.saved("Living Hope"))
+        self.assertIn("faders are shared", self.app.notes())
+
+    def test_starting_a_song_in_live_puts_its_mix_on(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-15.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        self.look()
+        with tempfile.TemporaryDirectory() as folder:
+            wav = Path(folder) / "vocal.wav"
+            with wave.open(str(wav), "wb") as w:
+                w.setnchannels(1), w.setsampwidth(2), w.setframerate(8000), w.writeframes(b"\0\0" * 800)
+            self.live.call("import_audio", track_index=0, file_path=str(wav), scene_index=1)
+        self.live.call("fire_scene", scene_index=1)  # pressed in Live, not in the app
+        state = self.look()
+        self.assertEqual(state["song_mix"]["song"], "Gratitude")
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -15.0, places=1)
+
+    def test_checkpoints_restore_and_undo(self):
+        self.app.pick_song_mix(0)
+        self.live.call("set_volume", track_index=0, db=-2.0)
+        self.look()
+        self.app.checkpoint_song_mix("After soundcheck")
+        self.live.call("set_volume", track_index=0, db=-30.0)
+        self.look()
+
+        marks = self.app.mix_state()["checkpoints"]
+        self.assertEqual([m["label"] for m in marks], ["After soundcheck"])
+        self.app.restore_song_mix(marks[0]["id"])
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -2.0, places=1)
+        self.assertAlmostEqual(self.mixes.saved("Living Hope")["tracks"]["lead vocal"]["volume_db"], -2.0, places=1)
+        undo = self.app.mix_state()["checkpoints"][0]
+        self.assertEqual(undo["label"], "Before going back to After soundcheck")
+        self.app.restore_song_mix(undo["id"])
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -30.0, places=1)
+
+    def test_renaming_a_song_keeps_its_mix(self):
+        self.app.pick_song_mix(0)
+        self.look()
+        self.mixes.rename("Living Hope", "Living Hope (Acoustic)")
+        self.assertIsNotNone(self.mixes.saved("living hope (acoustic)"))
+        self.assertEqual(self.mixes.current, "Living Hope (Acoustic)")
+
+    def test_unnamed_song_is_refused_in_a_sentence(self):
+        self.live.call("create_scene")
+        from app.server import UserError
+        with self.assertRaisesRegex(UserError, "name"):
+            self.app.pick_song_mix(2)
+
+    def apply(self, *actions):
+        parsed = Proposal(actions=list(actions)).actions
+        return run_all(self.live, parsed, mixes=self.mixes, pick_song=self.app.pick_song_mix)
+
+    def test_ai_change_for_another_song_saves_it_without_moving_the_faders(self):
+        self.app.pick_song_mix(0)
+        self.look()
+        [result] = self.apply({"action": "set_volume", "track": "Keys", "db": -9, "song": "Gratitude"})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("in Gratitude", result["text"])
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], 0.0, places=1)  # Living Hope is playing
+        self.look()
+        self.assertIn("Keys -9 dB", self.app.notes())
+        self.app.pick_song_mix(1)
+        self.assertAlmostEqual(self.track("Keys")["volume_db"], -9.0, places=1)
+
+    def test_ai_change_for_the_song_on_the_mixer_happens_now(self):
+        self.app.pick_song_mix(0)
+        self.apply({"action": "set_mute", "track": "Keys", "on": True, "song": "Living Hope"},
+                 {"action": "set_send", "track": "Lead Vocal", "to_return": "Reverb", "db": -10, "song": "Gratitude"})
+        self.assertTrue(self.track("Keys")["mute"])
+        self.look()
+        self.assertTrue(self.mixes.saved("Living Hope")["tracks"]["keys"]["mute"])
+        self.assertEqual(self.mixes.saved("Gratitude")["tracks"]["lead vocal"]["sends"]["Reverb"], -10.0)
+
+    def test_ai_can_put_the_mixer_on_a_song(self):
+        self.app.pick_song_mix(1)
+        self.live.call("set_volume", track_index=0, db=-12.0)
+        self.look()
+        self.app.pick_song_mix(0)
+        [result] = self.apply({"action": "pick_song_mix", "song": "Gratitude"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.mixes.current, "Gratitude")
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -12.0, places=1)
+
+    def test_only_differences_are_sent_and_new_tracks_are_left_alone(self):
+        snap = self.live.snapshot(max_age=0)
+        mix = song_mixes.mix_of(snap)
+        self.assertEqual(song_mixes.commands(mix, snap), [])
+        mix["tracks"]["lead vocal"]["volume_db"] = -5.0
+        del mix["tracks"]["keys"]
+        self.assertEqual(song_mixes.commands(mix, snap),
+                         [("set_volume", {"track_index": 0, "is_return": False, "db": -5.0})])
 
 
 if __name__ == "__main__":

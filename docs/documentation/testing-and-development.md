@@ -116,7 +116,7 @@ There is no release script. The repo has a `release-docs` skill for this, and th
 - Errors are phrased as plain sentences for a non-technical volunteer (for example the setup messages in `app/providers.py`, `AssistantSetupError`, `AssistantUnavailable`).
 - Stdlib first: `http.server`, `urllib`, `wave`, `unittest`; `.env` is parsed by hand.
 - Tests drive real client and server code against fakes at the socket/HTTP boundary rather than mocking internal functions.
-- Persistent user state lives under `~/.holysound/` (`room.json`, `folders.json`, `imports.json`); overridable with `HOLYSOUND_HOME`.
+- Persistent user state lives under `~/.holysound/` (`room.json`, `folders.json`, `imports.json`, `song_mixes.json`); overridable with `HOLYSOUND_HOME`. `tests/test_app.py` points `HOLYSOUND_HOME` at a scratch folder for the whole run (`setUpModule`), so tests never read or write your real memory.
 - Env config: `ANTHROPIC_API_KEY`, `HOLYSOUND_PROVIDER` (`anthropic` | `opencode-go`), `HOLYSOUND_MODEL`, `HOLYSOUND_EFFORT`, `HOLYSOUND_BASE_URL`.
 
 ## Where to start
