@@ -273,11 +273,21 @@ def _list_returns(rf):
 
 
 def _create_audio_track(rf, name=None):
+    """A new audio track with No Input.
+
+    Live gives a new track input 1, so a playback track would pick up whatever is
+    plugged in there as soon as it's armed or monitoring. Live sources get their
+    input set explicitly afterwards.
+    """
     song = rf.song()
     song.create_audio_track(-1)
     track = song.tracks[-1]
     if name:
         track.name = name
+    try:
+        track.input_routing_type = _by_display_name(track.available_input_routing_types, "No Input", "input")
+    except LookupError:
+        pass  # a Live without "No Input" keeps its default rather than failing the add
     return {"index": len(song.tracks) - 1, "name": track.name}
 
 
@@ -585,6 +595,24 @@ def _play_from_file_start(clip):
     clip.start_marker = 0.0
 
 
+def _delete_clip(rf, track_index, scene_index):
+    """Empty one song's slot on a track. Undo in Live with Cmd+Z."""
+    slot = _track(rf, track_index).clip_slots[scene_index]
+    if not slot.has_clip:
+        raise LookupError("there's no clip in that slot")
+    slot.delete_clip()
+    return {"deleted": True}
+
+
+def _set_clip_active(rf, track_index, scene_index, on):
+    """Turn one song's clip on or off (Live's clip activator), saved in the set."""
+    clip = _track(rf, track_index).clip_slots[scene_index].clip
+    if clip is None:
+        raise LookupError("there's no clip in that slot")
+    clip.muted = not bool(on)
+    return {"active": not clip.muted}
+
+
 def _clip_markers(rf, scene_index):
     """Where each clip in a scene starts and ends, for checking stems line up."""
     rows = []
@@ -669,8 +697,12 @@ def _audio_clips(scene):
 
 
 def _song_transpose(scene):
-    """Semitones the song's audio clips are shifted: 0 with none, None if they differ."""
-    pitches = {clip.pitch_coarse for clip in _audio_clips(scene)}
+    """Semitones the song is shifted: what every shifted clip agrees on, 0 if none are.
+
+    Tracks that keep their key (click, guide) stay at 0, so they don't count.
+    None when shifted clips disagree.
+    """
+    pitches = {clip.pitch_coarse for clip in _audio_clips(scene)} - {0}
     if not pitches:
         return 0
     return pitches.pop() if len(pitches) == 1 else None
@@ -688,10 +720,15 @@ def _list_scenes(rf):
     return [_scene_row(i, s) for i, s in enumerate(rf.song().scenes)]
 
 
-def _create_scene(rf, name=None, bpm=None):
+def _create_scene(rf, name=None, bpm=None, index=None):
+    """A new song at the end, or at a slot (0-based) pushing the rest down."""
     song = rf.song()
-    song.create_scene(-1)
-    index = len(song.scenes) - 1
+    if index is None or not 0 <= int(index) < len(song.scenes):
+        song.create_scene(-1)
+        index = len(song.scenes) - 1
+    else:
+        index = int(index)
+        song.create_scene(index)
     scene = song.scenes[index]
     if name:
         scene.name = name
@@ -699,6 +736,40 @@ def _create_scene(rf, name=None, bpm=None):
         scene.tempo = float(bpm)
         scene.tempo_enabled = True
     return _scene_row(index, scene)
+
+
+def _move_scene(rf, scene_index, to_index):
+    """Move a song (scene) and its clips to another slot (0-based).
+
+    Live has no call to move a scene, so: insert an empty scene where it should
+    end up, copy each clip into it, copy the name, tempo and colour, then delete
+    the original. Undoable in Live, one step per clip.
+    """
+    song = rf.song()
+    count = len(song.scenes)
+    scene_index, to_index = int(scene_index), int(to_index)
+    if not (0 <= scene_index < count and 0 <= to_index < count):
+        raise IndexError("there are %d song slots" % count)
+    if scene_index == to_index:
+        return dict(_scene_row(to_index, song.scenes[to_index]), clips=0)
+    # Insert so that, once the original is deleted, the copy sits at to_index.
+    insert_at = to_index + 1 if to_index > scene_index else to_index
+    song.create_scene(insert_at)
+    old = scene_index + 1 if insert_at <= scene_index else scene_index
+    source, target = song.scenes[old], song.scenes[insert_at]
+    target.name = source.name
+    if getattr(source, "tempo_enabled", False):
+        target.tempo = source.tempo
+        target.tempo_enabled = True
+    target.color = source.color
+    copied = 0
+    for track in song.tracks:
+        slot = track.clip_slots[old]
+        if slot.has_clip:
+            slot.duplicate_clip_to(track.clip_slots[insert_at])
+            copied += 1
+    song.delete_scene(old)
+    return dict(_scene_row(to_index, song.scenes[to_index]), clips=copied)
 
 
 def _set_scene(rf, scene_index, name=None, bpm=None):
@@ -711,16 +782,119 @@ def _set_scene(rf, scene_index, name=None, bpm=None):
     return _scene_row(scene_index, scene)
 
 
-def _transpose_song(rf, scene_index, semitones):
-    """Shift every audio clip in a song by the same number of semitones (-12 to 12)."""
+# Live's Clip.warp_mode numbering; 6 is Complex Pro. Read back after setting, so a
+# different numbering shows up in the result instead of passing silently.
+WARP_COMPLEX_PRO = 6
+
+
+def _new_warp_marker(sample_time, beat_time):
+    """The ways Live has been known to take a new warp marker, most likely first."""
+    import Live
+
+    kind = Live.Clip.WarpMarker
+    yield "WarpMarker(sample_time=, beat_time=)", lambda: kind(sample_time=sample_time, beat_time=beat_time)
+    yield "WarpMarker(beat_time, sample_time)", lambda: kind(beat_time, sample_time)
+    yield "dict", lambda: {"sample_time": sample_time, "beat_time": beat_time}
+
+
+def _lock_to_tempo(clip, bpm):
+    """Warp a clip so it still plays at its own speed: file second s at beat s * bpm / 60.
+
+    Live warps a long sample at its own tempo guess, set by a "shadow" marker that
+    can't be moved. So keep the first marker, pin it to the file start, and add one
+    real marker on that line; the tempo between them carries on to the end.
+    Returns which form of new marker Live accepted.
+    """
+    beats_per_second = bpm / 60.0
+    markers = list(clip.warp_markers)
+    for m in reversed(markers[1:]):
+        try:
+            clip.remove_warp_marker(m.beat_time)
+        except Exception:
+            pass  # the shadow marker isn't a real one and can't be removed either
+    first = list(clip.warp_markers)[0]
+    if abs(first.beat_time - first.sample_time * beats_per_second) > 1e-6:
+        clip.move_warp_marker(first.beat_time, first.sample_time * beats_per_second - first.beat_time)
+    seconds = clip.sample_length / float(clip.sample_rate)
+    sample_time = seconds / 2.0
+    tried = []
+    for label, build in _new_warp_marker(sample_time, sample_time * beats_per_second):
+        try:
+            clip.add_warp_marker(build())
+            return label
+        except Exception as e:
+            tried.append("%s: %s" % (label, e))
+    raise ValueError("couldn't add a warp marker (" + "; ".join(tried) + ")")
+
+
+def _warp_report(clip, bpm):
+    markers = [[round(m.sample_time, 4), round(m.beat_time, 4)] for m in clip.warp_markers]
+    return {
+        "warping": clip.warping,
+        "warp_mode": getattr(clip, "warp_mode", None),
+        "pitch": clip.pitch_coarse,
+        "length": clip.length,
+        "seconds": clip.sample_length / float(clip.sample_rate),
+        "expected_beats": clip.sample_length / float(clip.sample_rate) * bpm / 60.0,
+        "markers": markers[:2] + markers[-2:] if len(markers) > 4 else markers,
+    }
+
+
+def _transpose_song(rf, scene_index, semitones, skip_tracks=None):
+    """Shift every audio clip in a song to a new key (-12 to 12) without changing its speed.
+
+    Transposing an unwarped clip speeds it up like tape, so a transposed clip is warped
+    (Complex Pro) and pinned to play at its own speed at the song's tempo. Back at the
+    original key it goes back to unwarped and sample-locked. Tracks in skip_tracks
+    (by index: click, guide) are put back at their original key.
+    """
     semitones = int(semitones)
     if not -12 <= semitones <= 12:
         raise ValueError("transpose is -12 to 12 semitones")
-    scene = rf.song().scenes[scene_index]
-    clips = _audio_clips(scene)
-    for clip in clips:
-        clip.pitch_coarse = semitones
-    return dict(_scene_row(scene_index, scene), clips=len(clips))
+    song = rf.song()
+    scene = song.scenes[scene_index]
+    bpm = scene.tempo if getattr(scene, "tempo_enabled", False) else song.tempo
+    skip = set(skip_tracks or [])
+    clips, report = [], []
+    for i, track in enumerate(song.tracks):
+        slot = track.clip_slots[scene_index]
+        if not (slot.has_clip and slot.clip.is_audio_clip):
+            continue
+        clip = slot.clip
+        shift = 0 if i in skip else semitones
+        if i not in skip:
+            clips.append(clip)
+        problems = []
+        if shift:
+            clip.warping = True
+            try:
+                clip.warp_mode = WARP_COMPLEX_PRO
+            except Exception as e:  # Live raises its own types; report rather than stop
+                problems.append("warp mode: %s" % e)
+            try:
+                row_lock = _lock_to_tempo(clip, bpm)
+                end = clip.sample_length / float(clip.sample_rate) * bpm / 60.0
+                clip.end_marker = end
+                clip.loop_end = end
+            except Exception as e:
+                row_lock = None
+                problems.append("warp markers: %s" % e)
+        elif clip.warping:
+            clip.warping = False
+            # Unwarped markers are in seconds; don't keep the warped end in beats.
+            seconds = clip.sample_length / float(clip.sample_rate)
+            clip.end_marker = seconds
+            clip.loop_end = seconds
+        clip.pitch_coarse = shift
+        _play_from_file_start(clip)
+        row = _warp_report(clip, bpm)
+        row["track"] = track.name
+        row["problems"] = problems
+        if shift:
+            row["marker_form"] = row_lock
+        report.append(row)
+    return dict(_scene_row(scene_index, scene), clips=len(clips), kept=len(report) - len(clips),
+                bpm=bpm, report=report)
 
 
 def _count_scene_clips(rf, scene_index):
@@ -814,6 +988,8 @@ def _clip_rows(track):
         if clip.is_audio_clip:
             row["gain"] = clip.gain_display_string
             row["gain_db"] = _db_from_text(clip.gain_display_string)
+        # Live's clip activator: an off clip stays silent when its song starts.
+        row["active"] = not clip.muted
         rows.append(row)
     return rows
 
@@ -954,6 +1130,8 @@ COMMANDS = {
     "get_meters": _get_meters,
     "import_audio": _import_audio,
     "set_clip_gain": _set_clip_gain,
+    "set_clip_active": _set_clip_active,
+    "delete_clip": _delete_clip,
     "clip_markers": _clip_markers,
     "song_files": _song_files,
     "get_song": _get_song,
@@ -966,6 +1144,7 @@ COMMANDS = {
     "transpose_song": _transpose_song,
     "count_scene_clips": _count_scene_clips,
     "delete_scene": _delete_scene,
+    "move_scene": _move_scene,
     "fire_scene": _fire_scene,
     "list_locators": _list_locators,
     "add_locator": _add_locator,

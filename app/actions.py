@@ -12,6 +12,7 @@ can refer to a track an earlier action in the same batch created.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -19,7 +20,8 @@ from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import BaseModel, Field
 
-from app.folders import FAMILIES, KEYS
+from app import mixdown, parts
+from app.folders import FAMILIES, KEYS, classify
 from app.live import LiveUnavailable
 from live_control.starting_fader import starting_fader_db
 from live_control.timecode import is_timecode
@@ -380,13 +382,34 @@ class AddSong(BaseModel):
     action: Literal["add_song"]
     name: str = Field(min_length=1, max_length=64, description="The song title.")
     bpm: float | None = Field(default=None, ge=20, le=999, description="The song's tempo, if known.")
+    position: int | None = Field(default=None, ge=1, description=(
+        "Song slot number to put it in (1 = first), pushing later songs down. Null adds it at the end."))
 
     def describe(self):
-        return f"Add the song “{self.name}”" + (f" at {self.bpm:g} BPM" if self.bpm else "")
+        where = f" as song {self.position}" if self.position else ""
+        return f"Add the song “{self.name}”" + (f" at {self.bpm:g} BPM" if self.bpm else "") + where
 
     def run(self, ex):
-        row = ex.call("create_scene", name=self.name, bpm=self.bpm)
+        index = self.position - 1 if self.position else None
+        row = ex.call("create_scene", name=self.name, bpm=self.bpm, index=index)
         return f"Added song {row['index'] + 1}: {self.name}."
+
+
+class MoveSong(BaseModel):
+    action: Literal["move_song"]
+    song: SongRef
+    position: int = Field(ge=1, description="The song slot number to move it to (1 = first).")
+
+    def describe(self):
+        return f"Move “{self.song}” to song slot {self.position}"
+
+    def run(self, ex):
+        s = ex.song(self.song)
+        slots = len(ex.call("list_scenes"))
+        if self.position > slots:
+            raise ActionFailed(f"There are only {slots} song slots. Add a song first to make room.")
+        ex.call("move_scene", scene_index=s["index"], to_index=self.position - 1)
+        return f"Moved {_song_name(s)} to slot {self.position}."
 
 
 class UpdateSong(BaseModel):
@@ -424,12 +447,19 @@ class TransposeSong(BaseModel):
 
     def run(self, ex):
         s = ex.song(self.song)
-        result = ex.call("transpose_song", scene_index=s["index"], semitones=self.semitones)
+        tracks, _returns = ex._rows()
+        kept = ex.folders.kept_tracks(tracks) if ex.folders is not None else []
+        result = ex.call("transpose_song", scene_index=s["index"], semitones=self.semitones,
+                         skip_tracks=kept)
         name = s["name"] or f"song {s['index'] + 1}"
         if not result.get("clips"):
             raise ActionFailed(f"{name} has no audio clips to transpose.")
-        where = "its original key" if self.semitones == 0 else _semitones(self.semitones)
-        return f"{name} is at {where} now ({result['clips']} clips)."
+        where = "back in its original key" if self.semitones == 0 else _semitones(self.semitones)
+        n = result["clips"]
+        done = f"{name} is {where} now: {n} clip{'' if n == 1 else 's'}"
+        if result.get("kept"):
+            done += f", {result['kept']} kept their key (like the click)"
+        return done + "."
 
 
 class DeleteSong(BaseModel):
@@ -516,28 +546,53 @@ class MoveToFolder(BaseModel):
         return done
 
 
-class ImportAudio(BaseModel):
-    action: Literal["import_audio"]
-    track: TrackRef = Field(description="An audio track. Create it first in the same batch if needed.")
-    file: str = Field(description='An imported file exactly as listed, e.g. "Sunday Stems/Way Maker/Click.wav".')
+class ImportPart(BaseModel):
+    """One part of one song onto its part track: one stem, or several mixed into one file.
+
+    The track is the church's part track (Drums, Keys, BGVs...), shared by every song,
+    and is created if the set doesn't have it yet. Never a track per stem.
+    """
+
+    action: Literal["import_part"]
+    part: str = Field(min_length=1, max_length=64, description=(
+        'The part track, from the parts list ("Drums", "Keys", "BGVs"...). A stem that fits no part '
+        "may use its own name. Created if the set doesn't have it."))
+    files: list[str] = Field(min_length=1, max_length=40, description=(
+        'Imported files exactly as listed, e.g. "Sunday Stems/Way Maker/Kick In.wav". Several are '
+        "mixed into one clip, keeping their balance; L/R stems keep their sides."))
     song: SongRef = Field(description="The song (scene) the clip belongs to.")
     gain_db: float | None = Field(
         default=None, ge=-70, le=24,
-        description="Clip gain in dB, to balance stems against each other. Null leaves it at 0 dB.",
+        description="Clip gain in dB, to balance this part in this song. Null plays it as the stems are.",
     )
 
     def describe(self):
-        text = f"Put {Path(self.file).name} on “{self.track}” in “{self.song}”"
+        what = Path(self.files[0]).stem if len(self.files) == 1 else f"{len(self.files)} stems mixed into one"
+        text = f"Put {what} on “{self.part}” in “{self.song}”"
         return text + (f", clip gain {_db(self.gain_db)}" if self.gain_db else "")
 
     def run(self, ex):
-        path = ex.file(self.file)
-        t = ex.track(self.track, allow_return=False)
+        paths = [ex.file(f) for f in self.files]
         s = ex.song(self.song)
-        result = ex.call("import_audio", track_index=t.index, file_path=str(path),
-                         scene_index=s["index"], name=path.stem, gain_db=self.gain_db)
-        gain = f" at {result['gain']}" if self.gain_db else ""
-        return f"Put {result['name']} on {t.name} in {_song_name(s)}{gain}."
+        t, created = ex.part_track(self.part)
+        gain = self.gain_db or 0.0
+        if len(paths) == 1:
+            source, name = paths[0], paths[0].stem
+        else:
+            sides = parts.pans(self.files)
+            out = ex.parts_dir / _file_safe(_song_name(s)) / f"{_file_safe(self.part)}.wav"
+            try:
+                mixed = mixdown.mix([(p, 0.0, sides[f]) for p, f in zip(paths, self.files)], out)
+            except mixdown.MixdownError as e:
+                raise ActionFailed(str(e)) from e
+            # The mix is scaled to peak at -1 dBFS; clip gain puts its level back.
+            source, name, gain = mixed["path"], self.part, gain - mixed["gain_db"]
+        gain = max(-70.0, min(24.0, gain))
+        result = ex.call("import_audio", track_index=t.index, file_path=str(source),
+                         scene_index=s["index"], name=name, gain_db=gain if abs(gain) > 0.05 else None)
+        what = f"{len(paths)} stems mixed" if len(paths) > 1 else result["name"]
+        new = " (new track)" if created else ""
+        return f"Put {what} on {t.name}{new} in {_song_name(s)}."
 
 
 class SetClipGain(BaseModel):
@@ -554,6 +609,48 @@ class SetClipGain(BaseModel):
         s = ex.song(self.song)
         result = ex.call("set_clip_gain", track_index=t.index, scene_index=s["index"], db=self.db)
         return f"The {t.name} clip in {_song_name(s)} is at {result['gain']}."
+
+
+class SetClipActive(BaseModel):
+    action: Literal["set_clip_active"]
+    track: TrackRef
+    song: SongRef
+    on: bool = Field(description="False to leave this track out of this song only; true to bring it back.")
+
+    def describe(self):
+        return f"{'Bring back' if self.on else 'Leave out'} “{self.track}” in “{self.song}”"
+
+    def run(self, ex):
+        t = ex.track(self.track, allow_return=False)
+        s = ex.song(self.song)
+        ex.call("set_clip_active", track_index=t.index, scene_index=s["index"], on=self.on)
+        return f"{t.name} is {'on' if self.on else 'off'} in {_song_name(s)}."
+
+
+class PartChoice(BaseModel):
+    song: str | None = Field(default=None, description="A song name, or null for every song.")
+    track: str = Field(description="A current track whose name doesn't say its part, e.g. a singer's name.")
+    part: str = Field(description='The part it belongs to in that song, e.g. "Lead Vocal" or "BGVs".')
+
+
+class TidyIntoParts(BaseModel):
+    """Rebuild every song on the church's part tracks and remove the per-stem tracks."""
+
+    action: Literal["tidy_into_parts"]
+    assign: list[PartChoice] = Field(default_factory=list, max_length=100, description=(
+        "Parts for tracks named after people or anything else that fits no part. The lead "
+        "singer often changes per song: listen_to_stems each song first and assign per song."))
+    destructive: ClassVar[bool] = True
+
+    def describe(self):
+        return ("Rebuild every song on the part tracks (Drums, Keys, BGVs...) and delete the "
+                "per-stem tracks they replace. Takes a minute or two per song.")
+
+    def run(self, ex):
+        from app.tidy import tidy  # tidy builds on this module
+
+        summary, *notes = tidy(ex, [(c.song, c.track, c.part) for c in self.assign])
+        return summary + (" But " + _lower_first(" ".join(notes)) if notes else "")
 
 
 class Listen(BaseModel):
@@ -601,7 +698,7 @@ class Listen(BaseModel):
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
-    TransposeSong, DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportAudio, SetClipGain, Listen,
+    MoveSong, TransposeSong, DeleteSong, StartSong, Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
 ]
 
 
@@ -624,10 +721,11 @@ class Target:
 class Executor:
     """Runs actions against Live, resolving names as it goes."""
 
-    def __init__(self, live, files=None, on_touch=None, folders=None):
+    def __init__(self, live, files=None, on_touch=None, folders=None, parts_dir=None):
         self._live = live
         self._files = files or {}
         self.folders = folders  # the mixer's FolderMemory, or None where there is no mixer
+        self.parts_dir = Path(parts_dir) if parts_dir else default_parts_dir()  # mixed parts go here
         self._on_touch = on_touch  # called with a track's name whenever an action works on it
         self._tracks = None
         self.detail = None  # extra facts for the assistant from the last action
@@ -638,7 +736,7 @@ class Executor:
         wanted = file_id.strip().casefold()
         for known, path in self._files.items():
             if known.casefold() == wanted:
-                return path
+                return Path(path)  # saved imports come back from JSON as strings
         raise ActionFailed(f"I don't have a file called {file_id}. Import its folder first.")
 
     def call(self, cmd, **args):
@@ -654,6 +752,31 @@ class Executor:
         """Say which track an action is working on, so the page can light it up."""
         if self._on_touch and name:
             self._on_touch(name)
+
+    def part_track(self, part):
+        """The track for a part, by exact name (any case), made if the set lacks it.
+
+        Returns (Target, created). A new one has No Input, a fader low enough for a whole
+        song together, its folder's colour, and starts muted if it's timecode.
+        """
+        tracks, _returns = self._rows()
+        for row in tracks:
+            if row["name"].casefold() == part.strip().casefold():
+                target = Target(row["index"], False, row["name"])
+                self.touch(target.name)
+                return target, False
+        index = self.call("create_audio_track", name=part.strip())["index"]
+        self.tracks_changed()
+        self.touch(part)
+        target = {"track_index": index, "is_return": False}
+        problems = []
+        if self.new_track_fader_db is not None:
+            self.try_step(problems, "set its volume", "set_volume", **target, db=self.new_track_fader_db)
+        if is_timecode(part):
+            self.try_step(problems, "mute it", "set_mute", **target, on=True)
+        colour = next(c for key, _label, c in FAMILIES if key == classify(part))
+        self.try_step(problems, "colour it", "set_track_color", **target, rgb=TRACK_COLORS[colour])
+        return Target(index, False, part.strip()), True
 
     def try_step(self, problems, what, cmd, **args):
         try:
@@ -730,18 +853,24 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
-def run_all(live, actions, files=None, on_touch=None, folders=None):
+def default_parts_dir():
+    """Where mixed parts are written: a folder people can find, not the vendor's."""
+    home = os.environ.get("HOLYSOUND_HOME")
+    return (Path(home) / "Parts") if home else Path.home() / "Music" / "Holy Sound" / "Parts"
+
+
+def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=None):
     """Run actions in order. One failure doesn't stop the rest.
 
     on_touch(name) is called for each track an action works on. folders is the
     mixer's FolderMemory, for move_to_folder and renames.
     """
-    ex = Executor(live, files, on_touch, folders)
+    ex = Executor(live, files, on_touch, folders, parts_dir)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
     per_song = {}
     for action in actions:
-        if isinstance(action, ImportAudio):
+        if isinstance(action, ImportPart):
             per_song[action.song.casefold()] = per_song.get(action.song.casefold(), 0) + 1
     if per_song:
         ex.new_track_fader_db = starting_fader_db(max(per_song.values()))
@@ -817,6 +946,12 @@ def to_rigspec(actions):
 
 
 # -- wording ------------------------------------------------------------------
+
+
+def _file_safe(name):
+    """A song or part name as a file name: no slashes or other trouble."""
+    cleaned = re.sub(r"[^\w .()&'-]+", "_", name).strip(" .")
+    return cleaned or "Untitled"
 
 
 def _semitones(n):

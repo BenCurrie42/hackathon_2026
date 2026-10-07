@@ -38,8 +38,12 @@ nothing happens until you hit Apply. Next to the chat is a mixer and song list
 that follow your open set, and it works from a phone on the same Wi-Fi. It can
 also:
 
-- import a folder of stems, read how loud each one is, and suggest tracks,
-  songs, colours and clip gain to balance them
+- import a folder of stems (or a Washed/MultiTracks download, reading its set
+  for tempo and sections), guess the key, and put every song on the same part
+  tracks (Drums, Keys, BGVs...), mixing a part's stems into one
+- give each song its own mix: pick a song in the mixer to set its levels and
+  switch parts off for that song only
+- change a song's key without changing its speed, leaving the click alone
 - play a song, listen to Live's meters, and follow up on what it heard
 - remember your room (interface, who's on which input, which outputs go to the
   in-ears) so next week you don't have to say it again

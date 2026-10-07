@@ -282,7 +282,16 @@ svg { width: 1em; height: 1em; }
 .muted { color: var(--muted); font-size: 14px; }
 .empty { color: var(--muted); text-align: center; padding: 32px 12px; }
 
-.mixer-tools { display: flex; justify-content: flex-end; margin: -6px 0 4px; }
+.mixer-tools { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: -6px 0 4px; }
+.song-mix-pick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.song-mix-pick select {
+  min-height: 40px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--text); font-weight: 600; max-width: 60vw;
+}
+.song-mix { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; border-top: 1px dashed var(--line); }
+.song-mix .clip-on[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
+/* Left out of the picked song: the strip greys out, its On/Off switch stays readable. */
+.strip.song-off .fader, .strip.song-off .pan, .strip.song-off .strip-name, .strip.song-off .song-level { opacity: 0.45; }
 /* One row per folder. A row only wraps if a folder has more strips than fit across. */
 .groups { display: flex; flex-direction: column; gap: 14px; }
 
@@ -335,6 +344,8 @@ svg { width: 1em; height: 1em; }
 @media (pointer: coarse) { .strip-grip { display: none; } }
 
 .folder-line { display: grid; grid-template-columns: 80px 1fr; gap: 10px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.key-line { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.key-line input { width: 18px; height: 18px; accent-color: var(--accent); }
 .folder-line select {
   width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--panel-2); min-height: 40px;

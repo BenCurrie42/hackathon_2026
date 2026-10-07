@@ -138,6 +138,21 @@ guess it.
 Only 10 devices have a factory default on disk. Compressor isn't one, so
 `PRESET_FALLBACKS` in `write_als.py` names a preset instead.
 
+### Vendor sets (read only)
+
+Verified on a Washed download (`MultiTrack.als`, `Creator="Ableton Live 8.4.2"`):
+
+- One song per set: 43 AudioTracks, one Arrangement clip each, all at `Time="0"`,
+  unwarped, `PitchCoarse` 0, so a Session import from the file start lines up the
+  same. Sections are `Locators/Locators/Locator` (`Time` in beats, `Name`); the
+  8 Session scenes are empty.
+- Clips at `Tracks/AudioTrack/DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events/AudioClip`.
+- Live 8 sample path: `FileRef > RelativePath > RelativePathElement Dir=...` plus
+  `FileRef > Name`, relative to the set's folder. Live 12 has `RelativePath Value`
+  and an absolute `Path Value` instead.
+- Live 8 tempo: `MasterTrack/MasterChain/Mixer/Tempo/ArrangerAutomation/Events/FloatEvent
+  Value`; Live 12 uses `Tempo/Manual Value`.
+
 ## Hard invariants: violating these corrupts the set
 
 1. **The pointee ID pool spans 11 tag names, not 3.** `AutomationTarget`,
@@ -169,6 +184,29 @@ Only 10 devices have a factory default on disk. Compressor isn't one, so
    the template. Version compatibility is one-directional; forging the header
    produces sets that open with silently mangled devices.
 7. `LomId` is a runtime handle, always `0` in saved files. Leave it alone.
+
+## Track layout rules: keep these when changing imports
+
+A set once grew to 93 tracks for three songs because every vendor stem name got its
+own track, each with Live's default input. These hold everywhere audio comes in
+(the app's `import_part`, `rig.py song import`, `tidy_into_parts`), and
+`TrackLayoutGuardTest` checks them:
+
+1. **Every song uses the same part tracks** (`app/parts.py`: Click, Guide, SMPTE,
+   Loops, Drums, Perc, Synth Bass, Bass, Acoustic, Electric, Piano, Organ, Keys,
+   Strings, Horns, Synths, FX, Lead Vocal, Choir, BGVs, Crowd). Never a track per
+   stem. Several stems for one part are mixed into one file per song
+   (`app/mixdown.py`, written under `~/Music/Holy Sound/Parts`, never into the
+   vendor's folder); the scaling to -1 dBFS goes back as clip gain.
+2. **The model can't create stem sprawl**: `import_audio` (one file onto a named
+   track) isn't an action it can propose; `import_part` is, and it makes a missing
+   part track itself.
+3. **Playback tracks have No Input.** RigLink's `create_audio_track` sets it;
+   live sources set their input explicitly afterwards.
+4. **A song's own mix lives in its clips**: clip gain for level, the clip activator
+   (`set_clip_active`) to leave a part out of one song. Live applies both when the
+   song starts, app open or not. Faders are the live mix shared by every song;
+   muting a track silences it in every song.
 
 ## Constraints
 
@@ -214,6 +252,12 @@ app/                            Web app: chat + mixer, `uv run python -m app`
     live.py                     Shared, self-reconnecting RigLink connection
     audio_files.py              Folder browsing + stdlib WAV/AIFF level measurement
     room.py                     Week-to-week room memory (~/.holysound/room.json)
+    parts.py                    The church's fixed part tracks; which part a stem is
+    mixdown.py                  Sums a part's stems into one 24-bit WAV (stdlib)
+    tidy.py                     Folds a track-per-stem set into part tracks
+    song_key.py                 Guesses a song's key from its pitched stems (stdlib)
+    vendor_set.py               Reads a vendor's one-song set (Washed, MultiTracks):
+                                tempo, section locators, stem per track. Read only
     song_map.py                 Reads a song's stems as text: when each part sounds,
                                 sections, tempo from the click, likely lead vocal
     folders.py                  Mixer folders (Vocals / Instruments / Click & playback / Other):
@@ -270,10 +314,6 @@ group tracks.
 
 ## Open questions
 
-- **Transpose on unwarped stems.** Stems import unwarped, and `song transpose`
-  sets `pitch_coarse` on them. Not yet checked in Live whether that also changes
-  their speed (and so drifts from the click's tempo). Needs one probe: transpose
-  a song, play it against the click.
 
 - **Setlist shape: Session scenes or Arrangement locators?** Worship rigs are
   usually one scene per song with BPM in the scene name, but unconfirmed for this
@@ -301,6 +341,23 @@ group tracks.
 - Live imports RigLink once at startup. **After editing it, quit and reopen
   Live**; the symptom otherwise is `unknown cmd`. `rig.py` and client edits need
   no restart.
+- **Transposing an unwarped clip changes its speed too**, like tape: `pitch_coarse`
+  +2 plays about 12% faster. Confirmed by ear in Live 12.4.6. So a transposed clip is
+  warped (Complex Pro) and pinned 1:1 at the song's tempo. Probed in 12.4.6:
+  - `clip.warp_mode = 6` is Complex Pro (reads back 6).
+  - Turning Warp on for a long stem warps it at Live's own tempo guess (a 120 BPM
+    click came out at ~128 BPM: 64 beats instead of 60). That guess lives in a
+    "shadow" marker, which `move_warp_marker` refuses ("The shadow marker can't be
+    moved").
+  - Fix: keep the first marker at (0 s, beat 0) and `add_warp_marker(
+    Live.Clip.WarpMarker(sample_time=s, beat_time=s * bpm / 60))`. The clip then
+    measured exactly 60 beats for 30 s at 120 BPM.
+  - Unwarping keeps the warped end marker's number, now read as seconds, so the
+    clip ran 30 s past its file. Reset `end_marker`/`loop_end` to the file length.
+- Probed in 12.4.6 through RigLink: `clip.muted` is the clip activator (set and read
+  back both ways). `ClipSlot.duplicate_clip_to` carries a warped, transposed clip
+  intact (same warp markers, length, pitch), so `move_scene` (insert, copy clips,
+  delete the original) keeps a transposed song transposed. Live has no move-scene call.
 - Stems import unwarped so they stay sample-locked. Song tempo therefore does not
   stretch them. Auto-Warp still moves each clip's start to its guessed first
   beat (different per stem, up to ~3 s here), so the import resets every clip

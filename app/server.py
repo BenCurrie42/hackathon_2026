@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app import audio_files
+from app import audio_files, parts, song_key, vendor_set
 from app.actions import ActionFailed, Executor, Listen, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.live import LiveLink, LiveUnavailable
@@ -53,15 +53,17 @@ DIRECT_COMMANDS = {
     "set_volume", "set_pan", "set_mute", "set_solo", "set_send", "set_tempo",
     "play", "stop", "fire_scene", "load_device", "delete_device", "set_track_name",
     "create_scene", "set_scene", "set_routing", "create_audio_track", "create_midi_track",
-    "create_return_track", "get_routing", "set_track_color", "set_clip_gain",
+    "create_return_track", "get_routing", "set_track_color", "set_clip_gain", "set_clip_active",
     "transpose_song",
 }
 
 
 class App:
-    def __init__(self, live, conversation, key=None, folders=None, demo=False, imports_path=None):
+    def __init__(self, live, conversation, key=None, folders=None, demo=False, imports_path=None,
+                 parts_dir=None):
         self.room = conversation.room
         self.folders = folders or FolderMemory()
+        self.parts_dir = parts_dir  # where mixed parts are written; None: ~/Music/Holy Sound/Parts
         self.demo = demo  # True when the "Live" behind this is the built-in pretend one
         self.clock = time.monotonic
         self._touched = {}  # track name (case-folded) -> (lit until, name)
@@ -98,7 +100,8 @@ class App:
         """The snapshot with each track's mixer folder (instrument family) added."""
         if not snapshot:
             return snapshot
-        tracks = [dict(t, folder=self.folders.folder_for(t["name"])) for t in snapshot["tracks"]]
+        tracks = [dict(t, folder=self.folders.folder_for(t["name"]), keeps_key=self.folders.keeps_key(t["name"]))
+                  for t in snapshot["tracks"]]
         return dict(snapshot, tracks=tracks)
 
     def live_state(self):
@@ -211,23 +214,63 @@ class App:
         lines = [audio_files.describe(fid, m) for (fid, _p), m in zip(found, measured)]
         if len(found) >= audio_files.MAX_FILES:
             lines.append(f"(Only the first {audio_files.MAX_FILES} files are listed.)")
-        self.files.update(dict(found))
+        self.files.update({fid: str(p) for fid, p in found})  # str: saved as JSON
         self.imports[folder.name] = len(found)
         self._save_imports()
         attachment = (
             f'<imported_folder name="{folder.name}" files="{len(found)}">\n'
             + "\n".join(lines) + "\n</imported_folder>"
         )
+        songs = {}
+        for fid, _p in found:
+            songs.setdefault(str(Path(fid).parent), []).append(fid)
+        attachment += "\n<parts>\n" + "\n".join(
+            parts.describe(song, parts.plan(fids)) for song, fids in sorted(songs.items())) + "\n</parts>"
+        keys = self.song_keys(found)
+        if keys:
+            attachment += "\n<song_keys>\n" + "\n".join(keys) + "\n</song_keys>"
+        vendor = self.vendor_song(folder, found)
+        if vendor:
+            attachment += "\n" + vendor
         text = f"Import the audio in “{folder.name}” ({len(found)} files)."
         if note.strip():
             text += " " + note.strip()
         self.send_message(text, attachment)
 
+    @staticmethod
+    def vendor_song(folder, found):
+        """What a vendor's set next to these stems says about the song, for the assistant.
+
+        Only when the set's stems are mostly the ones imported, so a stray .als
+        beside an unrelated folder isn't taken for this song's.
+        """
+        path = vendor_set.find(folder)
+        if path is None:
+            return None
+        try:
+            info = vendor_set.read(path)
+        except vendor_set.VendorSetError as e:
+            return f"<vendor_set_problem>{e}</vendor_set_problem>"
+        ids = {str(Path(p).resolve()): fid for fid, p in found}
+        matched = sum(1 for t in info["tracks"] if t["file"] and str(t["file"]) in ids)
+        if not info["tracks"] or matched * 2 < len(info["tracks"]):
+            return None
+        return vendor_set.describe(info, ids)
+
+    @staticmethod
+    def song_keys(found):
+        """A key guess for each song (subfolder) in an import: lines for the assistant."""
+        songs = {}
+        for fid, path in found:
+            songs.setdefault(str(Path(fid).parent), []).append((Path(fid).stem, path))
+        return [f'- "{song}": {song_key.describe(song_key.detect(stems))}'
+                for song, stems in sorted(songs.items())]
+
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
             results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
-                              folders=self.folders)
+                              folders=self.folders, parts_dir=self.parts_dir)
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -447,6 +490,12 @@ def make_handler(app):
                     except ValueError as e:
                         raise UserError(str(e))
                     return self._json(app.state())
+                if path == "/api/track-key":
+                    track = str(body.get("track", "")).strip()
+                    if not track:
+                        raise UserError("Say which track.")
+                    app.folders.set_follows_key(track, bool(body.get("follows")))
+                    return self._json(app.state())
                 if path == "/api/reset":
                     app.chat.reset()
                     return self._json(app.state())
@@ -466,6 +515,9 @@ def make_handler(app):
                     if not isinstance(args, dict):
                         raise UserError("The page sent something the app couldn't read.")
                     old_name = app.track_name(args) if cmd == "set_track_name" else None
+                    if cmd == "transpose_song":
+                        # Click, guide and anything the volunteer opted out keep their key.
+                        args["skip_tracks"] = app.folders.kept_tracks(app.live.snapshot()["tracks"])
                     result = app.live.call(cmd, **args)
                     if old_name and args.get("name"):
                         app.folders.rename(old_name, str(args["name"]))
@@ -480,6 +532,8 @@ def make_handler(app):
 
                 return self._error(_sentence(e))
             except TypeError as e:
+                if path != "/api/live":
+                    raise  # a bug here, not a bad request from the page; don't blame Live
                 return self._error(f"The page asked Live for something it didn't understand ({e}).")
             except ConnectionError:
                 raise  # the browser went away; nothing to answer

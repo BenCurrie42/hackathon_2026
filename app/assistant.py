@@ -77,14 +77,21 @@ them as a session file.
 ## Tools: values and limits
 13. Fader and send levels are dB: 0 is unity, -70 is off, max +6. Pan is -1 (left) to 1 \
 (right). Change levels in 1-3 dB steps.
-14. The fader (set_volume) is the live mix. Clip gain (gain_db, set_clip_gain) evens out \
+14. Each song has its own mix, saved in its clips and applied the moment the song starts: \
+clip gain (set_clip_gain) for its level, and set_clip_active to leave a track out of that \
+song only (a part the band plays live, a sax nobody wants). Use these for "in Washed, \
+...". The fader (set_volume) is the live mix. Clip gain (gain_db, set_clip_gain) evens out \
 stems inside a song.
 15. Inputs are written as printed on the interface: "1" for a mic or DI, "3/4" for a stereo \
 pair. Playback tracks have no input.
-16. Songs are Live scenes, one per song, with that song's tempo. Shared reverbs and delays \
+16. Songs are Live scenes, one per song, with that song's tempo. The set's order is the slot \
+order: add_song takes a position (otherwise it goes at the end), and move_song moves a song \
+and its clips to another slot. Shared reverbs and delays \
 are return tracks fed with set_send. transpose_song shifts every audio clip in a song by \
-semitones from its original key (-12 to 12, 0 resets) when the leader changes the key; it \
-doesn't touch MIDI or live inputs, and the notes show each song's transpose.
+semitones from its original key (-12 to 12, 0 resets) when the leader changes the key, \
+without changing its speed. It doesn't touch MIDI, live inputs, or tracks marked "keeps its \
+key" (click, guide, count and SMPTE by default; the volunteer can change that per track). The \
+notes show each song's transpose.
 17. Refer to tracks by exact name; names must be unique.
 18. You can't change effect settings, group or reorder tracks in Live, delete clips, or move \
 the Master fader. Say so plainly if asked.
@@ -94,23 +101,37 @@ reading dB.
 
 ## Importing audio
 When the volunteer imports a folder, their message lists each file with its peak, its \
-"loud parts" level (dBFS while sounding) and how much of the time it sounds.
-21. One track per part (Click, Guide, Bass, Keys...), shared by every song. One song per \
-song; use a tempo only if a name states it.
-22. Create the new tracks in the same proposal as their import_audio steps and leave \
-volume_db unset. Holy Sound starts those faders low (about -10 to -20 dB) so the whole song \
-doesn't clip. Don't raise them to 0. It also mutes a new SMPTE/timecode track; say so.
-23. Never let a clip's peak plus gain_db go above -1 dBFS. Leave out SILENT files and name \
-them; name any CLIPS files.
-24. import_audio needs an empty slot; you can't delete or replace clips.
+"loud parts" level (dBFS while sounding) and how much of the time it sounds. <song_keys> \
+gives each song's likely key, guessed from its pitched stems: say it in your reply ("Sounds \
+like it's in E"), and when it's not clear, name the runner-up and ask which it is. \
+<vendor_set> means the stems came with a vendor's Ableton set (Washed, MultiTracks...): one \
+song, laid out in Arrangement view. Bring it in as one song in this set rather than opening \
+theirs, at its tempo. Its sections tell you the song's form; you can't jump to a section yet. \
+<parts> is how each song's stems fit the church's part tracks.
+21. Every song uses the same part tracks (Click, Guide, Drums, Bass, Acoustic, Electric, \
+Keys, BGVs...), in that order. Never make a track per stem. One import_part per part per \
+song, with every stem <parts> lists for it: several stems are mixed into one clip, keeping \
+their balance and L/R sides. import_part makes a missing part track itself (No Input, a low \
+fader, its folder colour), so don't add_track for imports.
+22. A stem that fits no part keeps its own name in <parts>. Map it to a part if you can tell \
+what it is: singers' names are vocals (listen_to_stems finds the lead: Lead Vocal; the rest \
+BGVs). Only give it its own track if it's truly something else.
+23. One song per song, at the tempo from <vendor_set>, a file or folder name, or the click. \
+Holy Sound mutes a new SMPTE track; say so. Leave out SILENT files and name them; name any \
+CLIPS files. Never let a single stem's peak plus gain_db go above -1 dBFS.
+24. import_part needs an empty slot in that song; you can't delete or replace clips. If the \
+set still has a track per stem (many tracks named after stems, not parts), offer \
+tidy_into_parts once: it rebuilds every song on part tracks, keeps how each song sounds, and \
+deletes the stem tracks. Say to save a copy of the set first.
 25. Clips play once from the start at their own speed; tempo only sets the click and grid.
 
 ## When you set up or mix (guides what you propose; don't recite it)
 26. Click, Guide and Count go to the in-ear output, never Master, and stay unmuted for a \
 service. SMPTE stays muted or goes to its own output.
-27. On a tracks rig, mute stems for parts the live band plays; keep only what nobody plays. \
-Mute crowd and room stems for live use.
-28. Stereo pairs (L/R): pan -1 and 1, same clip gain and fader on both.
+27. Part tracks are shared by every song, so leave a part out of one song with \
+set_clip_active, not mute: parts the live band plays, and crowd stems for live use. Mute a \
+track only to silence it in every song.
+28. Part tracks stay panned centre: L/R stems were mixed into a stereo clip with their sides.
 29. Vocals on top: lead, then BGVs, then pads and keys. One source owns the low end: with a \
 live bassist, lower or mute Bass and Sub stems.
 30. The mixer sorts tracks into folders (Vocals, Instruments, Click & playback, Other) by \
@@ -642,7 +663,7 @@ def session_notes(snapshot, stock_devices, live_error=None, imports=None, room=N
         lines.append(_outputs_line(snapshot))
     if imports:
         lines.append("")
-        lines.append("Imported audio folders (import_audio can use their files): "
+        lines.append("Imported audio folders (import_part can use their files): "
                      + ", ".join(f"{name} ({n} files)" for name, n in imports.items()))
     lines.append("")
     lines.append("Stock devices in this Live:")
@@ -706,6 +727,8 @@ def _strip_line(t, scene_names=None):
     parts = [t["name"]]
     if t.get("folder"):
         parts.append(f"folder {t['folder']}")
+    if t.get("keeps_key"):
+        parts.append("keeps its key")
     if t.get("color") is not None:
         parts.append(f"colour {color_name(t['color'])}")
     if not t["is_return"]:
@@ -726,7 +749,8 @@ def _strip_line(t, scene_names=None):
     clips = []
     for c in t.get("clips", []):
         where = (scene_names or {}).get(c["scene_index"], f"song {c['scene_index'] + 1}")
-        clips.append(f"{where}: {c['name']}" + (f" ({c['gain']})" if c.get("gain") else ""))
+        clips.append(f"{where}: {c['name']}" + (f" ({c['gain']})" if c.get("gain") else "")
+                     + (" OFF in this song" if c.get("active") is False else ""))
     if clips:
         parts.append("clips: " + ", ".join(clips))
     return " | ".join(parts)

@@ -270,6 +270,46 @@ def track_color(
     typer.echo(f"Track {target['label']} is now {name.casefold()}.")
 
 
+@track_app.command("tidy")
+def track_tidy(
+    assign: list[str] = typer.Option(None, "--assign", help=(
+        'A track whose name says nothing about its part: "Song:Track=Part", or "Track=Part" for '
+        'every song, e.g. "Washed:Chloe Gall=Lead Vocal". Repeat for more.')),
+    yes: bool = typer.Option(False, "--yes", help="Don't ask first."),
+):
+    """Rebuild every song on part tracks (Drums, Keys, BGVs...) and delete the per-stem tracks.
+
+    Keeps how each song sounds: clip gain and old faders are mixed in, part
+    faders end at 0 dB, and transposed songs stay transposed. Mixed parts go
+    under ~/Music/Holy Sound/Parts. Save a copy of the set first.
+    """
+    from app.actions import ActionFailed, Executor
+    from app.folders import FolderMemory
+    from app.tidy import tidy
+
+    choices = []
+    for text in assign or []:
+        where, _, part = text.rpartition("=")
+        song, _, track = where.rpartition(":") if ":" in where else ("", "", where)
+        if not track or not part:
+            _fail(f'Write --assign as "Song:Track=Part" or "Track=Part", not {text!r}.')
+        choices.append((song or None, track.strip(), part.strip()))
+    if not yes and not typer.confirm("This changes every song in the open set. Saved a copy first?"):
+        raise typer.Exit(1)
+
+    class _Calls:  # Executor talks to Live through .call
+        def __init__(self, live):
+            self.call = live.send
+
+    with _connect() as live:
+        try:
+            lines = _run(lambda: tidy(Executor(_Calls(live), folders=FolderMemory()), choices))
+        except ActionFailed as e:
+            _fail(str(e))
+    for line in lines:
+        typer.echo(line)
+
+
 @track_app.command("delete")
 def track_delete(track: str = typer.Argument(..., help="Track name, number, or return letter.")):
     """Delete a track or return track. Undo in Live with Cmd+Z."""
@@ -530,11 +570,24 @@ def song_list():
 def song_add(
     name: str = typer.Argument(None, help="Song title."),
     bpm: float = typer.Option(None, "--bpm", help="Tempo Live switches to when this song starts."),
+    at: int = typer.Option(None, "--at", min=1, help="Song slot to put it in (1 = first). Default: the end."),
 ):
-    """Add an empty song at the end."""
+    """Add an empty song, at the end or in a given slot."""
     with _connect() as live:
-        result = _run(lambda: live.create_scene(name, bpm))
+        result = _run(lambda: live.create_scene(name, bpm, index=at - 1 if at else None))
     typer.echo("Added song: " + _song_line(result).strip())
+
+
+@song_app.command("move")
+def song_move(
+    song: str = typer.Argument(..., help="Song name or number."),
+    to: int = typer.Argument(..., min=1, help="Song slot to move it to (1 = first)."),
+):
+    """Move a song and its clips to another slot. Undo in Live with Cmd+Z."""
+    with _connect() as live:
+        row = _pick(_run(live.list_scenes), song, "song")
+        result = _run(lambda: live.move_scene(row["index"], to - 1))
+    typer.echo(f"Moved: {_song_line(result).strip()} ({result['clips']} clips)")
 
 
 @song_app.command("rename")
@@ -566,11 +619,21 @@ def song_transpose(
     song: str = typer.Argument(..., help="Song name or number."),
     semitones: int = typer.Argument(..., min=-12, max=12, help="Semitones up (2) or down (-3); 0 is the original key."),
 ):
-    """Shift every audio clip in a song to a new key."""
+    """Shift every audio clip in a song to a new key, keeping its speed.
+
+    Click, guide, count and SMPTE tracks keep their key, as do tracks opted out
+    in the web app.
+    """
+    from app.folders import FolderMemory
+
     with _connect() as live:
         row = _pick(_run(live.list_scenes), song, "song")
-        result = _run(lambda: live.transpose_song(row["index"], semitones))
-    typer.echo(f"Song {_song_line(result).strip()}: {result['clips']} clip(s) at {_key_text(semitones)}")
+        kept = FolderMemory().kept_tracks(_run(live.list_tracks))
+        result = _run(lambda: live.transpose_song(row["index"], semitones, skip_tracks=kept))
+    line = f"Song {_song_line(result).strip()}: {result['clips']} clip(s) at {_key_text(semitones)}"
+    if result.get("kept"):
+        line += f", {result['kept']} kept their key"
+    typer.echo(line)
 
 
 @song_app.command("delete")
@@ -667,17 +730,21 @@ def song_import(
         True, "--match-levels/--keep-levels", help="Even out stem levels so one fader setting suits every song."
     ),
 ):
-    """Add a song from a folder of stems.
+    """Add a song from a folder of stems, onto the church's part tracks.
 
-    Each stem goes on the track with the same name, or a new track if there
-    isn't one. Stems play once at their own speed, so they stay in sync.
-    With --match-levels (the default), clip gain brings every stem to the same
-    loudness, so the faders set the mix for all songs at once. New tracks
-    start with their faders down far enough that all the stems together don't
-    clip; existing tracks keep theirs. A new SMPTE/timecode track starts muted.
-    Stereo pairs ("GTR L" and "GTR R") get one clip gain between them, so the
-    image stays centred.
+    Stems are grouped into parts (Click, Guide, Drums, Bass, Acoustic, Electric,
+    Keys, BGVs...), the same tracks every song uses; where a part has several
+    stems they're mixed into one file under ~/Music/Holy Sound/Parts, keeping
+    their balance and L/R sides. A missing part track is created with No Input,
+    a fader low enough that the whole song doesn't clip, and its folder colour;
+    a new SMPTE track starts muted. Stems play once at their own speed.
+    With --match-levels (the default), each stem is first evened out to the same
+    loudness, so the faders set the mix for all songs at once.
     """
+    from app import mixdown, parts
+    from app.actions import _file_safe, default_parts_dir
+    from app.folders import FAMILIES, classify
+
     if not folder.is_dir():
         _fail(f"There's no folder at {folder}.")
     stems = sorted(p for p in folder.iterdir() if p.suffix.casefold() in AUDIO_SUFFIXES)
@@ -686,6 +753,8 @@ def song_import(
     stems = _select_stems(stems, only)
     name = name or folder.name
     gains = _level_match_gains(stems) if match_levels else {p: (None, "") for p in stems}
+    by_name = {p.name: p for p in stems}
+    grouped = parts.plan(list(by_name))
 
     with _connect() as live:
         scenes = _run(live.list_scenes)
@@ -699,23 +768,34 @@ def song_import(
         scene = slot["index"]
 
         tracks = {t["name"].casefold(): t["index"] for t in _run(live.list_tracks)}
-        fader = starting_fader_db(len(stems))
-        for stem in stems:
-            index = tracks.get(stem.stem.casefold())
+        fader = starting_fader_db(len(grouped))
+        for part, names in grouped.items():
+            index = tracks.get(part.casefold())
             is_new = index is None
             if is_new:
-                index = _run(lambda: live.create_audio_track(name=stem.stem))["index"]
-                tracks[stem.stem.casefold()] = index
+                index = _run(lambda: live.create_audio_track(name=part))["index"]
+                tracks[part.casefold()] = index
                 _run(lambda: live.set_volume(index, fader))
-                if is_timecode(stem.stem):
+                colour = next(c for key, _label, c in FAMILIES if key == classify(part))
+                _run(lambda: live.set_track_color(index, TRACK_COLORS[colour]))
+                if is_timecode(part):
                     _run(lambda: live.set_mute(index, True))
-            gain, note = gains[stem]
-            clip = _run(lambda: live.import_audio(index, str(stem.resolve()), scene, stem.stem, gain))
-            muted = "muted, it's timecode" if is_new and is_timecode(stem.stem) else ""
+            if len(names) == 1:
+                source, gain, note = by_name[names[0]], *gains[by_name[names[0]]]
+            else:
+                sides = parts.pans(names)
+                out = default_parts_dir() / _file_safe(name) / f"{_file_safe(part)}.wav"
+                try:
+                    mixed = mixdown.mix([(by_name[n], gains[by_name[n]][0] or 0.0, sides[n]) for n in names], out)
+                except mixdown.MixdownError as e:
+                    _fail(str(e))
+                source, gain, note = mixed["path"], -mixed["gain_db"], f"{len(names)} stems mixed"
+            clip = _run(lambda: live.import_audio(index, str(Path(source).resolve()), scene, part, gain))
+            muted = "muted, it's timecode" if is_new and is_timecode(part) else ""
             notes = ", ".join(n for n in (f"new track at {fader:g} dB" if is_new else "", muted, note) if n)
-            typer.echo(f"{index + 1:>3}  {stem.stem:<20} gain {clip['gain']:>9}" + (f"  ({notes})" if notes else ""))
+            typer.echo(f"{index + 1:>3}  {part:<20} gain {clip['gain']:>9}" + (f"  ({notes})" if notes else ""))
 
-    typer.echo(f"Added song {scene + 1}: {name} ({len(stems)} stems).")
+    typer.echo(f"Added song {scene + 1}: {name} ({len(stems)} stems on {len(grouped)} part tracks).")
 
 
 # -- marker ----------------------------------------------------------------

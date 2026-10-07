@@ -543,6 +543,7 @@ const groupEls = new Map(); // folder key (or "returns") -> dom refs
 let dragging = null;        // the strip being dragged to another folder
 
 function renderMixer(snap) {
+  renderMixSong(snap);
   const groups = buildMixerGroups(snap);
   const groupsEl = $("#groups");
   const keepGroups = new Set();
@@ -581,11 +582,45 @@ function renderMixer(snap) {
 /* One entry per folder, in the server's order. Empty folders stay in the
    list (hidden until a drag starts) so there's somewhere to drop a track.
    Shared effects (return tracks) are a trailing folder you can't drop into. */
+/* Song mix: with a song picked, the mixer shows only the tracks that play in it, and
+   each strip gets that song's own level (clip gain) and an on/off switch (Live's clip
+   activator). Both are saved in the song's clips, so Live applies them when the song
+   starts, with or without Holy Sound open. The faders stay the live mix. */
+let mixSong = null; // scene index, or null for every track
+try {
+  const saved = localStorage.getItem("holysound-mix-song");
+  mixSong = saved === null || saved === "" ? null : Number(saved);
+} catch {}
+
+function songClip(row) {
+  if (mixSong === null || row.is_return) return null;
+  return (row.clips || []).find((c) => c.scene_index === mixSong && c.is_audio) || null;
+}
+
+function renderMixSong(snap) {
+  const pick = $("#mix-song");
+  if (mixSong !== null && !snap.scenes.some((s) => s.index === mixSong)) mixSong = null;
+  const sig = JSON.stringify(snap.scenes.map((s) => [s.index, s.name]));
+  if (pick._sig !== sig) {
+    pick._sig = sig;
+    pick.replaceChildren(new Option("Every track", ""),
+      ...snap.scenes.filter((s) => s.name).map((s) => new Option(`${s.index + 1}. ${s.name}`, String(s.index))));
+  }
+  if (document.activeElement !== pick) pick.value = mixSong === null ? "" : String(mixSong);
+}
+
+$("#mix-song").addEventListener("change", (e) => {
+  mixSong = e.target.value === "" ? null : Number(e.target.value);
+  try { localStorage.setItem("holysound-mix-song", e.target.value); } catch {}
+  if (state?.live.snapshot) renderMixer(state.live.snapshot);
+});
+
 function buildMixerGroups(snap) {
   const folders = state.folders || [];
   const known = new Set(folders.map((f) => f.key));
   const byKey = new Map(folders.map((f) => [f.key, []]));
   for (const row of snap.tracks) {
+    if (mixSong !== null && !songClip(row)) continue; // not in this song
     byKey.get(known.has(row.folder) ? row.folder : "other")?.push(row);
   }
   const groups = folders.map((f) => ({
@@ -763,6 +798,12 @@ function createStrip() {
 
   slider($(".volume input", el), $(".volume output", el), (db) => ({ cmd: "set_volume", args: { ...target(el), db } }), dbText);
   slider($(".pan input", el), $(".pan output", el), (pan) => ({ cmd: "set_pan", args: { ...target(el), pan } }), panText);
+  slider($(".song-level input", el), $(".song-level output", el),
+    (db) => ({ cmd: "set_clip_gain", args: { track_index: el._row.index, scene_index: mixSong, db } }), dbText);
+  $(".clip-on", el).addEventListener("click", () => {
+    const clip = songClip(el._row);
+    if (clip) liveCmd("set_clip_active", { track_index: el._row.index, scene_index: mixSong, on: clip.active === false }).catch(() => {});
+  });
 
   $(".more", el).addEventListener("toggle", (e) => {
     el.classList.toggle("is-open", e.target.open);
@@ -782,6 +823,13 @@ function createStrip() {
   });
   grip.addEventListener("dragend", endDrag);
   $(".folder-select", el).addEventListener("change", (e) => moveTrack(el, e.target.value));
+  $(".follows-key", el).addEventListener("change", async (e) => {
+    try {
+      render(await api("/api/track-key", { track: el._row.name, follows: e.target.checked }));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  });
   return el;
 }
 
@@ -839,6 +887,25 @@ function routeLabel(side, isInput) {
 
 function updateStrip(el, row, snap) {
   el._row = row;
+  const clip = songClip(row);
+  const mix = $(".song-mix", el);
+  mix.hidden = !clip;
+  el.classList.toggle("song-off", clip?.active === false);
+  if (clip) {
+    const on = clip.active !== false;
+    const toggle = $(".clip-on", el);
+    toggle.setAttribute("aria-pressed", on);
+    toggle.textContent = on ? "On" : "Off";
+    const name = songName(snap, mixSong);
+    toggle.title = on ? `Playing in ${name}. Press to leave it out of this song.` : `Left out of ${name}. Press to bring it back.`;
+    const level = $(".song-level input", el);
+    level.setAttribute("aria-label", `${row.name} level in ${name}`);
+    if (!holding.has(level)) {
+      level.value = clip.gain_db ?? 0;
+      paintFill(level);
+      $(".song-level output", el).textContent = (clip.gain || "").replace("-", "−");
+    }
+  }
   el.classList.toggle("is-return", row.is_return);
   if (row.color != null) el.style.setProperty("--track-color", "#" + row.color.toString(16).padStart(6, "0"));
   $(".strip-num", el).setAttribute("aria-label", `Colour for ${row.name}`);
@@ -860,6 +927,9 @@ function updateStrip(el, row, snap) {
     pick.replaceChildren(...folders.map((f) => new Option(f.label, f.key)));
   }
   if (!row.is_return && document.activeElement !== pick) pick.value = row.folder;
+  // Click and guide keep their key when a song is transposed; any track can opt in or out.
+  $(".key-line", el).hidden = row.is_return || row.is_midi;
+  $(".follows-key", el).checked = !row.keeps_key;
 
   const route = row.is_return
     ? `→ ${routeLabel(row.output)}`

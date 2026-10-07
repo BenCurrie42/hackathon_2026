@@ -80,6 +80,12 @@
       </div>
       <div class="tab-panel" id="panel-mixer">
         <div class="mixer-tools">
+          <label class="song-mix-pick">
+            <span>Song mix</span>
+            <select id="mix-song" aria-label="Show one song's mix">
+              <option value="">Every track</option>
+            </select>
+          </label>
           <button class="link-btn" id="match-colors" type="button" title="Live can't show folders, so each folder gets its own colour there">Colour tracks in Live to match these folders</button>
         </div>
         <div class="groups" id="groups"></div>
@@ -186,6 +192,13 @@
         <button class="toggle mute" aria-pressed="false" title="Mute">M</button>
         <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
       </div>
+      <div class="song-mix" hidden>
+        <button class="toggle clip-on" type="button" aria-pressed="true">On</button>
+        <div class="control song-level">
+          <input type="range" min="-24" max="12" step="0.5">
+          <output></output>
+        </div>
+      </div>
       <div class="control pan">
         <input type="range" min="-1" max="1" step="0.02" aria-label="Pan">
         <output></output>
@@ -206,6 +219,10 @@
         <label class="folder-line">
           <span>Folder</span>
           <select class="folder-select" aria-label="Folder"></select>
+        </label>
+        <label class="key-line">
+          <input type="checkbox" class="follows-key">
+          <span>Changes with the song key</span>
         </label>
         <div class="route-line"></div>
       </details>
