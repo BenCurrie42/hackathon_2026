@@ -141,7 +141,7 @@ All through `api()`: GET when no body, else JSON POST. Non-2xx responses throw a
 | Output routing (loaded when a channel is shown in the drawer) | `get_routing`, `set_routing` |
 | Effects | `load_device`, `delete_device` |
 | Songs | `create_scene`, `set_scene` (name or bpm), `fire_scene`, `transpose_song` |
-| Level in a song, Playing / Left out | `set_clip_gain`, `set_clip_active` |
+| Level in a song, Playing / Left out | `set_clip_gain`, `set_mute` (plus `set_clip_active` on to bring back a clip switched off in Live) |
 
 The server only accepts commands in `DIRECT_COMMANDS` (`app/server.py`). A new control needs its command added there. For `transpose_song` the server adds the tracks that keep their key itself.
 
@@ -192,7 +192,7 @@ Top to bottom, from `#strip-template`:
 - **Balance bar** (`.pan`): a thin bar with a dot over a native range input (-1 to 1). Double-click centres it.
 - **Mute** and **Solo** buttons (`aria-pressed`). Mute reads "Muted" when on and the strip dims; Solo lights the strip.
 - **Fader zone:** a scale, a slot, a drawn cap and an invisible native range input (0 to 1000) on top, so the keyboard, touch and screen readers get a real slider while the eye gets a console. A segment meter sits beside it. A ghost tick briefly marks where the level was after the assistant moves it.
-- **Note** under the fader: "Editing…" while the assistant works on it, "Changed" for four seconds after, "Solo", "Left out" (the picked song has this part switched off), or otherwise where the sound comes from or goes ("Input 1", "Playback", "MIDI", "Out 3/4", "Effects only", "Shared").
+- **Note** under the fader: "Editing…" while the assistant works on it, "Changed" for four seconds after, "Solo", "Left out" (muted in the picked song, or its clip switched off there), or otherwise where the sound comes from or goes ("Input 1", "Playback", "MIDI", "Out 3/4", "Effects only", "Shared").
 - **Name plate** (scribble strip): the track name on the track's colour. It is the select button and the drag handle. Shared effects drop Ableton's "A-" prefix here.
 
 **Fader law.** One table, `LAW`, maps dB to cap position: -70 dB at 0, -40 at 0.16, -30 at 0.28, -20 at 0.42, -10 at 0.6, 0 dB at 0.8, +6 at the top. The cap, the scale and the 0 dB line all use it. The page only uses it for position and display; `set_volume` and `set_send` still send dB. A hand drag snaps to 0 dB within ±1 dB (with a 5 ms vibrate on phones); arrow keys move 1% and Page Up/Down 5% with no snap; double-click goes to 0 dB. Levels read as percentages of travel (`percent(db)`, "68 percent" for screen readers, "Off" at the bottom). Sends use the same table and read "68%" or "Off".
@@ -214,7 +214,7 @@ Four sections:
 | Section | Contents |
 | --- | --- |
 | **Channel** (or "Channel 3", "Shared effect A") | Name field (committed on change or Enter, `set_track_name`; the server also renames it in folder memory), a routing summary sentence from `describeRouting` ("Input 1. Plays through the main speakers."), and a **Colour** button that opens the swatch dialog. |
-| **Sound** | Mute and Solo (the same state as the strip's buttons), "Mute silences it. Solo plays only this channel.", and **Balance** with its value in words. With a song picked in Song mix and this track playing in it: **In <song>**, a switch reading **Playing in this song** or **Left out of this song** (`set_clip_active`), and that song's **Level** (-24 to +12 dB, `set_clip_gain`). |
+| **Sound** | Mute and Solo (the same state as the strip's buttons), "Mute silences it. Solo plays only this channel.", and **Balance** with its value in words. With a song picked in Song mix and this track playing in it: **In <song>**, a switch reading **Playing in this song** or **Left out of this song** (that song's mute, so it takes effect at once while the song plays), and that song's **Level** (-24 to +12 dB, `set_clip_gain`). |
 | **Reverb and delay** (titled after the return tracks, e.g. "Reverb and Delay") then **Other effects** | One send slider per return track, in percent. Then the track's effects, numbered, each with a remove button that asks first ("Remove Reverb?" … "Undo in Ableton brings it back."), and **Add effect**. |
 | **Where it plays** | **Folder** select, **Copy folder colours to Ableton**, **Plays to** (output type: "The room (main speakers)", "Another output (in-ears, etc.)", "Only the shared effects", plus a channel select when there is a choice), **Changes with the song key** checkbox, and **Level in each song** with one slider per song the track has a clip in. |
 
@@ -228,8 +228,8 @@ With a song picked:
 
 - `buildMixerGroups` keeps only tracks with an audio clip in that song (`songClip(row)`); shared effects stay.
 - The faders, balance, mute and sends are that song's. The server saves changes as they happen and puts them back when the song is picked, started with **Start**, or started in Ableton (see `app/song_mixes.py`). Solo and the main fader are not kept per song.
-- Each channel's drawer gets **In <song>**: Playing / Left out and the song's Level. Both live in the song's clips, so Ableton applies them when the song starts, with or without the page open.
-- A strip whose clip is switched off in the picked song greys out (`.song-off`) and its note reads "Left out".
+- Each channel's drawer gets **In <song>**: Playing / Left out and the song's Level. Playing / Left out is the track's mute, saved with the song's mix; Level is clip gain, which Ableton applies when the song starts, with or without the page open.
+- A strip muted in the picked song, or whose clip is switched off there, greys out (`.song-off`) and its note reads "Left out". Bringing it back unmutes it and turns a switched-off clip back on.
 
 **Checkpoints** opens a dialog: "Changes save to this song as you make them. A checkpoint keeps this exact mix so you can come back to it." A name field and **Save checkpoint**, then the list, each with when it was made, **Go back to this** and **Delete**. Going back first saves the mix it replaces as a checkpoint, and the toast says so.
 

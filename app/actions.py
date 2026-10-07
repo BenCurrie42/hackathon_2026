@@ -285,7 +285,7 @@ class SetPan(BaseModel):
 
 
 class SetMute(BaseModel):
-    """Mute or unmute a track, in the song on the mixer (or a named song). To leave a part out of one song, set_clip_active is better."""
+    """Mute or unmute a track, in the song on the mixer (or a named song). Also how a part is left out of one song, or brought back."""
 
     action: Literal["set_mute"]
     track: TrackRef
@@ -764,24 +764,6 @@ class SetClipGain(BaseModel):
         return f"The {t.name} clip in {_song_name(s)} is at {result['gain']}."
 
 
-class SetClipActive(BaseModel):
-    """Leave a track's clip out of one song (on false), or bring it back (on true). Live applies it when the song starts, even without the app."""
-
-    action: Literal["set_clip_active"]
-    track: TrackRef
-    song: SongRef
-    on: bool = Field(description="False to leave this track out of this song only; true to bring it back.")
-
-    def describe(self):
-        return f"{'Bring back' if self.on else 'Leave out'} “{self.track}” in “{self.song}”"
-
-    def run(self, ex):
-        t = ex.track(self.track, allow_return=False)
-        s = ex.song(self.song)
-        ex.call("set_clip_active", track_index=t.index, scene_index=s["index"], on=self.on)
-        return f"{t.name} is {'on' if self.on else 'off'} in {_song_name(s)}."
-
-
 class PartChoice(BaseModel):
     """Which part a track's stems go to, in one song or all of them."""
 
@@ -858,7 +840,7 @@ Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
     SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
     MoveSong, TransposeSong, DeleteSong, StartSong, PickSongMix, SaveCheckpoint, RestoreCheckpoint,
-    Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, SetClipActive, TidyIntoParts, Listen,
+    Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, TidyIntoParts, Listen,
 ]
 
 

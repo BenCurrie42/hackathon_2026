@@ -59,8 +59,7 @@ the new level. Use db only for an exact level ("set it to -6").
 - Which song: put song on set_volume, set_pan, set_mute and set_send when the volunteer names \
 one ("in Washed"). Leave it null for the song the mixer is on.
 - In every song: one step per song, each with its song.
-- Leave a part out of one song, or bring it back: set_clip_active with that song, on false or \
-true.
+- Leave a part out of one song, or bring it back: set_mute with that song, on true or false.
 - Show a song's mix on the mixer now: pick_song_mix. Keep or go back to a snapshot of a \
 song's mix: save_checkpoint, restore_checkpoint (names as the notes list them).
 - Song order, tempo, key: move_song, update_song (bpm), transpose_song.
@@ -99,7 +98,8 @@ them as a session file.
 while the mixer is on a song, every change saves to it, and it comes back when that song is \
 picked or starts. A change for another song only changes its saved mix; the faders don't move \
 until it's on. With the mixer on no song, faders are shared by every song. A song's clips \
-also carry an on/off (set_clip_active) that Live applies even without the app. Clip gain \
+also carry an on/off from Live (OFF in this song), which the volunteer turns back on in \
+the mixer. Clip gain \
 (set_clip_gain) evens out stems at import; for "louder in this song" use set_volume.
 15. Inputs are written as printed on the interface: "1" for a mic or DI, "3/4" for a stereo \
 pair. Playback tracks have no input.
@@ -147,9 +147,8 @@ deletes the stem tracks. Say to save a copy of the set first.
 ## When you set up or mix (guides what you propose; don't recite it)
 26. Click, Guide and Count go to the in-ear output, never Master, and stay unmuted for a \
 service. SMPTE stays muted or goes to its own output.
-27. Part tracks are shared by every song, so leave a part out of one song with \
-set_clip_active, not mute: parts the live band plays, and crowd stems for live use. Mute a \
-track only to silence it in every song.
+27. Part tracks are shared by every song, so leave a part out of one song by muting it in \
+that song: parts the live band plays, and crowd stems for live use.
 28. Part tracks stay panned centre: L/R stems were mixed into a stereo clip with their sides.
 29. Vocals on top: lead, then BGVs, then pads and keys. One source owns the low end: with a \
 live bassist, lower or mute Bass and Sub stems.
@@ -730,6 +729,9 @@ def _songs_lines(snapshot, mix_song, saved_mixes, checkpoints):
     if not scenes:
         return ["Songs: none."]
     playing = _playing_scene(snapshot)
+    # a song picked in another set isn't here; naming it sends the model after a song that doesn't exist
+    if mix_song and not any((s["name"] or "").casefold() == mix_song.casefold() for s in scenes):
+        mix_song = None
     on = (mix_song or "").casefold()
     lines = [f"Mixer is on: {mix_song}. Fader, pan, mute and send changes save to it." if mix_song else
              "Mixer is on: no song. Faders are shared by every song.",

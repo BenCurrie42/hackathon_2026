@@ -37,7 +37,7 @@ On the **Mixer** tab, pick a song in **Song mix** at the top. The mixer then sho
 
 Tap a channel's name, and the panel below has **In Way Maker** with two more controls for that song only:
 
-- A switch that reads **Playing in this song** or **Left out of this song**. Use it for a part your band plays live, rather than muting the track. A part left out greys out on the mixer and reads "Left out".
+- A switch that reads **Playing in this song** or **Left out of this song**. Use it for a part your band plays live. It mutes the track in this song only, and works at once while the song plays. A part left out greys out on the mixer and reads "Left out".
 - A **Level** for that song only (-24 to +12 dB).
 
 These two are saved in the song itself, so Ableton applies them when the song starts, with or without Holy Sound open.

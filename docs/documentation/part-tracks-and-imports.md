@@ -11,7 +11,7 @@ Rules to keep when changing imports (these hold in `import_part`, `rig.py song i
 1. Every song uses the same part tracks. Never a track per stem.
 2. The model cannot create stem sprawl: `import_audio` is not a proposable action; `import_part` is, and it creates a missing part track itself.
 3. Playback tracks have No Input. RigLink's `create_audio_track` sets it; live sources set input explicitly afterwards.
-4. A song's own mix lives in its clips (clip gain, and the clip activator via `set_clip_active`); Live applies both when the song starts, app open or not. Faders, pan, mute and sends belong to the track, so they are per song only through the app (`app/song_mixes.py`, see [Per-song mix](#per-song-mix)); with no song picked, or the app closed, they are shared by every song.
+4. A song's own level lives in its clips (clip gain); Live applies it when the song starts, app open or not. A part is left out of one song by muting it in that song. Faders, pan, mute and sends belong to the track, so they are per song only through the app (`app/song_mixes.py`, see [Per-song mix](#per-song-mix)); with no song picked, or the app closed, they are shared by every song.
 
 ## `app/parts.py`
 
@@ -66,7 +66,7 @@ One-song sets from Washed, MultiTracks and similar: every stem laid out in Arran
 
 Two layers:
 
-- **In the clips.** `set_clip_gain` and `set_clip_active` edit one song's clip; Live applies both when the song starts, with or without the app. Snapshot clip rows carry `active`; the assistant's session notes mark a clip "OFF in this song". The mixer toggles a part per song through `/api/live` (`set_clip_active` is on its whitelist). `delete_clip` empties a slot (used by tidy).
+- **In the clips.** `set_clip_gain` and `set_clip_active` edit one song's clip; Live applies both when the song starts, with or without the app. Snapshot clip rows carry `active`; the assistant's session notes mark a clip "OFF in this song". The mixer's Playing / Left out switch is per-song mute; it calls `set_clip_active` only to turn a switched-off clip back on. `delete_clip` empties a slot (used by tidy).
 - **On the tracks, through the app.** Faders, pan, mute and sends belong to the track. `app/song_mixes.py` (`SongMixMemory`, `~/.holysound/song_mixes.json`) keeps them per song by song and track name, puts them back when a song is picked in the mixer's **Song mix** picker or starts playing, and keeps up to 20 named checkpoints per song. Solo and the Master fader are not kept. Endpoint and behaviour: [web-server-api.md](web-server-api.md) (`/api/song-mix`); picker: [frontend.md](frontend.md).
 
 ## Transpose that keeps tempo

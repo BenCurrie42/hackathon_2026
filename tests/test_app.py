@@ -483,6 +483,19 @@ class ConversationTest(unittest.TestCase):
         self.assertIn("audio effects: Auto Filter", notes)
         self.assertIn("NOT connected", session_notes(None, None, "Live is closed"))
 
+    def test_session_notes_drop_a_picked_song_this_set_does_not_have(self):
+        server, fake = fake_live.serve(port=0, latency=0)
+        try:
+            fake.set_scene(0, name="Way Maker")
+            live = LiveLink(port=server.server_address[1])
+            snap = live.snapshot()
+            live.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertIn("Mixer is on: no song.", session_notes(snap, None, mix_song="Washed"))
+        self.assertIn("Mixer is on: Way Maker.", session_notes(snap, None, mix_song="Way Maker"))
+
     def test_session_notes_show_pan_as_a_number_and_list_outputs(self):
         server, fake = fake_live.serve(port=0, latency=0)
         try:
@@ -1024,7 +1037,7 @@ class TrackLayoutGuardTest(unittest.TestCase):
     def test_the_prompt_keeps_the_part_and_per_song_mix_rules(self):
         from app.assistant import SYSTEM
         self.assertIn("Never make a track per stem", SYSTEM)
-        self.assertIn("set_clip_active", SYSTEM)
+        self.assertIn("leave a part out of one song by muting it", SYSTEM)
 
     def test_new_tracks_start_with_no_input(self):
         fake = fake_live.FakeSet()

@@ -1002,6 +1002,11 @@ function renderMixer(snap) {
    puts its mix back, and every change after that is saved to it. The server says which song. */
 let mixSong = null; // scene index, or null for every track
 
+/* Left out of the picked song: muted there, or its clip switched off in Live. */
+function leftOut(row) {
+  return !!row.mute || songClip(row)?.active === false;
+}
+
 function songClip(row) {
   if (mixSong === null || row.is_return) return null;
   return (row.clips || []).find((c) => c.scene_index === mixSong && c.is_audio) || null;
@@ -1397,9 +1402,15 @@ function createStrip() {
 
   slider(m.songLevelInput, m.songLevelOut,
     (db) => ({ cmd: "set_clip_gain", args: { track_index: strip._row.index, scene_index: mixSong, db } }), dbText);
+  // In or out of the picked song is that song's mute: instant while it plays, saved per song.
   m.songOn.addEventListener("click", () => {
     const clip = songClip(strip._row);
-    if (clip) liveCmd("set_clip_active", { track_index: strip._row.index, scene_index: mixSong, on: clip.active === false }).catch(() => {});
+    if (!clip) return;
+    if (leftOut(strip._row)) {
+      // a clip switched off in Live (the old way) won't play until it's back on
+      if (clip.active === false) liveCmd("set_clip_active", { track_index: strip._row.index, scene_index: mixSong, on: true }).catch(() => {});
+      if (strip._row.mute) toggleMute();
+    } else toggleMute();
   });
   m.followsKey.addEventListener("change", async () => {
     try {
@@ -1580,7 +1591,7 @@ function paintNote(strip) {
   if (strip._running) note.textContent = "Editing…";
   else if (strip._changedUntil && performance.now() < strip._changedUntil) note.textContent = "Changed";
   else if (row?.solo) note.textContent = "Solo";
-  else if (songClip(row || {})?.active === false) note.textContent = "Left out";
+  else if (row && songClip(row) && leftOut(row)) note.textContent = "Left out";
   else note.textContent = row ? idleNote(row) : "";
 }
 
@@ -1711,10 +1722,10 @@ function updateStrip(strip, row, snap) {
 function updateSongMix(strip, row, snap) {
   const m = strip._r.more;
   const clip = songClip(row);
-  strip.classList.toggle("song-off", clip?.active === false);
+  strip.classList.toggle("song-off", !!clip && leftOut(row));
   m.song.hidden = !clip;
   if (clip) {
-    const on = clip.active !== false;
+    const on = !leftOut(row);
     const name = songName(snap, mixSong);
     m.songTitle.textContent = `In ${name}`;
     m.songOn.setAttribute("aria-pressed", String(!on));

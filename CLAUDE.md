@@ -204,9 +204,10 @@ own track, each with Live's default input. These hold everywhere audio comes in
    part track itself.
 3. **Playback tracks have No Input.** RigLink's `create_audio_track` sets it;
    live sources set their input explicitly afterwards.
-4. **A song's own mix lives in its clips**: clip gain for level, the clip activator
-   (`set_clip_active`) to leave a part out of one song. Live applies both when the
-   song starts, app open or not. Faders, pan, mute and sends are per song only through
+4. **A song's own level lives in its clips**: clip gain, which Live applies when the song
+   starts, app open or not. A part is left out of one song by muting it in that song (the
+   clip activator stops a playing clip but won't restart it mid-song, so it isn't used for
+   this any more). Faders, pan, mute and sends are per song only through
    the app (`app/song_mixes.py`): it saves them while the mixer is on a song and puts
    them back when that song is picked or starts. With no song picked, or the app closed,
    they're shared by every song.
