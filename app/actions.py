@@ -107,7 +107,7 @@ class AddTrack(BaseModel):
     color: ColorName | None = Field(default=None, description="Track colour, to group related tracks.")
 
     def describe(self):
-        parts = [f"Add {'a MIDI' if self.kind == 'midi' else 'an audio'} track “{self.name}”"]
+        parts = [f"Add {'a MIDI' if self.kind == 'midi' else 'a'} track “{self.name}”"]
         if self.kind == "audio":
             parts.append(f"on input {self.input}" if self.input else "with no input")
         if self.output:
@@ -117,9 +117,9 @@ class AddTrack(BaseModel):
         if self.devices:
             extras.append("with " + ", ".join(d.label() for d in self.devices))
         if self.volume_db is not None:
-            extras.append(f"at {_db(self.volume_db)}")
+            extras.append(f"at {_level(self.volume_db)}")
         if self.pan:
-            extras.append(f"panned {_pan(self.pan)}")
+            extras.append(f"balance {_pan(self.pan)}")
         if self.color:
             extras.append(f"coloured {self.color}")
         return text + (", " + ", ".join(extras) if extras else "")
@@ -163,7 +163,7 @@ class AddTrack(BaseModel):
 
         done = f"Added “{self.name}” as track {index + 1}."
         if self.volume_db is None and volume_db is not None:
-            done = done[:-1] + f", fader at {_db(volume_db)} to leave room for every part together."
+            done = done[:-1] + f", fader at {_level(volume_db)} to leave room for every part together."
         if is_muted_timecode:
             done = done[:-1] + ", muted because it's timecode."
         if problems:
@@ -179,7 +179,7 @@ class AddReturn(BaseModel):
     devices: list[Device] = Field(default_factory=list, description="Usually one reverb or delay.")
 
     def describe(self):
-        text = f"Add a shared effect (return track) “{self.name}”"
+        text = f"Add a shared effect “{self.name}”"
         if self.devices:
             text += " with " + ", ".join(d.label() for d in self.devices)
         return text
@@ -232,7 +232,7 @@ class DeleteTrack(BaseModel):
         t = ex.track(self.track)
         ex.call("delete_track", track_index=t.index, is_return=t.is_return)
         ex.tracks_changed()
-        return f"Deleted {t.name}. (Cmd+Z in Live brings it back.)"
+        return f"Deleted {t.name}. Undo in Ableton brings it back."
 
 
 class SetVolume(BaseModel):
@@ -258,9 +258,9 @@ class SetVolume(BaseModel):
         db = _moved(self.db, self.by_db, lambda: ex.level_now(t, later))
         if later:
             ex.save_for_song(later, t, volume_db=db)
-            return f"{t.name} will be at {_db(db)} in {later}."
+            return f"{t.name} will be at {_level(db)} in {later}."
         result = ex.call("set_volume", track_index=t.index, is_return=t.is_return, db=db)
-        return f"{t.name} is now at {result['volume']}."
+        return f"{t.name} is now at {_level_text(result['volume'])}."
 
 
 class SetPan(BaseModel):
@@ -272,7 +272,7 @@ class SetPan(BaseModel):
     song: MixSong
 
     def describe(self):
-        return _in_song(self.song, f"Pan “{self.track}” {_pan(self.pan)}")
+        return _in_song(self.song, f"Set the balance of “{self.track}” to {_pan(self.pan)}")
 
     def run(self, ex):
         t = ex.track(self.track)
@@ -281,7 +281,7 @@ class SetPan(BaseModel):
             ex.save_for_song(later, t, pan=self.pan)
             return f"{t.name} will be panned {_pan(self.pan)} in {later}."
         result = ex.call("set_pan", track_index=t.index, is_return=t.is_return, pan=self.pan)
-        return f"{t.name} is panned {result['pan']}."
+        return f"{t.name} is balanced {_pan(self.pan)}."
 
 
 class SetMute(BaseModel):
@@ -379,21 +379,21 @@ class SetSend(BaseModel):
         if self.by_db is not None:
             more = "more" if self.by_db > 0 else "less"
             return _in_song(self.song, f"{abs(self.by_db):g} dB {more} of “{self.to_return}” on “{self.track}”")
-        return _in_song(self.song, f"Send “{self.track}” into “{self.to_return}” at {_db(self.db)}")
+        return _in_song(self.song, f"Send “{self.track}” to “{self.to_return}” at {_level(self.db)}")
 
     def run(self, ex):
         t = ex.track(self.track)
         r = ex.track(self.to_return)
         if not r.is_return:
-            raise ActionFailed(f"{r.name} isn't a shared effect (return track), so nothing can be sent to it.")
+            raise ActionFailed(f"{r.name} isn't a shared effect, so nothing can be sent to it.")
         later = ex.later_song(self.song)
         db = _moved(self.db, self.by_db, lambda: ex.level_now(t, later, send_to=r.name))
         if later:
             ex.save_for_song(later, t, send=(r.name, db))
-            return f"{t.name} will send to {r.name} at {_db(db)} in {later}."
+            return f"{t.name} will send to {r.name} at {_level(db)} in {later}."
         result = ex.call("set_send", track_index=t.index, is_return=t.is_return,
                          return_index=r.index, db=db)
-        return f"{t.name} sends to {r.name} at {result['level']}."
+        return f"{t.name} sends to {r.name} at {_level_text(result['level'])}."
 
 
 class AddDevice(BaseModel):
@@ -689,9 +689,9 @@ class MoveToFolder(BaseModel):
         # Live can't show folders; the folder's colour is how it shows up there.
         colour = next(c for key, _label, c in FAMILIES if key == self.folder)
         problems = []
-        ex.try_step(problems, f"colour it {colour} in Live", "set_track_color",
+        ex.try_step(problems, f"colour it {colour} in Ableton", "set_track_color",
                     track_index=t.index, is_return=False, rgb=TRACK_COLORS[colour])
-        done = f"Moved {t.name} to {_folder_label(self.folder)}, {colour} in Live."
+        done = f"Moved {t.name} to {_folder_label(self.folder)}, {colour} in Ableton."
         if problems:
             return done + " But " + "; ".join(problems) + "."
         return done
@@ -962,7 +962,7 @@ class Executor:
             if device.preset and "no preset called" in str(e):
                 try:
                     self._live.call("load_device", device_name=device.device, **target)
-                    return f"{device.device} is on its default settings — Live has no preset called “{device.preset}”"
+                    return f"{device.device} is on its default settings, because Ableton has no preset called “{device.preset}”"
                 except RigLinkError as e2:
                     e = e2
             problems.append(f"couldn't add {device.label()} ({_lower_first(_sentence(e)).rstrip('.')})")
@@ -1094,13 +1094,17 @@ def default_parts_dir():
 
 
 def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=None, mixes=None,
-            mix_control=None):
+            mix_control=None, on_step=None):
     """Run actions in order. One failure doesn't stop the rest.
 
     on_touch(name) is called for each track an action works on. folders is the
     mixer's FolderMemory, for move_to_folder and renames. mixes and mix_control are
     the app's song mixes, for mixer changes meant for one song and checkpoints.
+    on_step(n, state) is called as step n starts ("working") and ends ("done",
+    "check" if it only partly worked, "failed"); steps skipped because Live went
+    away are "failed".
     """
+    step = on_step or (lambda n, state: None)
     ex = Executor(live, files, on_touch, folders, parts_dir, mixes, mix_control)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
@@ -1112,21 +1116,26 @@ def run_all(live, actions, files=None, on_touch=None, folders=None, parts_dir=No
         ex.new_track_fader_db = starting_fader_db(max(per_song.values()))
     results = []
     for n, action in enumerate(actions):
+        step(n, "working")
         try:
             ex.detail = None
             text = action.run(ex)
             results.append({"ok": True, "partial": " But " in text, "text": text})
             if ex.detail:
                 results[-1]["detail"] = ex.detail
+            step(n, "check" if results[-1]["partial"] else "done")
         except ActionFailed as e:
             results.append({"ok": False, "text": f"{action.describe()}: {e}"})
             ex.tracks_changed()
+            step(n, "failed")
         except LiveUnavailable as e:
             results.append({"ok": False, "text": f"{action.describe()}: {e}"})
             results.extend(
-                {"ok": False, "text": f"{a.describe()}: not done — lost touch with Live."}
+                {"ok": False, "text": f"{a.describe()}: not done. Lost touch with Ableton."}
                 for a in actions[n + 1:]
             )
+            for lost in range(n, len(actions)):
+                step(lost, "failed")
             break
     return results
 
@@ -1152,7 +1161,7 @@ def to_rigspec(actions):
     tracks, notes = [], []
     for action in actions:
         if not isinstance(action, AddTrack):
-            notes.append(f"“{action.describe()}” only works with Live open.")
+            notes.append(f"“{action.describe()}” only works with Ableton open.")
             continue
         spec_input = None
         if action.input and action.input.isdigit():
@@ -1162,7 +1171,7 @@ def to_rigspec(actions):
         if action.output and action.output.destination.casefold() != "master":
             notes.append(f"{action.name}: only the Master output can go in a session file yet.")
         if action.color:
-            notes.append(f"{action.name}: colours only apply in Live, not in a session file.")
+            notes.append(f"{action.name}: colours only apply in Ableton, not in a saved file.")
         for d in action.devices:
             if d.preset:
                 notes.append(f"{action.name}: {d.device} uses its default settings in a session file, not “{d.preset}”.")
@@ -1204,7 +1213,7 @@ _FILLER = re.compile(r"^(the|our|my)\s+|\s+(song|track|tracks|part)$", re.IGNORE
 def _words(text):
     """Lower-case words with a trailing plural s dropped, so 'Vocals' and 'vocal' match."""
     return [w[:-1] if len(w) > 3 and w.endswith("s") else w
-            for w in re.findall(r"[a-z0-9]+", text.casefold().replace("\u2019", "'").replace("'", ""))]
+            for w in re.findall(r"[a-z0-9]+", text.casefold().replace("’", "'").replace("'", ""))]
 
 
 def _one_named(rows, ref, name_of):
@@ -1242,20 +1251,45 @@ def _moved(level, by, now):
 def _level_change(track, db, by_db):
     if by_db is not None:
         return f"Turn “{track}” {'up' if by_db > 0 else 'down'} {abs(by_db):g} dB"
-    return f"Set “{track}” to {_db(db)}"
+    return f"Set “{track}” to {_level(db)}"
+
+
+# Where a fader sits for a level, as the page draws it: 0 dB is 80% of the travel.
+_FADER_LAW = [(-70, 0.0), (-40, 0.16), (-30, 0.28), (-20, 0.42), (-10, 0.6), (0, 0.8), (6, 1.0)]
+
+
+def _level(db):
+    """A fader level in a volunteer's words: "off", or how far up the fader is."""
+    if db is None or db <= -70:
+        return "off"
+    if db >= 6:
+        return "100%"
+    for (d0, p0), (d1, p1) in zip(_FADER_LAW, _FADER_LAW[1:]):
+        if db <= d1:
+            return f"{round((p0 + (db - d0) / (d1 - d0) * (p1 - p0)) * 100)}%"
+    return "100%"
+
+
+def _level_text(shown):
+    """Live's own level string ("-4.0 dB", "-inf dB") in the same words."""
+    match = re.search(r"-?\d+(?:\.\d+)?", shown or "")
+    if "inf" in (shown or "") or not match:
+        return "off"
+    return _level(float(match.group()))
 
 
 def _db(db):
+    """A relative change in dB (clip levels only; faders use _level)."""
     if db <= -70:
         return "off"
     return f"{db:+g} dB" if db else "0 dB"
 
 
 def _pan(pan):
-    amount = round(abs(pan) * 50)
+    amount = round(abs(pan) * 100)
     if amount == 0:
         return "centre"
-    return f"{amount}{'L' if pan < 0 else 'R'}"
+    return f"{amount}% {'left' if pan < 0 else 'right'}"
 
 
 def _song_name(s):
@@ -1292,10 +1326,10 @@ def _sentence(error):
     if match:
         noun, wanted, options = match.groups()
         noun = {"input": "input type", "output": "output type"}.get(noun, noun)
-        return f"Live has no {noun} called “{wanted}”. It has: {options}."
+        return f"Ableton has no {noun} called “{wanted}”. It has: {options}."
     match = re.match(r"no stock device called '(.+?)'", text)
     if match:
-        return f"Live has no stock device called “{match.group(1)}”."
+        return f"Ableton has no effect called “{match.group(1)}”."
     if "index out of range" in text:
-        return "That item doesn't exist any more — the set may have changed."
-    return "Live said: " + text
+        return "That item doesn't exist any more. The set may have changed."
+    return "Ableton said: " + text

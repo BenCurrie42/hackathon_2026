@@ -73,6 +73,7 @@ class App:
         self.demo = demo  # True when the "Live" behind this is the built-in pretend one
         self.clock = time.monotonic
         self._touched = {}  # track name (case-folded) -> (lit until, name)
+        self.progress = None  # while Apply runs: {"id": proposal id, "states": [one per step]}
         self.live = live
         self.chat = conversation
         self.key = key  # None: only this computer can connect
@@ -90,6 +91,11 @@ class App:
     def touch(self, name):
         """The assistant just changed this track."""
         self._touched[name.casefold()] = (self.clock() + AI_GLOW_SECONDS, name)
+
+    def applying(self):
+        """The change being applied right now, with each step's state, or None."""
+        progress = self.progress
+        return {"id": progress["id"], "states": list(progress["states"])} if progress else None
 
     def activity(self):
         """Tracks the assistant is changing (or just changed), with how long they stay lit."""
@@ -118,7 +124,7 @@ class App:
         except LiveUnavailable as e:
             return {"connected": False, "snapshot": None, "message": str(e)}
         except RigLinkError as e:
-            return {"connected": False, "snapshot": None, "message": f"Live reported a problem: {e}"}
+            return {"connected": False, "snapshot": None, "message": f"Ableton reported a problem: {e}"}
 
     def track_name(self, args):
         """The current name of the track a direct command points at, if it has one."""
@@ -270,6 +276,7 @@ class App:
             "activity": self.activity(),
             "demo": self.demo,
             "song_mix": self.mix_state(live["snapshot"]),
+            "applying": self.applying(),
         }
 
     # -- actions --------------------------------------------------------
@@ -294,11 +301,11 @@ class App:
         except ActionFailed as e:
             raise LookupError(str(e)) from e
         except LiveUnavailable as e:
-            raise LookupError(f"{e} Songs in the set can only be heard with Live open.") from e
+            raise LookupError(f"{e} Songs in the set can only be heard with Ableton open.") from e
         except RigLinkError as e:
             if "unknown cmd" in str(e):
                 raise LookupError("Live is running an older RigLink. Quit and reopen Live, then try again.") from e
-            raise LookupError(f"Live couldn't say which files are in that song ({e}).") from e
+            raise LookupError(f"Ableton couldn't say which files are in that song ({e}).") from e
         return [(r["track"], r["file_path"]) for r in rows if r.get("file_path")]
 
     def _load_imports(self):
@@ -387,9 +394,18 @@ class App:
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
-            results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
-                              folders=self.folders, parts_dir=self.parts_dir, mixes=self.mixes,
-                              mix_control=self)
+            states = ["waiting"] * len(p["actions"])
+            self.progress = {"id": pid, "states": states}
+
+            def on_step(n, state):
+                states[n] = state
+
+            try:
+                results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
+                                  folders=self.folders, parts_dir=self.parts_dir, mixes=self.mixes,
+                                  mix_control=self, on_step=on_step)
+            finally:
+                self.progress = None
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -573,7 +589,7 @@ def make_handler(app):
             except (UserError, LiveUnavailable) as e:
                 return self._error(str(e))
             except RigLinkError as e:
-                return self._error(f"Live couldn't do that: {e}")
+                return self._error(f"Ableton couldn't do that: {e}")
             except ConnectionError:
                 raise  # the browser went away; nothing to answer
             except Exception:
@@ -592,12 +608,12 @@ def make_handler(app):
                     if not text:
                         raise UserError("Type a message first.")
                     if app.chat.busy:
-                        raise UserError("Still working on the last message — one moment.")
+                        raise UserError("Still working on the last message. One moment.")
                     app.send_message(text)
                     return self._json(app.state())
                 if path == "/api/import":
                     if app.chat.busy:
-                        raise UserError("Still working on the last message — one moment.")
+                        raise UserError("Still working on the last message. One moment.")
                     folder = str(body.get("folder", "")).strip()
                     if not folder:
                         raise UserError("Pick a folder first.")
@@ -683,7 +699,7 @@ def make_handler(app):
             except TypeError as e:
                 if path != "/api/live":
                     raise  # a bug here, not a bad request from the page; don't blame Live
-                return self._error(f"The page asked Live for something it didn't understand ({e}).")
+                return self._error(f"The page asked Ableton for something it didn't understand ({e}).")
             except ConnectionError:
                 raise  # the browser went away; nothing to answer
             except Exception:
@@ -713,9 +729,12 @@ def make_handler(app):
                 return self._text(HTTPStatus.NOT_FOUND, "Not found.")
             body = target.read_bytes()
             kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            font = target.suffix == ".woff2"
+            if font:
+                kind = "font/woff2"  # the OS's idea of this type varies; fonts are vendored in static/fonts
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", kind + ("; charset=utf-8" if kind.startswith("text/") or kind.endswith("javascript") else ""))
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "public, max-age=86400" if font else "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -746,7 +765,7 @@ def lan_address():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Holy Sound — describe your Sunday, get a working Ableton set.")
+    parser = argparse.ArgumentParser(description="Holy Sound: describe your Sunday, get a working Ableton set.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--lan", action="store_true", help="Let phones and tablets on the same Wi-Fi connect.")
     parser.add_argument("--fake-live", action="store_true", help="Use a pretend Live Set instead of Ableton.")

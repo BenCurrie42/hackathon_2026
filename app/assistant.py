@@ -532,7 +532,7 @@ class Conversation:
                 self.messages.append({"role": "user", "content": unanswered})
             return shown + [self._entry(
                 role="assistant",
-                text="Sorry — I couldn't work out the right changes for that. Could you say it another way?",
+                text="Sorry, I couldn't work out the right changes for that. Could you say it another way?",
             )]
         except _Refused:
             self._rewind(mark, reopen)

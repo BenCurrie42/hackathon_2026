@@ -3,249 +3,248 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#141311">
+  <meta name="theme-color" content="#1c1c1c">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Holy Sound</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e8b04a'/%3E%3Cpath d='M9 20v-8M13 23V9M17 20v-8M21 17v-2' stroke='%23141311' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%231c1c1c'/%3E%3Crect x='9.5' y='5' width='13' height='22' rx='2' fill='none' stroke='%23e6e6e6' stroke-opacity='.55' stroke-width='1.6'/%3E%3Cpath d='M16 10v12' stroke='%23e6e6e6' stroke-width='1.6'/%3E%3Crect x='12' y='15' width='8' height='4' fill='%235fd37a'/%3E%3Crect x='19' y='4' width='5' height='3.2' fill='%235fd37a'/%3E%3C/svg%3E">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/big-shoulders-display-latin-800-normal.woff2">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/big-shoulders-display-latin-700-normal.woff2">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/source-sans-3-latin-400-normal.woff2">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/source-sans-3-latin-600-normal.woff2">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/source-sans-3-latin-700-normal.woff2">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
   <header class="top">
     <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M9 20v-8M13 23V9M17 20v-8M21 17v-2"/></svg>
-      <span>Holy Sound</span>
+      <svg class="mark" viewBox="0 0 26 26" aria-hidden="true">
+        <rect class="mark-body" x="6" y="1.75" width="14" height="22.5" rx="2"/>
+        <path class="mark-slot" d="M13 6.5v13"/>
+        <rect class="mark-cap" x="9" y="11" width="8" height="4"/>
+        <rect class="mark-cap" x="16.5" y="0.5" width="4.5" height="3.2"/>
+      </svg>
+      <h1 class="wordmark">Holy Sound</h1>
     </div>
     <div class="status" id="live-status" role="status" aria-live="polite">
-      <span class="dot"></span><span class="status-text">Looking for Live…</span><span class="status-detail"></span>
+      <span class="lamp"></span><span class="status-text">Looking for Ableton</span><span class="status-detail"></span>
     </div>
     <div class="transport" id="transport" hidden>
-      <button class="icon-btn" id="play-btn" aria-label="Play">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="play" d="M8 5.5v13l10.5-6.5z"/><rect class="stop" x="6.5" y="6.5" width="11" height="11" rx="1.5"/></svg>
+      <button class="key lit play" id="play-btn" type="button" aria-label="Play">
+        <svg class="ico-play" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.5v11l9-5.5z"/></svg>
+        <svg class="ico-stop" viewBox="0 0 14 14" aria-hidden="true"><rect x="2.5" y="2.5" width="9" height="9"/></svg>
+        <span class="play-word">Play</span>
       </button>
-      <div class="master-meter" id="master-meter" title="Master level"><span></span></div>
       <label class="tempo">
         <input id="tempo-input" type="number" inputmode="decimal" min="20" max="999" step="1" aria-label="Tempo in BPM">
         <span>BPM</span>
       </label>
+      <div class="main-level" aria-hidden="true" title="Overall level">
+        <span class="main-legend">Main</span>
+        <div class="main-bar" id="master-meter"><i></i></div>
+      </div>
     </div>
   </header>
 
   <main class="layout" id="layout" data-view="chat">
     <section class="pane chat-pane" id="pane-chat" aria-label="Chat">
+      <div class="chat-head">
+        <button class="text-btn" id="reset-btn" type="button" hidden>Start over</button>
+      </div>
       <div class="banner" id="ai-banner" hidden></div>
       <div class="messages" id="messages">
         <div class="welcome" id="welcome">
-          <h1>Describe your Sunday.</h1>
-          <p>Tell me who’s playing, what’s plugged in, and the songs. I’ll set up Ableton for you — you check the steps and press Apply.</p>
-          <div class="chips" id="chips">
-            <button class="chip">Four songs this week. Lead vocal on input 1, two backing vocals on 2 and 3, acoustic DI on 4, keys in stereo on 5/6.</button>
-            <button class="chip">Add a click and guide track that only goes to the in-ears.</button>
-            <button class="chip">Put a little more reverb on the lead vocal.</button>
-            <button class="chip chip-import" type="button" data-action="import">Import a folder of stems with AI</button>
-          </div>
+          <h2 class="welcome-date" id="welcome-date">Sunday</h2>
+          <p class="welcome-line" id="welcome-line">Nothing is set up yet. Say what is plugged in and which songs you are playing.</p>
+          <ul class="starters" id="chips">
+            <li><button class="starter" type="button">Lead vocal on input 1, backing vocals on 2 and 3, four songs.</button></li>
+            <li><button class="starter" type="button">Click and guide go to the in-ears only.</button></li>
+            <li><button class="starter" type="button">More reverb on the lead vocal.</button></li>
+            <li><button class="starter starter-import" type="button" data-action="import">Import song files from a folder</button></li>
+          </ul>
+          <p class="welcome-saved" id="welcome-saved" hidden>
+            <span class="welcome-saved-text"></span>
+            <button class="text-btn" id="open-room" type="button">Open Room</button>
+          </p>
         </div>
       </div>
+      <div class="slip-dock" id="slip-dock" role="region" aria-label="Changes waiting for your decision"></div>
       <form class="composer" id="composer">
-        <button class="attach" type="button" id="import-btn" aria-label="Import audio with AI" title="Import audio with AI">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/></svg>
-        </button>
-        <textarea id="message-input" rows="1" placeholder="Tell me what you need…" aria-label="Message"></textarea>
-        <button class="send" type="submit" aria-label="Send">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14M13 6l6 6-6 6"/></svg>
-        </button>
+        <textarea id="message-input" rows="2" placeholder="Tell me what to change" aria-label="Message"></textarea>
+        <div class="composer-row">
+          <button class="text-btn" type="button" id="import-btn">Import song files from a folder</button>
+          <button class="key send" type="submit">Send</button>
+        </div>
       </form>
-      <div class="chat-tools">
-        <span class="token-count" id="token-count" hidden></span>
-        <button class="link-btn" id="reset-btn" type="button">Start a new conversation</button>
-      </div>
     </section>
 
-    <section class="pane session-pane" id="pane-session" aria-label="Your set">
-      <div class="session-head">
-        <div class="tabs" role="tablist">
-          <button role="tab" class="tab" data-tab="mixer" aria-selected="true">Mixer</button>
-          <button role="tab" class="tab" data-tab="songs" aria-selected="false">Songs</button>
-          <button role="tab" class="tab" data-tab="room" aria-selected="false">Room</button>
+    <section class="pane session-pane" id="pane-session" aria-label="Your set" data-tab="mixer">
+      <div class="tabrow">
+        <div class="tabs" role="tablist" aria-label="Your set">
+          <button role="tab" class="tab" data-tab="mixer" aria-selected="true" aria-controls="panel-mixer"><span class="tab-label">Mixer</span><i class="count" id="count-mixer"></i></button>
+          <button role="tab" class="tab" data-tab="songs" aria-selected="false" tabindex="-1" aria-controls="panel-songs"><span class="tab-label">Songs</span><i class="count" id="count-songs"></i></button>
+          <button role="tab" class="tab" data-tab="room" aria-selected="false" tabindex="-1" aria-controls="panel-room"><span class="tab-label">Room</span><i class="count" id="count-room"></i></button>
         </div>
       </div>
+
       <div class="offline" id="offline" hidden>
-        <h2>Live isn’t connected</h2>
+        <h2>Ableton isn’t connected</h2>
         <p id="offline-reason"></p>
         <ol>
-          <li>Open Ableton Live on this computer.</li>
-          <li>In Live’s Settings, open <b>Link, Tempo &amp; MIDI</b>.</li>
-          <li>Pick <b>RigLink</b> as a Control Surface.</li>
+          <li><span>Open Ableton Live on this computer.</span></li>
+          <li><span>In Ableton, open Settings, then <b>Link, Tempo &amp; MIDI</b>.</span></li>
+          <li><span>Under Control Surface, pick <b>RigLink</b>.</span></li>
         </ol>
-        <p class="muted">You can still chat and plan. New tracks can be downloaded as a session file.</p>
+        <p class="offline-note">You can still chat and plan. New tracks can be saved as an Ableton file.</p>
       </div>
-      <div class="tab-panel" id="panel-mixer">
-        <div class="mixer-tools">
-          <div class="song-mix-bar">
-            <label class="song-mix-pick">
-              <span>Song mix</span>
-              <select id="mix-song" aria-label="Show one song's mix">
-                <option value="">Every track</option>
-              </select>
-            </label>
-            <span class="mix-saved" id="mix-saved" hidden></span>
-            <button class="btn ghost mix-checkpoints" id="mix-checkpoints" type="button" hidden>Checkpoints</button>
-          </div>
-          <button class="link-btn" id="match-colors" type="button" title="Live can't show folders, so each folder gets its own colour there">Colour tracks in Live to match these folders</button>
+
+      <div class="tab-panel" id="panel-mixer" role="tabpanel" aria-label="Mixer">
+        <div class="song-mix-bar">
+          <label class="song-mix-pick">
+            <span>Song mix</span>
+            <select id="mix-song" aria-label="Show one song's mix">
+              <option value="">Every track</option>
+            </select>
+          </label>
+          <span class="mix-saved" id="mix-saved" hidden></span>
+          <button class="text-btn" id="mix-checkpoints" type="button" hidden>Checkpoints</button>
         </div>
-        <div class="groups" id="groups"></div>
-        <p class="empty" id="mixer-empty" hidden>No tracks yet. Ask in the chat, e.g. “set up a lead vocal on input 1”.</p>
+        <p class="empty" id="mixer-empty" hidden>No tracks yet. Tell me what is plugged in, for example “lead vocal on input 1”.</p>
+        <div class="bank" id="groups"></div>
+        <section class="drawer" id="drawer" aria-label="Selected channel"></section>
       </div>
-      <div class="tab-panel" id="panel-songs" hidden>
+
+      <div class="tab-panel" id="panel-songs" role="tabpanel" aria-label="Songs" hidden>
         <ol class="songs" id="songs"></ol>
+        <p class="empty" id="songs-empty" hidden>No songs yet. Add one below or ask in the chat.</p>
         <form class="add-song" id="add-song">
           <input id="song-name" placeholder="Song title" aria-label="Song title" required>
           <input id="song-bpm" type="number" inputmode="decimal" min="20" max="999" placeholder="BPM" aria-label="Tempo">
-          <button class="btn" type="submit">Add song</button>
+          <button class="key" type="submit">Add song</button>
         </form>
       </div>
-      <div class="tab-panel" id="panel-room" hidden>
+
+      <div class="tab-panel" id="panel-room" role="tabpanel" aria-label="Room" hidden>
         <div class="room-intro">
           <h2>Your room</h2>
-          <p class="muted">What Holy Sound remembers about your church from week to week — your gear, who’s on which input, where the in-ears go. Say it once in the chat and it’s saved here. Delete anything that’s wrong.</p>
+          <p>What you have told Holy Sound about your church. It reads this before it suggests changes. Forget anything that is out of date.</p>
         </div>
         <ul class="facts" id="facts"></ul>
-        <p class="empty" id="facts-empty" hidden>Nothing yet. Tell the chat about your setup, e.g. “We have a Scarlett 18i20. Sarah sings lead on input 1.”</p>
+        <p class="empty" id="facts-empty" hidden>Nothing yet. Say it in the chat and it is saved here, for example “We have a Scarlett 18i20. Sarah sings lead on input 1.”</p>
         <form class="add-fact" id="add-fact">
-          <input id="fact-text" maxlength="200" placeholder="Add something to remember…" aria-label="Something to remember" required>
-          <button class="btn" type="submit">Save</button>
+          <input id="fact-text" maxlength="200" placeholder="Add something to remember" aria-label="Something to remember" required>
+          <button class="key" type="submit">Save</button>
         </form>
       </div>
     </section>
   </main>
 
   <nav class="bottom-nav" aria-label="Views">
-    <button data-view="chat" aria-current="page">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/></svg>Chat
-    </button>
-    <button data-view="mixer">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v16M12 4v16M18 4v16"/><rect x="4" y="13" width="4" height="3" rx="1"/><rect x="10" y="7" width="4" height="3" rx="1"/><rect x="16" y="11" width="4" height="3" rx="1"/></svg>Mixer
-    </button>
-    <button data-view="songs">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Songs
-    </button>
-    <button data-view="room">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/></svg>Room
-    </button>
+    <button type="button" data-view="chat" aria-current="page"><span class="nav-label">Chat</span><i class="nav-mark" id="nav-chat-mark" hidden>1</i></button>
+    <button type="button" data-view="mixer"><span class="nav-label">Mixer</span><i class="count" id="nav-count-mixer"></i><span class="chase" id="nav-chase" hidden aria-hidden="true"><i></i><i></i><i></i><i></i></span></button>
+    <button type="button" data-view="songs"><span class="nav-label">Songs</span><i class="count" id="nav-count-songs"></i></button>
+    <button type="button" data-view="room"><span class="nav-label">Room</span><i class="count" id="nav-count-room"></i></button>
   </nav>
 
-  <dialog id="device-dialog">
+  <dialog id="device-dialog" aria-labelledby="device-title">
     <form method="dialog" class="sheet">
-      <h2>Add an effect to <span id="device-track"></span></h2>
+      <h2 id="device-title">Add an effect to <span id="device-track"></span></h2>
       <label>Effect
         <select id="device-select"></select>
       </label>
+      <p class="device-help" id="device-help"></p>
       <label>Preset
         <select id="preset-select"><option value="">Default settings</option></select>
       </label>
       <div class="sheet-actions">
-        <button class="btn ghost" value="cancel">Cancel</button>
-        <button class="btn primary" value="add" id="device-add">Add</button>
+        <button class="text-btn" value="cancel">Cancel</button>
+        <button class="key lit" value="add" id="device-add">Add</button>
       </div>
     </form>
   </dialog>
 
-  <dialog id="color-dialog">
+  <dialog id="color-dialog" aria-labelledby="color-title">
     <form method="dialog" class="sheet">
-      <h2>Colour for <span id="color-track"></span></h2>
+      <h2 id="color-title">Colour for <span id="color-track"></span></h2>
       <div class="swatches" id="swatches"></div>
+      <p class="swatch-name" id="swatch-name" aria-live="polite">&nbsp;</p>
       <div class="sheet-actions">
-        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="text-btn" value="cancel">Cancel</button>
       </div>
     </form>
   </dialog>
 
-  <dialog id="checkpoint-dialog">
+  <dialog id="checkpoint-dialog" aria-labelledby="checkpoint-title">
     <form method="dialog" class="sheet checkpoint-sheet">
-      <h2>Checkpoints for <span id="checkpoint-song"></span></h2>
-      <p class="muted">Changes save to this song as you make them. A checkpoint keeps this exact mix so you can come back to it.</p>
+      <h2 id="checkpoint-title">Checkpoints for <span id="checkpoint-song"></span></h2>
+      <p class="sheet-copy">Changes save to this song as you make them. A checkpoint keeps this exact mix so you can come back to it.</p>
       <div class="checkpoint-new">
         <input id="checkpoint-label" maxlength="60" placeholder="Name it (optional), e.g. After soundcheck" aria-label="Checkpoint name">
-        <button class="btn primary" id="checkpoint-save" type="button">Save checkpoint</button>
+        <button class="key lit" id="checkpoint-save" type="button">Save checkpoint</button>
       </div>
       <ol class="checkpoint-list" id="checkpoint-list"></ol>
-      <p class="empty" id="checkpoint-empty">No checkpoints yet.</p>
+      <p class="sheet-copy" id="checkpoint-empty">No checkpoints yet.</p>
       <div class="sheet-actions">
-        <button class="btn ghost" value="close">Done</button>
+        <button class="text-btn" value="close">Done</button>
       </div>
     </form>
   </dialog>
 
-  <dialog id="import-dialog">
+  <dialog id="import-dialog" aria-labelledby="import-title">
     <form method="dialog" class="sheet import-sheet">
-      <h2>Import audio with AI</h2>
-      <p class="muted">Pick the folder with your stems or tracks. I’ll listen to every file, then suggest tracks, songs and levels for you to check before anything changes.</p>
+      <h2 id="import-title">Import song files from a folder</h2>
+      <p class="sheet-copy">Pick the folder with your song files (the separate vocal, drum and band tracks). Holy Sound listens to every file, then drafts tracks, songs and levels. Nothing changes until you press Apply.</p>
       <div class="roots" id="import-roots"></div>
       <div class="crumb">
-        <button type="button" class="icon-btn small" id="folder-up" aria-label="Up one folder">↑</button>
+        <button type="button" class="text-btn" id="folder-up">Up one folder</button>
         <span id="folder-path"></span>
       </div>
       <ul class="folder-list" id="folder-list"></ul>
       <p class="folder-files" id="folder-files"></p>
-      <label>Anything I should know? <span class="muted">(optional)</span>
-        <textarea id="import-note" rows="2" placeholder="e.g. “Sunday’s stems. Click and guide go to the in-ears on 3/4.”"></textarea>
+      <label>Anything I should know? (optional)
+        <textarea id="import-note" rows="2" placeholder="For example: this Sunday’s songs. Click and guide go to the in-ears on 3/4."></textarea>
       </label>
       <div class="sheet-actions">
-        <button class="btn ghost" value="cancel">Cancel</button>
-        <button class="btn primary" type="button" id="import-go">Import with AI</button>
+        <button class="text-btn" value="cancel">Cancel</button>
+        <button class="key lit" type="button" id="import-go">Import song files</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="sheet">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <p class="sheet-copy" id="confirm-copy"></p>
+      <div class="sheet-actions">
+        <button class="text-btn" value="cancel" id="confirm-cancel">Keep going</button>
+        <button class="key lit" value="ok" id="confirm-ok">Yes</button>
       </div>
     </form>
   </dialog>
 
   <div class="toasts" id="toasts" aria-live="assertive"></div>
+  <div class="sr-only" id="sr-status" role="status" aria-live="polite"></div>
 
   <template id="strip-template">
-    <article class="strip">
-      <header class="strip-head">
-        <button class="strip-num" type="button" title="Track colour"></button>
-        <span class="strip-grip" draggable="true" title="Drag to another folder" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
-        </span>
-      </header>
-      <input class="strip-name" aria-label="Track name">
-      <span class="strip-route"></span>
+    <article class="strip" role="group">
+      <div class="pan" title="Balance"><i class="pan-centre"></i><i class="pan-dot"></i><input type="range" min="-1" max="1" step="0.02" aria-label="Balance, left to right"></div>
       <div class="strip-toggles">
-        <button class="toggle mute" aria-pressed="false" title="Mute">M</button>
-        <button class="toggle solo" aria-pressed="false" title="Solo">S</button>
+        <button class="mute" type="button" aria-pressed="false">Mute</button>
+        <button class="solo" type="button" aria-pressed="false">Solo</button>
       </div>
-      <div class="song-mix" hidden>
-        <button class="toggle clip-on" type="button" aria-pressed="true">On</button>
-        <div class="control song-level">
-          <input type="range" min="-24" max="12" step="0.5">
-          <output></output>
-        </div>
+      <div class="fader-zone">
+        <i class="scale"></i>
+        <i class="slot"></i>
+        <i class="ghost"></i>
+        <i class="cap"></i>
+        <i class="cap-hit" aria-hidden="true"></i>
+        <div class="meter" aria-hidden="true"><i></i></div>
+        <input class="fader" type="range" min="0" max="1000" step="1" aria-label="Volume" orient="vertical">
       </div>
-      <div class="control pan">
-        <input type="range" min="-1" max="1" step="0.02" aria-label="Pan">
-        <output></output>
-      </div>
-      <div class="fader">
-        <div class="meter" aria-hidden="true"><span></span></div>
-        <div class="control volume">
-          <input type="range" min="-70" max="6" step="0.5" orient="vertical" aria-label="Level">
-          <output></output>
-        </div>
-      </div>
-      <details class="more">
-        <summary>More</summary>
-        <div class="devices"></div>
-        <div class="clips"></div>
-        <div class="sends"></div>
-        <div class="clip-gains"></div>
-        <label class="folder-line">
-          <span>Folder</span>
-          <select class="folder-select" aria-label="Folder"></select>
-        </label>
-        <label class="key-line">
-          <input type="checkbox" class="follows-key">
-          <span>Changes with the song key</span>
-        </label>
-        <div class="route-line"></div>
-      </details>
+      <span class="strip-note"></span>
+      <button class="plate" type="button" draggable="true" aria-pressed="false">
+        <span class="strip-name"></span>
+      </button>
+      <svg class="run" aria-hidden="true"><rect/><rect/><rect/></svg>
     </article>
   </template>
 
