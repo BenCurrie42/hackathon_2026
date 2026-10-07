@@ -21,7 +21,7 @@ The stylesheet's header comment sets the rules, and new UI should follow them:
 - **Tape** is identity: the coloured name plate (scribble strip) at the foot of each channel, in the track's own colour.
 - **A lamp** is status: green is fine, amber is careful, red is hot or failed, blue is solo.
 - **Dark only.** It is used at a sound desk in a dim room. There is no light theme. Depth comes from tone, never shadow.
-- **Only one thing moves on its own:** the light that runs round a channel while the assistant edits it.
+- **Motion means someone else changed it.** A value Live or the assistant set glides there, new things slide in, things that change place travel. What the volunteer is holding follows their hand with no delay. The light that runs round a channel still marks the assistant editing it.
 
 Wording follows the same idea: "Ableton", not "Live", in anything the volunteer reads; levels as percentages ("68%", "Off"); balance as "Centre" or "25% left".
 
@@ -205,6 +205,8 @@ On a touch screen (`pointer: coarse`) the native input is switched off so the st
 Fader, balance, sends and clip levels all throttle `liveCmd` to about one call per 150 ms with a trailing call, send a final value on `change`, and stay in `holding` for 1.2 s after release so a poll can't pull them back.
 
 **Meters.** There is no separate meter request. `row.meter.peak` (0 to 1) arrives in each snapshot; `paintMeter` sets `--lit` and hides the meter when the reading is null. The header's **Main** meter uses the same function. Polling speeds up to 600 ms while a song plays.
+
+**Motion.** The "motion" block near the top of `app.js` has four tools, all no-ops under reduced motion: `tween(owner, key, from, to, apply)` (eased number over 420 ms, one per owner and key, restarted from wherever it is), `glideInput(input, to, onFrame)` (a range input set from a poll), `enter(node)` / `leave(node)` (slide in, fade out) and `flip(container, selector, key, change)` (keyed FLIP: rebuilt rows still travel from their old place). Used for: the fader cap (CSS `transition: bottom`, off while `.is-down`), pan, balance, sends, song and clip levels, tempo, the EQ curve and dots (frequency on a log scale), new or removed strips and their neighbours, folder folding, songs reordered or added, room facts, effects added, the drawer and tab panels, chat entries (each once, by entry id, never on first load), the docked slip and its steps, step lamps (pulse while working, land when they change), toasts and dialogs. Slider drags and EQ drags stop any glide on that control (`stopTween`).
 
 **Assistant activity.** `state.activity` is a list of `{track, ms}`. `noteActivity` stores an expiry per lower-cased track name; `paintActivity` starts a light that runs round the matching strip's edge (an SVG with three dashes), for at least one whole lap. While it runs the strip holds its old level, then the cap glides to the new one and a ghost tick shows where it was. Screen readers hear "Editing Lead Vocal" and "Changed Lead Vocal". With reduced motion the light becomes a still outline.
 

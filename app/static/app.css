@@ -4,7 +4,9 @@
      tape    = identity (the flat bar on each channel's name plate)
      a lamp  = status (green is fine, amber is careful, red is hot or failed, blue is solo)
    Dark only: it is used at a sound desk in a dim room. Depth comes from tone, never shadow.
-   Only the light that runs round a channel moves on its own. */
+   Motion means "someone else changed this": what Live or the assistant moves glides there,
+   new things slide in, moved things travel (app.js "motion"). What the volunteer is holding
+   follows their hand at once. With reduced motion asked for, nothing moves. */
 
 /* -- fonts: vendored in /fonts so the app works offline on church wifi ------------- */
 
@@ -20,6 +22,7 @@
   color-scheme: dark;
 
   /* ground: the neutral greys of a console app */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* motion: quick to start, soft to land */
   --enamel: #1c1c1c;   /* page, header, chat pane */
   --recess: #111111;   /* slots, inputs, seams */
   --face: #262626;     /* strips, drawer, dialogs */
@@ -133,6 +136,7 @@ ol, ul { padding: 0; list-style: none; }
   min-height: 44px;
   padding: 0 16px;
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background-color 0.18s ease-out, color 0.18s ease-out, border-color 0.18s ease-out, transform 0.08s ease-out;
 }
 .key:hover, .mute:hover, .solo:hover { background: #3d3d3d; }
 .key:active, .solo:active { transform: translateY(1px); border-bottom-width: 1px; }
@@ -169,7 +173,7 @@ select { background-color: var(--key); }
 input::placeholder, textarea::placeholder { color: var(--legend); opacity: 1; }
 input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 
-.lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--legend); flex: none; }
+.lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--legend); flex: none; transition: background-color 0.25s ease-out; }
 
 /* -- header ------------------------------------------------------------------------ */
 
@@ -344,6 +348,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 .step-state.done { font-weight: 700; }
 .step-state.check { color: var(--amber); }
 .step-state.failed { color: var(--red-text); }
+.step-state.working .lamp { animation: lamp-pulse 1s ease-in-out infinite; }
+@keyframes lamp-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
+.step-state.just-changed .lamp { animation: lamp-land 0.5s var(--ease); }
+@keyframes lamp-land { from { transform: scale(2.2); opacity: 0.4; } }
 .step-reason { grid-column: 2 / 4; font-size: 14px; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
 .step.is-working .step-num { color: var(--text); }
 .slip.collapsed .steps { margin-top: 6px; }
@@ -451,10 +459,12 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
   position: relative; flex: none; width: var(--strip-w); cursor: pointer;
   background: var(--face); padding: 6px 5px 5px;
   display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  transition: background-color 0.2s ease-out;
 }
 .strip:focus-visible { outline-offset: -3px; }
 .strip.is-selected { background: #2f2f2f; }
-.strip.is-selected::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--lit-bg); }
+.strip.is-selected::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--lit-bg); animation: lamp-on 0.28s var(--ease) both; }
+@keyframes lamp-on { from { transform: scaleX(0.2); opacity: 0; } }
 
 /* pan: a thin bar with a centre mark and a dot that shows where the sound sits */
 .pan { position: relative; height: 18px; --p: 0.5; }
@@ -469,6 +479,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
   height: var(--mute-h); min-height: 0; padding: 0; width: 100%; font: 700 12.5px/1 var(--body); letter-spacing: 0.04em; text-transform: uppercase;
 }
 .solo[aria-pressed="true"] { background: var(--solo); color: var(--solo-ink); border-color: var(--solo); border-bottom-color: #a68c20; }
+.fader-zone, .pan, .plate { transition: opacity 0.25s ease-out; }
+.plate { transition: opacity 0.25s ease-out, background-color 0.4s ease-out; }
 .strip.is-muted .fader-zone, .strip.is-muted .pan { opacity: 0.45; }
 
 /* the scribble strip: the channel's name in its own colour, at the foot */
@@ -512,7 +524,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
   border-radius: 3px; background: linear-gradient(to bottom, #6b6b6b, #4a4a4a 45%, #3a3a3a 55%, #555555); border: 1px solid #222;
 }
 .cap::after { content: ""; position: absolute; left: 3px; right: 3px; top: calc(50% - 1px); height: 2px; background: #f2f2f2; }
-.strip.glide .cap { transition: bottom 0.42s cubic-bezier(0.25, 0.8, 0.25, 1); }
+/* a level set by Live or the assistant glides there; one the volunteer drags follows the hand */
+.cap { transition: bottom 0.42s var(--ease); }
 .strip.is-down .cap { transition: none; }
 .cap-hit { position: absolute; display: none; left: calc(50% - 26px); width: 44px; height: 48px; bottom: calc((var(--throw) - var(--cap-h)) * var(--p) - 13px); z-index: 3; touch-action: none; }
 .ghost { position: absolute; left: calc(50% - var(--cap-w) / 2 - 2px); width: var(--cap-w); height: 0; border-top: 1px dashed var(--text-2); display: none; z-index: 1; }
@@ -650,6 +663,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
   min-height: 68px; border-bottom: 1px solid var(--hair);
 }
 .song-num { font: 700 34px/1 var(--display); color: var(--legend); text-align: right; }
+.song-num { transition: color 0.3s ease-out; }
 .song.playing .song-num { color: var(--green); }
 .song-title { display: flex; align-items: flex-end; min-width: 0; gap: 8px; }
 .song-name {
@@ -694,6 +708,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 
 dialog { border: 0; padding: 0; background: none; color: var(--text); max-width: min(440px, calc(100vw - 24px)); width: 100%; }
 dialog::backdrop { background: rgba(8, 7, 6, 0.72); }
+dialog[open] { animation: sheet-in 0.26s var(--ease); }
+dialog[open]::backdrop { animation: fade-in 0.26s ease-out; }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(10px) scale(0.98); } }
+@keyframes fade-in { from { opacity: 0; } }
 .sheet { background: var(--face); border: 1px solid var(--hair); border-radius: var(--r2); padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .sheet h2 { font: 700 24px/1.1 var(--display); }
 .sheet-copy { font-size: 15px; color: var(--text-2); }
