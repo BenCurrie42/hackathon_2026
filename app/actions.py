@@ -730,12 +730,15 @@ class Executor:
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
 
 
-def run_all(live, actions, files=None, on_touch=None, folders=None):
+def run_all(live, actions, files=None, on_touch=None, folders=None, on_step=None):
     """Run actions in order. One failure doesn't stop the rest.
 
     on_touch(name) is called for each track an action works on. folders is the
-    mixer's FolderMemory, for move_to_folder and renames.
+    mixer's FolderMemory, for move_to_folder and renames. on_step(n, state) is
+    called as step n starts ("working") and ends ("done", "check" if it only
+    partly worked, "failed"); steps skipped because Live went away are "failed".
     """
+    step = on_step or (lambda n, state: None)
     ex = Executor(live, files, on_touch, folders)
     # New audio tracks in a batch that imports a song start low enough that all of
     # its stems together don't clip, unless the assistant chose a volume itself.
@@ -747,21 +750,26 @@ def run_all(live, actions, files=None, on_touch=None, folders=None):
         ex.new_track_fader_db = starting_fader_db(max(per_song.values()))
     results = []
     for n, action in enumerate(actions):
+        step(n, "working")
         try:
             ex.detail = None
             text = action.run(ex)
             results.append({"ok": True, "partial": " But " in text, "text": text})
             if ex.detail:
                 results[-1]["detail"] = ex.detail
+            step(n, "check" if results[-1]["partial"] else "done")
         except ActionFailed as e:
             results.append({"ok": False, "text": f"{action.describe()}: {e}"})
             ex.tracks_changed()
+            step(n, "failed")
         except LiveUnavailable as e:
             results.append({"ok": False, "text": f"{action.describe()}: {e}"})
             results.extend(
                 {"ok": False, "text": f"{a.describe()}: not done — lost touch with Live."}
                 for a in actions[n + 1:]
             )
+            for lost in range(n, len(actions)):
+                step(lost, "failed")
             break
     return results
 

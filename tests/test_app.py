@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from rig import TRACK_COLORS
 from app.live import LiveLink, LiveUnavailable
 from app.room import RoomMemory
+from app import server as app_server
 from app.server import App, make_handler
 import rig
 from live_control.starting_fader import starting_fader_db
@@ -136,6 +137,15 @@ class ActionsTest(FakeLiveCase):
         click = self.live.snapshot(max_age=0)["tracks"][0]
         self.assertEqual(click["input"]["type"], "No Input")
         self.assertEqual(click["output"], {"type": "Ext. Out", "channel": "3/4"})
+
+    def test_steps_report_working_then_how_they_ended(self):
+        seen = []
+        actions = Proposal.model_validate({"actions": [
+            {"action": "add_track", "name": "Click", "input": None},
+            {"action": "set_volume", "track": "Nobody", "db": -3},
+        ]}).actions
+        run_all(self.live, actions, on_step=lambda n, state: seen.append((n, state)))
+        self.assertEqual(seen, [(0, "working"), (0, "done"), (1, "working"), (1, "failed")])
 
     def test_unknown_preset_falls_back_to_default_settings(self):
         results = self.run_actions(
@@ -533,6 +543,23 @@ class ServerTest(FakeLiveCase):
         status, body = self.request("POST", f"/api/proposals/{proposal['id']}/apply", {})
         self.assertEqual(status, 400)
         self.assertIn("already", body["error"])
+
+    def test_apply_reports_each_step_while_it_runs(self):
+        status, state = self.request("POST", "/api/chat", {"message": "Add a click"})
+        pid = state["chat"][-1]["proposal"]["id"]
+        self.assertIsNone(state["applying"])
+        seen = {}
+        real = app_server.run_all
+
+        def spy(live, actions, files=None, on_touch=None, folders=None, on_step=None):
+            on_step(0, "working")
+            seen["during"] = self.app.applying()
+            return real(live, actions, files, on_touch, folders, on_step)
+
+        with mock.patch.object(app_server, "run_all", spy):
+            status, state = self.request("POST", f"/api/proposals/{pid}/apply", {})
+        self.assertEqual(seen["during"], {"id": pid, "states": ["working"]})
+        self.assertIsNone(state["applying"])  # and nothing is left over afterwards
 
     def test_tracks_the_assistant_changes_are_lit_for_a_few_seconds(self):
         now = [100.0]

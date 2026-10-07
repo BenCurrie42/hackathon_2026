@@ -64,6 +64,7 @@ class App:
         self.demo = demo  # True when the "Live" behind this is the built-in pretend one
         self.clock = time.monotonic
         self._touched = {}  # track name (case-folded) -> (lit until, name)
+        self.progress = None  # while Apply runs: {"id": proposal id, "states": [one per step]}
         self.live = live
         self.chat = conversation
         self.key = key  # None: only this computer can connect
@@ -81,6 +82,11 @@ class App:
     def touch(self, name):
         """The assistant just changed this track."""
         self._touched[name.casefold()] = (self.clock() + AI_GLOW_SECONDS, name)
+
+    def applying(self):
+        """The change being applied right now, with each step's state, or None."""
+        progress = self.progress
+        return {"id": progress["id"], "states": list(progress["states"])} if progress else None
 
     def activity(self):
         """Tracks the assistant is changing (or just changed), with how long they stay lit."""
@@ -151,6 +157,7 @@ class App:
             "room": self.room.facts() if self.room else [],
             "activity": self.activity(),
             "demo": self.demo,
+            "applying": self.applying(),
         }
 
     # -- actions --------------------------------------------------------
@@ -225,8 +232,17 @@ class App:
     def apply(self, pid):
         with self._apply_lock:
             p = self._pending(pid)
-            results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
-                              folders=self.folders)
+            states = ["waiting"] * len(p["actions"])
+            self.progress = {"id": pid, "states": states}
+
+            def on_step(n, state):
+                states[n] = state
+
+            try:
+                results = run_all(self.live, p["actions"], self.files, on_touch=self.touch,
+                                  folders=self.folders, on_step=on_step)
+            finally:
+                self.progress = None
             self.chat.record_outcome(pid, "applied", results)
         # A listen step's numbers are only useful once the assistant has read them.
         if any(isinstance(a, Listen) for a in p["actions"]):
@@ -493,9 +509,12 @@ def make_handler(app):
                 return self._text(HTTPStatus.NOT_FOUND, "Not found.")
             body = target.read_bytes()
             kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            font = target.suffix == ".woff2"
+            if font:
+                kind = "font/woff2"  # the OS's idea of this type varies; fonts are vendored in static/fonts
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", kind + ("; charset=utf-8" if kind.startswith("text/") or kind.endswith("javascript") else ""))
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "public, max-age=86400" if font else "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

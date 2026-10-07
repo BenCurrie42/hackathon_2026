@@ -2,9 +2,12 @@
 "use strict";
 
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const POLL_MS = 1500;
 const POLL_PLAYING_MS = 600;   // meters move while a song plays
+const POLL_APPLYING_MS = 250;  // step states move while changes are being applied
 const POLL_HIDDEN_MS = 5000;
+const MINUS = "−";
 
 let state = null;
 let sending = null;           // text of the message in flight, shown optimistically
@@ -12,9 +15,63 @@ let sendingFrom = 0;          // how many chat entries there were when it was se
 let chatSig = "";
 let songsSig = "";
 let stockDevices = null;
+let applyingId = null;        // the proposal whose Apply was just pressed
 const strips = new Map();     // "t0" / "r1" -> strip element
-const openThoughts = new Set(); // ids of chat entries whose "Thinking" is expanded
+const openThoughts = new Set(); // ids of chat entries whose thinking is expanded
 const holding = new WeakSet(); // controls the user is touching: polling won't move them
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+// -- small helpers ----------------------------------------------------------
+
+function el(tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function button(label, className, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = className;
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* The decimal point in a monospace face takes a whole cell, so wrap it and tighten it. */
+function numHtml(text) {
+  return escapeHtml(text).replace(".", '<i class="pt">.</i>');
+}
+
+/* Hyphen-minus is for hyphens. Numbers get a true minus. */
+function trueMinus(text) {
+  return text.replace(/(^|[\s(“])-(?=\d)/g, `$1${MINUS}`);
+}
+
+const ARROW_SVG = '<svg viewBox="0 0 14 9" aria-hidden="true"><path d="M0 4.5h12M8.5 1l3.5 3.5L8.5 8"/></svg>';
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function nextSundayLabel() {
+  const d = new Date();
+  const ahead = (7 - d.getDay()) % 7;
+  if (ahead === 0) return "Today";
+  d.setDate(d.getDate() + ahead);
+  return `Sunday ${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
+
+function shortDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  if (!m) return iso || "";
+  const month = MONTHS[parseInt(m[2], 10) - 1];
+  const day = parseInt(m[3], 10);
+  return parseInt(m[1], 10) === new Date().getFullYear() ? `${day} ${month}` : `${day} ${month} ${m[1]}`;
+}
 
 // -- API --------------------------------------------------------------------
 
@@ -61,7 +118,10 @@ async function poll() {
     setStatus("bad", e.message);
   }
   const playing = state?.live.snapshot?.song.is_playing;
-  pollTimer = setTimeout(poll, document.hidden ? POLL_HIDDEN_MS : playing ? POLL_PLAYING_MS : POLL_MS);
+  const wait = document.hidden ? POLL_HIDDEN_MS
+    : applyingId !== null || state?.applying ? POLL_APPLYING_MS
+    : playing ? POLL_PLAYING_MS : POLL_MS;
+  pollTimer = setTimeout(poll, wait);
 }
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
@@ -78,10 +138,10 @@ function render(next) {
 // -- header ------------------------------------------------------------------
 
 function setStatus(kind, text, detail = "") {
-  const el = $("#live-status");
-  el.className = "status " + kind;
-  $(".status-text", el).textContent = text;
-  $(".status-detail", el).textContent = detail;
+  const node = $("#live-status");
+  node.className = "status " + kind;
+  $(".status-text", node).textContent = text;
+  $(".status-detail", node).textContent = detail;
 }
 
 function renderLive() {
@@ -89,11 +149,12 @@ function renderLive() {
   const snap = live.snapshot;
   if (live.connected) {
     const n = snap.tracks.length;
+    const detail = `${n} track${n === 1 ? "" : "s"}`;
     // The pretend Live looks exactly like the real one, so say which this is.
-    if (state.demo) setStatus("demo", "Demo set, not Ableton", `· ${n} track${n === 1 ? "" : "s"}`);
-    else setStatus("ok", "Ableton connected", `· ${n} track${n === 1 ? "" : "s"}`);
+    if (state.demo) setStatus("demo", "Demo set, not Ableton", detail);
+    else setStatus("ok", "Ableton connected", detail);
   } else {
-    setStatus("bad", "Live not connected");
+    setStatus("bad", "Ableton isn’t connected");
   }
 
   $("#transport").hidden = !live.connected;
@@ -103,20 +164,32 @@ function renderLive() {
     play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
     const tempo = $("#tempo-input");
     if (document.activeElement !== tempo) tempo.value = Math.round(snap.song.tempo * 100) / 100;
-    paintMeter($("#master-meter"), snap.master?.meter);
+    paintMeter($("#master-meter"), snap.master?.meter, 22);
+    paintMeter($("#master-meter-phone"), snap.master?.meter, 22);
+    setCount("mixer", snap.tracks.length);
+    setCount("songs", snap.scenes.length);
   }
+  setCount("room", (state.room || []).length);
 
   renderRoom();
-  $("#offline").hidden = live.connected || currentTab === "room";
+  $("#offline").hidden = live.connected || currentTab === "room" || !!state.demo;
   // The standard "can't reach Live" message just repeats the steps below it.
   const reason = live.message || "";
   $("#offline-reason").textContent = reason.includes("Control Surface") ? "" : reason;
   $("#panel-mixer").hidden = !live.connected || currentTab !== "mixer";
   $("#panel-songs").hidden = !live.connected || currentTab !== "songs";
   $("#panel-room").hidden = currentTab !== "room";
+  $("#pane-session").dataset.tab = currentTab;
   if (snap) {
     renderMixer(snap);
     renderSongs(snap);
+  }
+}
+
+function setCount(which, n) {
+  for (const id of [`count-${which}`, `nav-count-${which}`]) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = String(n);
   }
 }
 
@@ -130,7 +203,7 @@ $("#tempo-input").addEventListener("change", (e) => {
   if (bpm >= 20 && bpm <= 999) liveCmd("set_tempo", { bpm }).catch(() => {});
 });
 
-// -- chat --------------------------------------------------------------------
+// -- chat: a log, not a messenger ----------------------------------------------
 
 function renderAi() {
   const banner = $("#ai-banner");
@@ -139,11 +212,10 @@ function renderAi() {
 }
 
 function renderUsage(usage) {
-  const el = $("#token-count");
   const total = usage ? usage.input + usage.output : 0;
-  el.hidden = total === 0;
-  el.textContent = `${tokens(total)} tokens used`;
-  el.title = total ? `${tokens(usage.input)} sent · ${tokens(usage.output)} written, this conversation` : "";
+  $("#reset-btn").title = total
+    ? `${tokens(total)} tokens used in this conversation (${tokens(usage.input)} sent, ${tokens(usage.output)} written)`
+    : "";
 }
 
 function tokens(n) {
@@ -166,9 +238,57 @@ function startSending(text) {
   sendingFrom = state ? state.chat.length : 0;
 }
 
+function turn(role, text) {
+  const node = el("div", "turn " + role);
+  node.append(el("p", "speaker", role === "user" ? "You" : "Holy Sound"));
+  const body = el("div", "turn-text");
+  if (role === "assistant") body.innerHTML = markdownLite(text);
+  else body.textContent = text;
+  node.append(body);
+  return node;
+}
+
+function eventLine(role, text) {
+  const node = el("div", "event");
+  node.append(el("span", "event-label", role === "note" ? "Saved" : "Heard"), el("span", "event-text", text));
+  if (role === "note") {
+    node.classList.add("clickable");
+    node.setAttribute("role", "button");
+    node.tabIndex = 0;
+    node.title = "See everything Holy Sound remembers";
+    node.addEventListener("click", () => setView("room"));
+    node.addEventListener("keydown", (e) => { if (e.key === "Enter") setView("room"); });
+  }
+  return node;
+}
+
+function working(label) {
+  const node = el("div", "working");
+  const chase = el("span", "chase");
+  chase.setAttribute("aria-hidden", "true");
+  chase.append(el("i"), el("i"), el("i"), el("i"));
+  node.append(chase, el("span", "", label));
+  return node;
+}
+
+/* A proposal that still needs a decision (or is being applied) is docked above the
+   composer; everything else sits in the log in a collapsed form. */
+function dockedProposal() {
+  let found = null;
+  for (const entry of state.chat) {
+    const p = entry.proposal;
+    if (p && (p.status === "pending" || p.id === applyingId)) found = p;
+  }
+  return found;
+}
+
 function renderChat() {
   const pendingText = pendingMessage();
-  const sig = JSON.stringify([state.chat, state.busy, sending, pendingText, state.live.connected, reply !== null]);
+  const docked = dockedProposal();
+  const sig = JSON.stringify([
+    state.chat, state.busy, sending, pendingText, state.live.connected, reply !== null,
+    applyingId, state.applying, !!state.demo, $("#layout").dataset.view,
+  ]);
   if (sig === chatSig) return;
   chatSig = sig;
 
@@ -177,54 +297,75 @@ function renderChat() {
   const welcome = $("#welcome");
   box.replaceChildren(welcome);
   welcome.hidden = state.chat.length > 0 || sending !== null;
+  if (!welcome.hidden) paintWelcome();
 
   for (const entry of state.chat) {
-    if (entry.text || entry.thinking) {
-      const el = bubble(entry.role, entry.text || "");
-      if (entry.thinking) el.prepend(thoughts(entry.thinking, entry.id));
-      box.append(el);
+    if (entry.role === "note" || entry.role === "heard") {
+      box.append(eventLine(entry.role, entry.text || ""));
+      continue;
     }
-    if (entry.proposal) box.append(proposalCard(entry.proposal));
+    if (entry.text || entry.thinking) {
+      const node = turn(entry.role, entry.text || "");
+      if (entry.thinking) node.insertBefore(thoughts(entry.thinking, entry.id), $(".turn-text", node));
+      box.append(node);
+    }
+    if (entry.proposal && entry.proposal !== docked && entry.proposal.id !== docked?.id) {
+      box.append(slipEl(entry.proposal, false));
+    }
   }
   if (pendingText !== null) {
-    const pending = bubble("user", pendingText);
-    pending.classList.add("pending");
-    box.append(pending);
+    const node = turn("user", pendingText);
+    node.classList.add("pending");
+    box.append(node);
   }
   if (reply) {
     box.append(reply.el);
   } else if (sending !== null || state.busy) {
-    box.append(dots());
+    box.append(working("Working…"));
   }
-  if (nearBottom || sending !== null) box.scrollTop = box.scrollHeight;
+  if (!welcome.hidden) box.scrollTop = 0;
+  else if (nearBottom || sending !== null) box.scrollTop = box.scrollHeight;
+
+  const dock = $("#slip-dock");
+  dock.replaceChildren(...(docked ? [slipEl(docked, true)] : []));
+  if (docked) {
+    const steps = $(".steps", dock);
+    if (steps && dock._lastSlip !== docked.id) steps.scrollTop = 0;
+    dock._lastSlip = docked.id;
+  }
+
   $("#composer .send").disabled = sending !== null || state.busy;
   $("#import-btn").disabled = sending !== null || state.busy;
+  $("#reset-btn").hidden = state.chat.length === 0 && sending === null;
+  $("#nav-chat-mark").hidden = !(docked && docked.status === "pending" && $("#layout").dataset.view !== "chat");
 }
 
-function dots() {
-  const el = document.createElement("div");
-  el.className = "thinking";
-  el.setAttribute("aria-label", "Thinking");
-  el.innerHTML = "<span></span><span></span><span></span>";
-  return el;
+function paintWelcome() {
+  $("#welcome-date").textContent = nextSundayLabel();
+  const facts = [...(state.room || [])].sort((a, b) => b.id - a.id).slice(0, 2);
+  const line = $("#welcome-saved");
+  line.hidden = facts.length === 0;
+  if (facts.length) $(".welcome-saved-text", line).textContent = "Saved in Room: " + facts.map((f) => f.text).join(" ");
 }
 
 // Collapsed by default: a volunteer wants the answer, the reasoning is there if they're curious.
 function thoughts(text, id) {
-  const el = document.createElement("details");
-  el.className = "thoughts";
-  el.innerHTML = "<summary>Thinking</summary><div class=\"thought-text\"></div>";
-  $(".thought-text", el).textContent = text;
-  if (id !== undefined) {
-    el.open = openThoughts.has(id);
-    el.addEventListener("toggle", () => { el.open ? openThoughts.add(id) : openThoughts.delete(id); });
-  }
-  return el;
+  const node = el("details", "thoughts");
+  node.innerHTML = '<summary>Show thinking</summary><div class="thought-text"></div>';
+  $(".thought-text", node).textContent = text;
+  const summary = $("summary", node);
+  if (id !== undefined) node.open = openThoughts.has(id);
+  summary.textContent = node.open ? "Hide thinking" : "Show thinking";
+  node.addEventListener("toggle", () => {
+    summary.textContent = node.open ? "Hide thinking" : "Show thinking";
+    if (id !== undefined) node.open ? openThoughts.add(id) : openThoughts.delete(id);
+  });
+  return node;
 }
 
 // -- the reply being written -------------------------------------------------
 // /api/events streams the assistant's reply as it's written. The finished turn
-// arrives through /api/state as usual, so on "end" this bubble just goes away.
+// arrives through /api/state as usual, so on "end" this entry just goes away.
 
 const TOOL_LABELS = {
   listen_to_stems: "Listening to the stems…",
@@ -235,19 +376,20 @@ const TOOL_LABELS = {
 let reply = null;  // { el, thinking, text, tool } while a reply is streaming
 
 function startReply() {
-  const el = document.createElement("div");
-  el.className = "msg assistant streaming";
-  el.append(thoughts(""), document.createElement("div"), document.createElement("div"));
+  const node = el("div", "turn assistant streaming");
+  node.append(el("p", "speaker", "Holy Sound"));
+  const think = thoughts("");
+  const text = el("div", "turn-text reply-text");
+  const status = el("div", "reply-status");
+  node.append(think, text, status);
   // Opening the thinking while it's written jumps to its newest line; paintReply keeps it there.
-  el.children[0].addEventListener("toggle", (e) => {
+  think.addEventListener("toggle", (e) => {
     if (!e.target.open) return;
     const t = $(".thought-text", e.target);
     t.scrollTop = t.scrollHeight;
     e.target.scrollIntoView({ block: "nearest" });
   });
-  el.children[1].className = "reply-text";
-  el.children[2].className = "reply-status";
-  reply = { el, thinking: "", text: "", tool: null };
+  reply = { el: node, thinking: "", text: "", tool: null };
   chatSig = "";
   if (state) renderChat();
   paintReply();
@@ -260,9 +402,13 @@ function paintReply() {
   requestAnimationFrame(() => {
     paintQueued = false;
     if (!reply) return;
-    const [think, text, status] = reply.el.children;
+    const think = $(".thoughts", reply.el);
+    const text = $(".reply-text", reply.el);
+    const status = $(".reply-status", reply.el);
     think.hidden = !reply.thinking;
-    $("summary", think).textContent = reply.text || reply.tool ? "Thinking" : "Thinking…";
+    const summary = $("summary", think);
+    if (!reply.text && !reply.tool) summary.textContent = "Thinking…";
+    else summary.textContent = think.open ? "Hide thinking" : "Show thinking";
     // Follow the thinking as it's written, unless the volunteer scrolled up in it to read.
     const thought = $(".thought-text", think);
     const following = thought.scrollHeight - thought.scrollTop - thought.clientHeight < 24;
@@ -271,8 +417,8 @@ function paintReply() {
     text.innerHTML = markdownLite(reply.text);
     text.hidden = !reply.text;
     status.replaceChildren();
-    if (reply.tool) status.textContent = TOOL_LABELS[reply.tool] || "Working…";
-    else if (!reply.text && !reply.thinking) status.append(dots());
+    if (reply.tool) status.append(working(TOOL_LABELS[reply.tool] || "Working…"));
+    else if (!reply.text && !reply.thinking) status.append(working("Working…"));
     status.hidden = !status.hasChildNodes();
     const box = $("#messages");
     if (box.scrollHeight - box.scrollTop - box.clientHeight < 160) box.scrollTop = box.scrollHeight;
@@ -299,108 +445,201 @@ function listen() {
   });
 }
 
-function bubble(role, text) {
-  const el = document.createElement("div");
-  el.className = "msg " + role;
-  if (role === "note") {
-    el.textContent = text;
-    el.setAttribute("role", "status");
-    el.addEventListener("click", () => setView("room"));
-    el.title = "See everything Holy Sound remembers";
-  } else if (role === "assistant") el.innerHTML = markdownLite(text);
-  else el.textContent = text;
-  return el;
+/* Enough Markdown for chat replies: paragraphs, bullet lists, **bold**. */
+function markdownLite(text) {
+  const inline = (s) => escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  return text.split(/\n{2,}/).map((block) => {
+    const lines = block.split("\n");
+    if (lines.every((l) => /^\s*([-*•]|\d+\.)\s+/.test(l))) {
+      return "<ul>" + lines.map((l) => `<li>${inline(l.replace(/^\s*([-*•]|\d+\.)\s+/, ""))}</li>`).join("") + "</ul>";
+    }
+    return `<p>${lines.map(inline).join("<br>")}</p>`;
+  }).join("");
 }
 
-const STATUS_LABELS = {
-  pending: "",
-  applied: "Applied",
-  dismissed: "Not applied",
-  superseded: "Replaced by a newer suggestion",
-  exported: "Downloaded as a session file",
-};
+// -- the change slip ----------------------------------------------------------
+// Paper means a person has to decide. A slip waiting for a decision is paper;
+// once Apply is pressed it goes dark and each step reports as it runs.
 
-function proposalCard(p) {
-  const card = document.createElement("div");
-  card.className = "proposal " + p.status;
-
-  const head = document.createElement("div");
-  head.className = "proposal-head";
-  const problems = (p.results || []).filter((r) => !r.ok || r.partial).length;
-  head.innerHTML = `<span>${p.status === "pending" ? "Suggested changes" : "Changes"}</span><span class="state"></span>`;
-  $(".state", head).textContent = p.status === "applied" && problems
-    ? `Applied · ${problems} need${problems === 1 ? "s" : ""} a look`
-    : STATUS_LABELS[p.status];
-  card.append(head);
-
-  const list = document.createElement("ol");
-  list.className = "steps";
-  p.steps.forEach((step, i) => {
-    const li = document.createElement("li");
-    const result = p.results?.[i];
-    li.textContent = result ? result.text : step.text;
-    if (result) li.className = !result.ok ? "fail" : result.partial ? "partial" : "ok";
-    if (!result && step.destructive) li.append(tag("removes", "tag"));
-    if (!result && step.audible) li.append(tag("plays out loud", "tag audible"));
-    list.append(li);
-  });
-  card.append(list);
-
-  if (p.status === "pending") {
-    const connected = state.live.connected;
-    const actions = document.createElement("div");
-    actions.className = "proposal-actions";
-
-    const apply = button("Apply", "btn primary", () => act(p.id, "apply", apply));
-    apply.disabled = !connected;
-    if (!connected) apply.title = "Open Live to apply these";
-    const later = button("Not now", "btn ghost", () => act(p.id, "dismiss", later));
-    actions.append(apply);
-    if (p.exportable) {
-      const dl = button("Download session file", connected ? "btn" : "btn primary", () => exportProposal(p.id, dl));
-      actions.append(dl);
-    }
-    actions.append(later);
-    card.append(actions);
-
-    if (!connected) {
-      const note = document.createElement("p");
-      note.className = "proposal-note";
-      note.textContent = "Live isn’t connected, so these can’t be applied yet." +
-        (p.exportable ? " You can download the new tracks as a session file instead." : "");
-      card.append(note);
-    }
+function consequence(step) {
+  if (step.destructive) {
+    if (/^Delete the track/i.test(step.text)) return { text: "Removes this track from your set.", kind: "remove" };
+    if (/^Delete the song/i.test(step.text)) return { text: "Removes this song from your set.", kind: "remove" };
+    return { text: "Removes this effect from the track.", kind: "remove" };
   }
-  return card;
+  if (step.audible) return { text: "You will hear this in the room.", kind: "audible" };
+  return null;
 }
 
-function tag(text, className) {
-  const el = document.createElement("span");
-  el.className = className;
-  el.textContent = text;
-  return el;
+function stepRow(step, i, mode, p) {
+  const li = el("li", "step");
+  li.append(el("span", "step-num", String(i + 1)));
+  const body = el("div", "step-body");
+  body.append(el("p", "step-text", trueMinus(step.text)));
+  if (step.change) {
+    const ch = el("p", "step-change");
+    const from = el("s");
+    from.innerHTML = numHtml(trueMinus(String(step.change.from)));
+    const to = el("span");
+    to.innerHTML = numHtml(trueMinus(String(step.change.to))) + (step.change.unit ? " " + escapeHtml(step.change.unit) : "");
+    ch.append(from);
+    ch.insertAdjacentHTML("beforeend", ARROW_SVG);
+    ch.append(to);
+    body.append(ch);
+  }
+  const note = consequence(step);
+  if (note && mode === "pending") body.append(el("p", "step-note " + note.kind, note.text));
+  li.append(body);
+
+  if (mode === "pending") return li;
+
+  // applying or finished: the state of this step, in words and a lamp
+  const result = p.results?.[i];
+  let stateName;
+  let reason = "";
+  if (result) {
+    stateName = !result.ok ? "failed" : result.partial ? "check" : "done";
+    if (stateName === "failed") reason = result.text;
+    else if (stateName === "check") reason = result.text.replace(/^.*? But /, "But ");
+  } else {
+    stateName = state.applying?.id === p.id ? state.applying.states[i] || "waiting" : "waiting";
+  }
+  const words = { waiting: "Waiting", working: "Working", done: "Done", check: "Check", failed: "Failed" };
+  const status = el("span", "step-state " + stateName);
+  if (stateName !== "waiting") {
+    const lamp = el("i", "lamp");
+    lamp.style.background = { working: "var(--text)", done: "var(--green)", check: "var(--amber)", failed: "var(--red)" }[stateName];
+    status.append(lamp);
+  }
+  status.append(document.createTextNode(words[stateName]));
+  li.append(status);
+  if (stateName === "working") li.classList.add("is-working");
+  if (reason) li.append(el("p", "step-reason", trueMinus(reason)));
+  return li;
 }
 
-function button(label, className, onClick) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = className;
-  b.textContent = label;
-  b.addEventListener("click", onClick);
-  return b;
+function slipEl(p, docked) {
+  const total = p.steps.length;
+  const noun = `${total} change${total === 1 ? "" : "s"}`;
+
+  // one line, with the steps a tap away
+  const collapsedWords = {
+    dismissed: `${noun}, not applied`,
+    superseded: "Replaced by a newer list",
+    exported: "Downloaded as a session file",
+  }[p.status];
+  if (collapsedWords) {
+    const node = el("div", "slip collapsed");
+    const line = el("div", "slip-collapsed");
+    line.append(el("span", "", collapsedWords));
+    const list = el("ol", "steps");
+    list.hidden = true;
+    p.steps.forEach((step, i) => list.append(stepRow(step, i, "done", { results: [] })));
+    const toggle = button("Show steps", "text-btn", () => {
+      list.hidden = !list.hidden;
+      toggle.textContent = list.hidden ? "Show steps" : "Hide steps";
+    });
+    line.append(toggle);
+    node.append(line, list);
+    return node;
+  }
+
+  const applying = p.status === "pending" && p.id === applyingId;
+  const finished = p.status === "applied";
+  const node = el("div", "slip " + (p.status === "pending" && !applying ? "pending paper" : applying ? "applying" : "done-state"));
+  const head = el("div", "slip-head");
+
+  let headline;
+  if (applying) {
+    headline = `Applying ${noun}`;
+    head.append(Object.assign(el("i", "lamp"), {}));
+    head.firstChild.style.background = "var(--amber)";
+  } else if (finished) {
+    const failed = (p.results || []).filter((r) => !r.ok).length;
+    const check = (p.results || []).filter((r) => r.ok && r.partial).length;
+    const lamp = el("i", "lamp");
+    if (failed === total) { headline = "Nothing was applied"; lamp.style.background = "var(--red)"; }
+    else if (failed || check) { headline = `${total - failed - check} applied, ${failed + check} need${failed + check === 1 ? "s" : ""} a look`; lamp.style.background = "var(--amber)"; }
+    else { headline = `${noun} applied`; lamp.style.background = "var(--green)"; }
+    head.append(lamp);
+  } else {
+    headline = `${noun}, not applied yet`;
+  }
+  head.append(el("span", "", headline));
+  node.append(head);
+
+  if (p.status === "pending" && !applying) {
+    node.append(el("p", "slip-sub", state.demo
+      ? "Nothing in the demo set changes until you press Apply."
+      : "Nothing in Ableton changes until you press Apply."));
+  }
+
+  const list = el("ol", "steps");
+  const mode = p.status === "pending" && !applying ? "pending" : "done";
+  p.steps.forEach((step, i) => list.append(stepRow(step, i, mode, p)));
+  node.append(list);
+
+  if (mode === "done" && total > 4 && !docked) {
+    const rows = [...list.children];
+    rows.slice(4).forEach((r) => { r.hidden = true; });
+    const more = button("Show all", "text-btn", () => {
+      const hidden = rows[4].hidden;
+      rows.slice(4).forEach((r) => { r.hidden = !hidden; });
+      more.textContent = hidden ? "Show fewer" : "Show all";
+    });
+    node.append(more);
+  }
+
+  if (p.status === "pending" && !applying) {
+    const connected = state.live.connected;
+    const actions = el("div", "slip-actions");
+    if (connected) {
+      const apply = button(`Apply ${noun}`, "key big on-paper", () => act(p.id, "apply", apply));
+      actions.append(apply);
+    } else {
+      if (p.exportable) {
+        const dl = button("Download session file", "key big on-paper", () => exportProposal(p.id, dl));
+        actions.append(dl);
+      }
+      actions.append(el("p", "slip-line disabled", "Apply (Ableton isn’t open)"));
+      actions.append(el("p", "slip-note", "Ableton isn’t open, so Apply is off." +
+        (p.exportable ? " Download the new tracks as a session file instead." : "")));
+    }
+    const sub = el("div", "sub-row");
+    if (connected && p.exportable) {
+      const dl = button("Download session file", "text-btn", () => exportProposal(p.id, dl));
+      sub.append(dl);
+    } else {
+      sub.append(el("span"));
+    }
+    const later = button("Not now", "text-btn", () => act(p.id, "dismiss", later));
+    sub.append(later);
+    actions.append(sub);
+    node.append(actions);
+  }
+  return node;
 }
 
 async function act(id, verb, btn) {
   btn.disabled = true;
-  const original = btn.textContent;
-  if (verb === "apply") btn.textContent = "Applying…";
+  if (verb === "apply") {
+    applyingId = id;   // the slip goes dark at once; the steps report as the server runs them
+    chatSig = "";
+    renderChat();
+    poll();
+  }
   try {
     render(await api(`/api/proposals/${id}/${verb}`, {}));
-    poll();
   } catch (e) {
     toast(e.message, "error");
     btn.disabled = false;
-    btn.textContent = original;
+  } finally {
+    if (verb === "apply") {
+      applyingId = null;
+      chatSig = "";
+      if (state) renderChat();
+    }
+    poll();
   }
 }
 
@@ -466,19 +705,28 @@ $("#message-input").addEventListener("keydown", (e) => {
 function autosize() {
   const input = $("#message-input");
   input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 180) + "px";
+  input.style.height = Math.min(Math.max(input.scrollHeight, 76), 180) + "px";
 }
 $("#message-input").addEventListener("input", autosize);
 
 $("#chips").addEventListener("click", (e) => {
-  const chip = e.target.closest(".chip");
+  const chip = e.target.closest(".starter");
   if (!chip) return;
   if (chip.dataset.action === "import") openImportDialog();
   else send(chip.textContent);
 });
 
+$("#try-example").addEventListener("click", () => {
+  const input = $("#message-input");
+  input.value = "Lead vocal on input 1, click to the in-ears.";
+  autosize();
+  input.focus();
+});
+
+$("#open-room").addEventListener("click", () => setView("room"));
+
 $("#reset-btn").addEventListener("click", async () => {
-  if (!confirm("Start a new conversation? Your Live set stays as it is.")) return;
+  if (!confirm("Start over? Your Ableton set stays as it is.")) return;
   try {
     render(await api("/api/reset", {}));
   } catch (e) {
@@ -486,27 +734,74 @@ $("#reset-btn").addEventListener("click", async () => {
   }
 });
 
-function escapeHtml(text) {
-  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// -- fader law ----------------------------------------------------------------
+// The cap, the dB rail and the 0 dB line all use this one table, so they agree.
+// It only decides where the cap sits. The server still sets level in dB.
+
+const LAW = [[-70, 0], [-40, 0.16], [-30, 0.28], [-20, 0.42], [-10, 0.6], [0, 0.8], [6, 1]];
+
+function dbToPos(db) {
+  if (db === null || db === undefined || db <= -70) return 0;
+  if (db >= 6) return 1;
+  for (let i = 1; i < LAW.length; i++) {
+    if (db <= LAW[i][0]) {
+      const [d0, p0] = LAW[i - 1];
+      const [d1, p1] = LAW[i];
+      return p0 + ((db - d0) / (d1 - d0)) * (p1 - p0);
+    }
+  }
+  return 1;
 }
 
-/* Enough Markdown for chat replies: paragraphs, bullet lists, **bold**. */
-function markdownLite(text) {
-  const inline = (s) => escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  return text.split(/\n{2,}/).map((block) => {
-    const lines = block.split("\n");
-    if (lines.every((l) => /^\s*([-*•]|\d+\.)\s+/.test(l))) {
-      return "<ul>" + lines.map((l) => `<li>${inline(l.replace(/^\s*([-*•]|\d+\.)\s+/, ""))}</li>`).join("") + "</ul>";
+function posToDb(pos) {
+  if (pos < 0.012) return -70;
+  if (pos >= 1) return 6;
+  for (let i = 1; i < LAW.length; i++) {
+    if (pos <= LAW[i][1]) {
+      const [d0, p0] = LAW[i - 1];
+      const [d1, p1] = LAW[i];
+      const db = d0 + ((pos - p0) / (p1 - p0)) * (d1 - d0);
+      const half = Math.round(db * 2) / 2;
+      return Math.abs(half) <= 1 ? 0 : half;   // a detent at unity
     }
-    return `<p>${lines.map(inline).join("<br>")}</p>`;
-  }).join("");
+  }
+  return 6;
+}
+
+function levelHtml(db) {
+  if (db === null || db === undefined || db <= -70) return "Off";
+  const text = (db > 0 ? "+" : db < 0 ? MINUS : "") + Math.abs(db).toFixed(1);
+  return numHtml(text) + '<span class="unit">dB</span>';
+}
+
+function levelPlain(db) {
+  if (db === null || db === undefined || db <= -70) return "Off";
+  return (db > 0 ? "+" : db < 0 ? MINUS : "") + Math.abs(db).toFixed(1);
+}
+
+function dbText(db) {
+  return db <= -70 ? "Off" : `${db > 0 ? "+" : db < 0 ? MINUS : ""}${Math.abs(db).toFixed(1)} dB`;
+}
+
+function panText(pan) {
+  const amount = Math.round(Math.abs(pan) * 50);
+  return amount === 0 ? "C" : `${pan < 0 ? "L" : "R"}${amount}`;
+}
+
+function panFromText(text) {
+  const m = /^([LR])(\d+)$/.exec(text || "") || /^(\d+)([LR])$/.exec(text || "");
+  if (!m) return 0;
+  const letter = /[LR]/.test(m[1]) ? m[1] : m[2];
+  const amount = parseInt(/\d/.test(m[1]) ? m[1] : m[2], 10);
+  return (amount / 50) * (letter === "L" ? -1 : 1);
 }
 
 // -- the assistant at work ---------------------------------------------------
-// While the assistant is changing a track, its channel gets a travelling light
-// around the edge. The server says which tracks and for how long (state.activity).
+// While the assistant is changing a track, one crisp light runs round its channel.
+// The server says which tracks and for how long (state.activity). The light runs for
+// at least one full lap, so it is visible even when Live answers in 40 ms.
 
-const litUntil = new Map(); // track name (lower case) -> performance.now() when its light goes out
+const litUntil = new Map(); // track name (lower case) -> performance.now() when its light should go out
 let litTimer = null;
 
 function noteActivity(activity) {
@@ -514,23 +809,110 @@ function noteActivity(activity) {
   for (const { track, ms } of activity || []) litUntil.set(track.toLowerCase(), now + ms);
 }
 
+function startRun(strip) {
+  if (strip._running) return;
+  strip._running = true;
+  strip._runStart = performance.now();
+  strip._heldDb = strip._stableDb;   // show the level as it was until the light stops
+  strip._heldAt = strip._runStart;
+  strip.classList.add("is-run");
+  clearTimeout(strip._stopTimer);
+  strip._stopTimer = null;
+  paintLegend(strip);
+  const name = strip._row?.name || "channel";
+  $("#sr-status").textContent = `Editing ${name}`;
+
+  const rects = $$(".run rect", strip);
+  const w = strip.offsetWidth, h = strip.offsetHeight;
+  rects.forEach((r) => {
+    r.setAttribute("x", 1.5); r.setAttribute("y", 1.5);
+    r.setAttribute("width", Math.max(1, w - 3)); r.setAttribute("height", Math.max(1, h - 3));
+    r.getAnimations?.().forEach((a) => a.cancel());
+    r.style.strokeDasharray = "";
+    r.style.display = "";
+  });
+  const perimeter = rects[0].getTotalLength?.() || 2 * (w + h);
+  strip._runDur = Math.min(2400, Math.max(1600, (perimeter / 520) * 1000));
+  const seg = [[16, 0], [15, 16], [15, 31]];   // [dash length, distance behind the head] in px
+  rects.forEach((r, i) => {
+    const [len, behind] = seg[i];
+    if (reducedMotion.matches) {
+      // no motion: the head becomes a solid outline and the tails go
+      if (i === 0) { r.style.strokeDasharray = "none"; r.style.strokeWidth = "2"; } else r.style.display = "none";
+      return;
+    }
+    r.style.strokeDasharray = `${len} ${perimeter - len}`;
+    r.animate(
+      [{ strokeDashoffset: `${behind}px` }, { strokeDashoffset: `${behind - perimeter}px` }],
+      { duration: strip._runDur, iterations: Infinity, easing: "linear" },
+    );
+  });
+}
+
+function stopRun(strip) {
+  if (!strip._running) return;
+  strip._running = false;
+  strip.classList.remove("is-run");
+  $$(".run rect", strip).forEach((r) => r.getAnimations?.().forEach((a) => a.cancel()));
+  const name = strip._row?.name || "channel";
+  $("#sr-status").textContent = `Changed ${name}`;
+
+  // landing: the cap glides to where the change put it, and a ghost marks where it was
+  const was = strip._heldDb;
+  strip._heldDb = undefined;
+  const now = strip._lastDb;
+  if (was !== undefined && was !== now && !reducedMotion.matches) {
+    strip.classList.add("glide");
+    setTimeout(() => strip.classList.remove("glide"), 460);
+  }
+  setFaderPosition(strip, now);
+  if (was !== undefined && was !== now) {
+    const r = strip._r;
+    r.ghost.style.bottom = `calc((var(--throw) - var(--cap-h)) * ${dbToPos(was)} + var(--cap-h) / 2)`;
+    r.was.textContent = `was ${levelPlain(was)}`;
+    strip.classList.add("has-ghost");
+    clearTimeout(strip._ghostTimer);
+    strip._ghostTimer = setTimeout(() => strip.classList.remove("has-ghost"), 6000);
+  }
+  strip._changedUntil = performance.now() + 4000;
+  clearTimeout(strip._changedTimer);
+  strip._changedTimer = setTimeout(() => paintLegend(strip), 4050);
+  paintLegend(strip);
+}
+
 function paintActivity() {
   const now = performance.now();
   let next = Infinity;
-  for (const el of strips.values()) {
-    const until = litUntil.get((el._row?.name || "").toLowerCase());
+  let anyRun = false;
+  for (const strip of strips.values()) {
+    const until = litUntil.get((strip._row?.name || "").toLowerCase());
     const on = until !== undefined && until > now;
-    el.classList.toggle("ai-active", on);
-    if (on) next = Math.min(next, until);
+    if (on) {
+      startRun(strip);
+      if (strip._stopTimer) { clearTimeout(strip._stopTimer); strip._stopTimer = null; }
+      next = Math.min(next, until);
+    } else if (strip._running && !strip._stopTimer) {
+      // never less than one whole lap since the light started
+      const dur = strip._runDur || 2000;
+      const laps = Math.max(1, Math.ceil((now - strip._runStart) / dur));
+      const wait = strip._runStart + dur * laps - now;
+      strip._stopTimer = setTimeout(() => { strip._stopTimer = null; stopRun(strip); paintActivity(); }, Math.max(0, wait));
+    }
+    if (strip._running) anyRun = true;
   }
   for (const [key, until] of litUntil) if (until <= now) litUntil.delete(key);
   clearTimeout(litTimer);
   if (next !== Infinity) litTimer = setTimeout(paintActivity, next - now + 30);
+  $("#nav-chase").hidden = !anyRun;
 }
+
+window.addEventListener("resize", () => {
+  for (const strip of strips.values()) if (strip._running) { stopRun(strip); strip._running = false; startRun(strip); }
+});
 
 // -- mixer -------------------------------------------------------------------
 //
-// Strips sit in folders by instrument: Vocals, Drums, Keys and so on. The
+// Strips sit in folders by instrument: Vocals, Instruments and so on. The
 // server picks each track's folder from its name, or from wherever the
 // volunteer last moved it (row.folder), and sends the folder list in
 // state.folders.
@@ -541,22 +923,41 @@ function paintActivity() {
 // a folder Live can show, and it keeps the two screens saying the same thing.
 const groupEls = new Map(); // folder key (or "returns") -> dom refs
 let dragging = null;        // the strip being dragged to another folder
+let selectedKey = null;     // "t0" / "r1": the channel shown in the drawer
+
+const RAIL = [[1, "+6"], [0.8, "0"], [0.6, `${MINUS}10`], [0.42, `${MINUS}20`], [0.28, `${MINUS}30`], [0.16, `${MINUS}40`], [0, "Off"]];
+
+function buildRail() {
+  const rail = $("#rail");
+  if (rail.firstChild) return;
+  const scale = el("div", "rail-scale");
+  for (const [p, label] of RAIL) {
+    const mark = el("span", p === 0.8 ? "zero" : "", label);
+    mark.style.bottom = `calc((var(--throw) - var(--cap-h)) * ${p} + var(--cap-h) / 2)`;
+    scale.append(mark);
+  }
+  rail.append(scale);
+}
 
 function renderMixer(snap) {
+  buildRail();
   const groups = buildMixerGroups(snap);
   const groupsEl = $("#groups");
   const keepGroups = new Set();
   const keepStrips = new Set();
 
+  // The rail stays first. A folder is only moved when it is out of place: moving an element
+  // takes the focus away from anything inside it, and this runs on every poll.
+  let at = 1;
   groups.forEach((group) => {
     keepGroups.add(group.key);
     const g = ensureGroup(group.key);
-    g.nameEl.textContent = group.label;
-    g.countEl.textContent = String(group.rows.length);
-    g.dotEl.style.setProperty("--swatch", group.swatch || "transparent");
-    g.dotEl.classList.toggle("is-empty", !group.swatch);
+    if (g.nameEl.textContent !== group.label) g.nameEl.textContent = group.label;
+    const count = group.key === "returns" ? "" : String(group.rows.length);
+    if (g.countEl.textContent !== count) g.countEl.textContent = count;
     g.section.classList.toggle("is-empty", group.rows.length === 0);
-    groupsEl.appendChild(g.section); // re-adding an attached node just reorders it
+    if (groupsEl.children[at] !== g.section) groupsEl.insertBefore(g.section, groupsEl.children[at] || null);
+    at += 1;
     placeStrips(g.stripsEl, group.rows, group.prefix, snap, keepStrips);
   });
 
@@ -566,16 +967,17 @@ function renderMixer(snap) {
       groupEls.delete(key);
     }
   }
-  for (const [key, el] of strips) {
+  for (const [key, strip] of strips) {
     if (!keepStrips.has(key)) {
-      el.remove();
+      clearTimeout(strip._stopTimer);
+      strip.remove();
       strips.delete(key);
     }
   }
 
   $("#mixer-empty").hidden = snap.tracks.length > 0;
+  keepSelection(groups);
   paintActivity();
-  syncTabsOffset();
 }
 
 /* One entry per folder, in the server's order. Empty folders stay in the
@@ -588,11 +990,9 @@ function buildMixerGroups(snap) {
   for (const row of snap.tracks) {
     byKey.get(known.has(row.folder) ? row.folder : "other")?.push(row);
   }
-  const groups = folders.map((f) => ({
-    key: f.key, label: f.label, swatch: f.color, rows: byKey.get(f.key), prefix: "t",
-  }));
+  const groups = folders.map((f) => ({ key: f.key, label: f.label, rows: byKey.get(f.key), prefix: "t" }));
   if (snap.returns.length > 0) {
-    groups.push({ key: "returns", label: "Shared effects", swatch: null, rows: snap.returns, prefix: "r" });
+    groups.push({ key: "returns", label: "Shared effects", rows: snap.returns, prefix: "r" });
   }
   return groups;
 }
@@ -601,37 +1001,32 @@ function ensureGroup(key) {
   let g = groupEls.get(key);
   if (g) return g;
 
-  const section = document.createElement("section");
-  section.className = "track-group";
+  const section = el("section", "track-group");
   section.dataset.group = key;
 
-  const header = document.createElement("header");
-  header.className = "group-header";
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "group-toggle";
-  toggle.innerHTML =
-    '<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>' +
-    '<span class="group-dot"></span><span class="group-name"></span><span class="group-count"></span>';
-  header.append(toggle);
+  const bus = el("button", "bus");
+  bus.type = "button";
+  const nameEl = el("span", "bus-name");
+  const countEl = el("span", "bus-count");
+  bus.append(nameEl, countEl, el("span", "fold"));
 
-  const stripsEl = document.createElement("div");
-  stripsEl.className = "strips";
-  const hint = document.createElement("p");
-  hint.className = "group-empty";
-  hint.textContent = "Drag a track here";
-  section.append(header, stripsEl, hint);
+  const stripsEl = el("div", "strips");
+  const slot = el("div", "drop-slot", "Drop here");
+  section.append(bus, el("div", "bracket"), stripsEl, slot);
 
-  const collapsed = loadCollapsedGroups().has(key);
-  toggle.setAttribute("aria-expanded", String(!collapsed));
-  toggle.setAttribute("aria-label", "Show or hide this folder");
-  stripsEl.hidden = collapsed;
-  toggle.addEventListener("click", () => {
-    const open = toggle.getAttribute("aria-expanded") === "true";
-    toggle.setAttribute("aria-expanded", String(!open));
-    stripsEl.hidden = open;
-    saveGroupCollapsed(key, open);
+  const apply = (folded) => {
+    section.classList.toggle("folded", folded);
+    bus.setAttribute("aria-expanded", String(!folded));
+    bus.setAttribute("aria-label", `${folded ? "Show" : "Hide"} ${nameEl.textContent}`);
+  };
+  apply(loadCollapsedGroups().has(key));
+  bus.addEventListener("click", () => {
+    const folded = !section.classList.contains("folded");
+    apply(folded);
+    saveGroupCollapsed(key, folded);
   });
+  // the label text arrives after the group is made
+  new MutationObserver(() => apply(section.classList.contains("folded"))).observe(nameEl, { childList: true, characterData: true, subtree: true });
 
   if (key !== "returns") {
     section.addEventListener("dragover", (e) => {
@@ -644,16 +1039,13 @@ function ensureGroup(key) {
     });
     section.addEventListener("drop", (e) => {
       e.preventDefault();
-      const el = dragging;
+      const strip = dragging;
       endDrag();
-      if (el) moveTrack(el, key);
+      if (strip) moveTrack(strip, key);
     });
   }
 
-  g = {
-    section, toggle, stripsEl,
-    nameEl: $(".group-name", header), countEl: $(".group-count", header), dotEl: $(".group-dot", header),
-  };
+  g = { section, bus, stripsEl, nameEl, countEl };
   groupEls.set(key, g);
   return g;
 }
@@ -662,13 +1054,13 @@ function endDrag() {
   dragging?.classList.remove("is-dragging");
   dragging = null;
   $("#groups").classList.remove("dragging");
-  document.querySelectorAll(".track-group.drop-target").forEach((s) => s.classList.remove("drop-target"));
+  $$(".track-group.drop-target").forEach((s) => s.classList.remove("drop-target"));
 }
 
 /* Move a strip to another folder: remember it on the server, then give the
    track that folder's colour in Live so Live shows the same grouping. */
-async function moveTrack(el, folderKey) {
-  const row = el._row;
+async function moveTrack(strip, folderKey) {
+  const row = strip._row;
   const folder = (state.folders || []).find((f) => f.key === folderKey);
   if (!row || row.is_return || !folder || row.folder === folderKey) return;
   try {
@@ -677,13 +1069,13 @@ async function moveTrack(el, folderKey) {
     toast(e.message, "error");
     return;
   }
-  const recoloured = await liveCmd("set_track_color", { ...target(el), rgb: parseInt(folder.color.slice(1), 16) })
+  const recoloured = await liveCmd("set_track_color", { ...target(strip), rgb: parseInt(folder.color.slice(1), 16) })
     .then(() => true, () => false);
   if (recoloured) toast(`Moved ${row.name} to ${folder.label}.`);
 }
 
 /* Live can't show folders, so give every track its folder's colour there. */
-$("#match-colors").addEventListener("click", async () => {
+$$(".match-colors").forEach((btn) => btn.addEventListener("click", async () => {
   const snap = state?.live.snapshot;
   if (!snap) return;
   const colours = new Map((state.folders || []).map((f) => [f.key, parseInt(f.color.slice(1), 16)]));
@@ -698,10 +1090,10 @@ $("#match-colors").addEventListener("click", async () => {
       return; // liveCmd already said why
     }
   }
-  toast(`Coloured ${done} track${done === 1 ? "" : "s"} in Live to match their folders.`);
-});
+  toast(`Matched ${done} track colour${done === 1 ? "" : "s"} in Live to their folders.`);
+}));
 
-/* Which folders this volunteer has collapsed -- a per-device convenience,
+/* Which folders this volunteer has folded -- a per-device convenience,
    not session state, so it's fine if it's empty on a fresh browser. */
 function loadCollapsedGroups() {
   try {
@@ -721,68 +1113,250 @@ function saveGroupCollapsed(key, collapsed) {
   }
 }
 
-/* Keeps each folder header's sticky offset flush under the tab bar, so it
-   stays correct whatever the tab bar's real rendered height is. */
-function syncTabsOffset() {
-  const head = $(".session-head");
-  if (head) document.documentElement.style.setProperty("--tabs-h", head.offsetHeight + "px");
-}
-window.addEventListener("resize", syncTabsOffset);
-
 function placeStrips(container, rows, prefix, snap, keep) {
   rows.forEach((row, i) => {
     const key = prefix + row.index;
     keep.add(key);
-    let el = strips.get(key);
-    if (!el) {
-      el = createStrip();
-      strips.set(key, el);
+    let strip = strips.get(key);
+    if (!strip) {
+      strip = createStrip();
+      strip._key = key;
+      strips.set(key, strip);
     }
-    if (container.children[i] !== el) container.insertBefore(el, container.children[i] || null);
-    updateStrip(el, row, snap);
+    if (container.children[i] !== strip) container.insertBefore(strip, container.children[i] || null);
+    updateStrip(strip, row, snap);
   });
 }
 
-function target(el) {
-  return { track_index: el._row.index, is_return: el._row.is_return };
+function target(strip) {
+  return { track_index: strip._row.index, is_return: strip._row.is_return };
+}
+
+// -- selecting a channel and the drawer ------------------------------------------
+
+function keepSelection(groups) {
+  const order = groups.flatMap((g) => g.rows.map((r) => g.prefix + r.index));
+  if (!order.length) {
+    selectedKey = null;
+    $("#drawer").replaceChildren(el("p", "drawer-empty", "Pick a channel number to see its effects, sends and routing."));
+    return;
+  }
+  if (!selectedKey || !strips.has(selectedKey)) {
+    const old = selectedKey;
+    const oldIndex = old ? parseInt(old.slice(1), 10) : 0;
+    selectedKey = order.find((k) => k.startsWith("t") && parseInt(k.slice(1), 10) >= oldIndex) || order[0];
+  }
+  for (const [key, strip] of strips) {
+    const on = key === selectedKey;
+    strip._r.sel.setAttribute("aria-pressed", String(on));
+  }
+  const strip = strips.get(selectedKey);
+  const drawer = $("#drawer");
+  if (drawer.firstElementChild !== strip._more) drawer.replaceChildren(strip._more);
+}
+
+function selectStrip(strip, scroll = false) {
+  selectedKey = strip._key;
+  keepSelection(buildMixerGroups(state.live.snapshot));
+  if (scroll && matchMedia("(max-width: 820px)").matches) {
+    $("#drawer").scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" });
+  }
+}
+
+// -- a channel strip ---------------------------------------------------------------
+
+function buildMore(strip) {
+  const more = el("div", "more");
+
+  const channel = el("section", "m-channel");
+  const title = el("h3", "", "Channel");
+  const name = el("input", "drawer-name");
+  name.setAttribute("aria-label", "Track name");
+  name.maxLength = 24;
+  const summary = el("div", "route-summary");
+  const colourKey = el("button", "key colour-key");
+  colourKey.type = "button";
+  const chip = el("i", "colour-chip");
+  colourKey.append(chip, document.createTextNode("Colour"));
+  colourKey.addEventListener("click", () => openColorDialog(strip));
+  channel.append(title, name, summary, colourKey);
+
+  const effects = el("section", "m-effects");
+  const devices = el("div", "devices");
+  const addDevice = button("Add effect", "add-device", () => openDeviceDialog(strip));
+  effects.append(el("h3", "", "Effects, in order"), devices, addDevice);
+
+  const sendsSection = el("section", "m-sends");
+  const sends = el("div", "sends");
+  sendsSection.append(el("h3", "", "Sends"), sends);
+
+  const routing = el("section", "m-routing");
+  const folderLine = el("label", "folder-line");
+  const folderSel = el("select", "folder-select");
+  folderSel.setAttribute("aria-label", "Folder");
+  folderLine.append(el("span", "", "Folder"), folderSel);
+  const routeLine = el("div", "route-line");
+  const clipGains = el("div", "clip-gains");
+  routing.append(el("h3", "", "Routing"), folderLine, routeLine, clipGains);
+
+  more.append(channel, effects, sendsSection, routing);
+  strip._more = more;
+  return { title, name, summary, colourChip: chip, devices, addDevice, sends, folderLine, folderSel, routeLine, clipGains };
 }
 
 function createStrip() {
-  const el = $("#strip-template").content.firstElementChild.cloneNode(true);
+  const strip = $("#strip-template").content.firstElementChild.cloneNode(true);
+  const m = buildMore(strip);
+  const r = {
+    sel: $(".sel", strip), grip: $(".strip-grip", strip), name: $(".strip-name", strip),
+    legendIn: $(".legend-in", strip), legendOut: $(".legend-out", strip),
+    mute: $(".mute", strip), solo: $(".solo", strip),
+    pan: $(".pan", strip), panInput: $(".pan input", strip), panOut: $(".pan output", strip),
+    zone: $(".fader-zone", strip), fader: $(".fader", strip), ghost: $(".ghost", strip),
+    meter: $(".meter", strip), clipLamp: $(".clip-lamp", strip),
+    volOut: $(".vol-out", strip), was: $(".was", strip),
+    more: m,
+  };
+  strip._r = r;
 
-  const name = $(".strip-name", el);
-  name.addEventListener("change", () => {
-    const value = name.value.trim();
-    if (value && value !== el._row.name) liveCmd("set_track_name", { ...target(el), name: value }).catch(() => {});
+  // selecting
+  r.sel.addEventListener("click", () => selectStrip(strip, true));
+  strip.addEventListener("click", (e) => {
+    if (e.target.closest(".strip-toggles, .pan, .fader-zone, .strip-grip, .sel, .strip-name")) return;
+    selectStrip(strip, true);
   });
-  name.addEventListener("keydown", (e) => { if (e.key === "Enter") name.blur(); });
+  strip.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === strip) selectStrip(strip, true); });
+  r.name.addEventListener("focus", () => selectStrip(strip));
+  // the whole name plate is the target for editing the name, not just its first line
+  $(".plate", strip).addEventListener("click", (e) => { if (e.target !== r.name) r.name.focus(); });
 
-  $(".strip-num", el).addEventListener("click", () => openColorDialog(el));
-  $(".mute", el).addEventListener("click", () => liveCmd("set_mute", { ...target(el), on: !el._row.mute }).catch(() => {}));
-  $(".solo", el).addEventListener("click", () => liveCmd("set_solo", { ...target(el), on: !el._row.solo }).catch(() => {}));
-
-  slider($(".volume input", el), $(".volume output", el), (db) => ({ cmd: "set_volume", args: { ...target(el), db } }), dbText);
-  slider($(".pan input", el), $(".pan output", el), (pan) => ({ cmd: "set_pan", args: { ...target(el), pan } }), panText);
-
-  $(".more", el).addEventListener("toggle", (e) => {
-    el.classList.toggle("is-open", e.target.open);
-    if (e.target.open) loadRouting(el);
+  // naming: the strip and the drawer share one commit
+  const rename = (value) => {
+    value = value.trim();
+    if (value && value !== strip._row.name) liveCmd("set_track_name", { ...target(strip), name: value }).catch(() => {});
+  };
+  r.name.addEventListener("change", () => rename(r.name.value));
+  r.name.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); if (!e.shiftKey) r.name.blur(); }
   });
+  m.name.addEventListener("change", () => rename(m.name.value));
+  m.name.addEventListener("keydown", (e) => { if (e.key === "Enter") m.name.blur(); });
 
-  // Moving a track between folders: drag the grip (computers), or pick from the list (phones).
-  const grip = $(".strip-grip", el);
-  grip.addEventListener("dragstart", (e) => {
-    if (el._row.is_return) return e.preventDefault();
-    dragging = el;
+  r.mute.addEventListener("click", () => liveCmd("set_mute", { ...target(strip), on: !strip._row.mute }).catch(() => {}));
+  r.solo.addEventListener("click", () => liveCmd("set_solo", { ...target(strip), on: !strip._row.solo }).catch(() => {}));
+
+  wireFader(strip);
+  wirePan(strip);
+
+  // moving a track between folders: drag the grip (computers), or pick from the list (drawer)
+  r.grip.addEventListener("dragstart", (e) => {
+    if (strip._row.is_return) return e.preventDefault();
+    dragging = strip;
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", el._row.name);
-    e.dataTransfer.setDragImage(el, 24, 24);
-    el.classList.add("is-dragging");
+    e.dataTransfer.setData("text/plain", strip._row.name);
+    e.dataTransfer.setDragImage(strip, 24, 24);
+    strip.classList.add("is-dragging");
     $("#groups").classList.add("dragging");
   });
-  grip.addEventListener("dragend", endDrag);
-  $(".folder-select", el).addEventListener("change", (e) => moveTrack(el, e.target.value));
-  return el;
+  r.grip.addEventListener("dragend", endDrag);
+  m.folderSel.addEventListener("change", (e) => moveTrack(strip, e.target.value));
+
+  r.clipLamp.addEventListener("click", () => { strip._clipUntil = 0; r.clipLamp.classList.remove("on"); });
+  return strip;
+}
+
+/* The fader: a drawn cap over an invisible native range input, so the keyboard,
+   touch and screen readers get a real slider while the eye gets a console. */
+function wireFader(strip) {
+  const r = strip._r;
+  const input = r.fader;
+  let last = 0;
+  let timer = null;
+  let lastDb = null;
+
+  const currentDb = () => posToDb(parseFloat(input.value) / 1000);
+  const push = () => {
+    liveCmd("set_volume", { ...target(strip), db: strip._lastDb ?? currentDb() }).catch(() => {});
+    last = Date.now();
+  };
+  const show = (db) => {
+    strip._lastDb = db;
+    r.zone.style.setProperty("--p", String(dbToPos(db)));
+    r.volOut.innerHTML = levelHtml(db);
+    input.setAttribute("aria-valuetext", db <= -70 ? "Off" : `${levelPlain(db)} decibels`);
+  };
+  const apply = (db, vibrate) => {
+    input.value = String(Math.round(dbToPos(db) * 1000));
+    if (vibrate && db === 0 && lastDb !== 0) navigator.vibrate?.(5);
+    lastDb = db;
+    show(db);
+    clearTimeout(timer);
+    if (Date.now() - last > 150) push();
+    else timer = setTimeout(push, 150);
+  };
+
+  input.addEventListener("pointerdown", () => { holding.add(input); strip.classList.add("is-down"); });
+  const up = () => strip.classList.remove("is-down");
+  input.addEventListener("pointerup", up);
+  input.addEventListener("pointercancel", up);
+  input.addEventListener("input", () => {
+    holding.add(input);
+    apply(currentDb(), true);
+  });
+  input.addEventListener("change", () => {
+    clearTimeout(timer);
+    push();
+    setTimeout(() => holding.delete(input), 1200);
+  });
+  input.addEventListener("dblclick", () => { holding.add(input); apply(0, false); setTimeout(() => holding.delete(input), 1200); });
+  input.addEventListener("keydown", (e) => {
+    const step = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5, PageUp: 3, PageDown: -3 }[e.key];
+    if (step === undefined) return;
+    e.preventDefault();
+    holding.add(input);
+    const db = Math.min(6, Math.max(-70, (strip._lastDb ?? currentDb()) + step));
+    apply(db <= -69.5 ? -70 : db, true);
+    setTimeout(() => holding.delete(input), 1200);
+  });
+}
+
+function setFaderPosition(strip, db) {
+  const r = strip._r;
+  r.fader.value = String(Math.round(dbToPos(db) * 1000));
+  r.zone.style.setProperty("--p", String(dbToPos(db)));
+  r.volOut.innerHTML = levelHtml(db);
+  r.fader.setAttribute("aria-valuetext", db === null || db <= -70 ? "Off" : `${levelPlain(db)} decibels`);
+}
+
+function wirePan(strip) {
+  const r = strip._r;
+  const input = r.panInput;
+  let last = 0;
+  let timer = null;
+  const push = () => {
+    liveCmd("set_pan", { ...target(strip), pan: parseFloat(input.value) }).catch(() => {});
+    last = Date.now();
+  };
+  const show = () => {
+    const pan = parseFloat(input.value);
+    r.pan.style.setProperty("--p", String((pan + 1) / 2));
+    r.panOut.textContent = panText(pan);
+  };
+  const change = () => {
+    holding.add(input);
+    show();
+    clearTimeout(timer);
+    if (Date.now() - last > 150) push();
+    else timer = setTimeout(push, 150);
+  };
+  input.addEventListener("pointerdown", () => holding.add(input));
+  input.addEventListener("input", change);
+  input.addEventListener("change", () => {
+    clearTimeout(timer);
+    push();
+    setTimeout(() => holding.delete(input), 1200);
+  });
+  input.addEventListener("dblclick", () => { input.value = "0"; change(); setTimeout(() => holding.delete(input), 1200); });
 }
 
 /* A range input that talks to Live while dragging, without fighting the poll. */
@@ -798,7 +1372,6 @@ function slider(input, output, command, format) {
   input.addEventListener("input", () => {
     holding.add(input);
     output.textContent = format(parseFloat(input.value));
-    paintFill(input);
     clearTimeout(timer);
     if (Date.now() - last > 150) push();
     else timer = setTimeout(push, 150);
@@ -810,117 +1383,152 @@ function slider(input, output, command, format) {
   });
 }
 
-function paintFill(input) {
-  const min = parseFloat(input.min), max = parseFloat(input.max);
-  input.style.setProperty("--fill", ((parseFloat(input.value) - min) / (max - min)) * 100 + "%");
+function legendText(row) {
+  if (row.is_return) return "RETURN";
+  if (row.is_midi) return "MIDI";
+  const side = row.input;
+  if (!side || side.type === "No Input") return "NO IN";
+  if (side.type === "Ext. In") return `IN ${side.channel}`;
+  return side.type.toUpperCase();
 }
 
-function dbText(db) {
-  return db <= -70 ? "−inf dB" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
+function outLegend(row) {
+  const side = row.output;
+  if (!side || side.type === "Master") return "";
+  if (side.type === "Ext. Out") return `OUT ${side.channel}`;
+  if (side.type === "Sends Only") return "SENDS";
+  return side.type.toUpperCase().slice(0, 8);
 }
 
-function panText(pan) {
-  const amount = Math.round(Math.abs(pan) * 50);
-  return amount === 0 ? "C" : `${amount}${pan < 0 ? "L" : "R"}`;
-}
-
-function panFromText(text) {
-  const m = /^(\d+)([LR])$/.exec(text || "");
-  return m ? (parseInt(m[1], 10) / 50) * (m[2] === "L" ? -1 : 1) : 0;
-}
-
-function routeLabel(side, isInput) {
+function routeSentence(side, isInput) {
   if (!side) return "";
   if (side.type === "No Input") return "No input";
   if (side.type === "Ext. In") return `Input ${side.channel}`;
   if (side.type === "Ext. Out") return `Outputs ${side.channel}`;
+  if (side.type === "Master") return "Main";
   return side.channel && !isInput ? `${side.type} ${side.channel}` : side.type;
 }
 
-function updateStrip(el, row, snap) {
-  el._row = row;
-  el.classList.toggle("is-return", row.is_return);
-  if (row.color != null) el.style.setProperty("--track-color", "#" + row.color.toString(16).padStart(6, "0"));
-  $(".strip-num", el).setAttribute("aria-label", `Colour for ${row.name}`);
-  paintMeter($(".meter", el), row.meter);
-  el.classList.toggle("muted-track", row.mute);
-  $(".strip-num", el).textContent = row.is_return ? String.fromCharCode(65 + row.index) : row.index + 1;
+function paintLegend(strip) {
+  const r = strip._r;
+  const row = strip._row;
+  if (!row) return;
+  r.legendIn.classList.toggle("editing", !!strip._running);
+  if (strip._running) {
+    r.legendIn.textContent = "EDITING";
+  } else if (strip._changedUntil && performance.now() < strip._changedUntil) {
+    r.legendIn.textContent = "CHANGED";
+  } else {
+    r.legendIn.textContent = legendText(row);
+  }
+  const out = outLegend(row);
+  r.legendOut.hidden = !out;
+  r.legendOut.textContent = out;
+}
 
-  const name = $(".strip-name", el);
-  if (document.activeElement !== name) name.value = row.name;
+function updateStrip(strip, row, snap) {
+  const r = strip._r;
+  const m = r.more;
+  strip._row = row;
+  strip.classList.toggle("is-return", row.is_return);
+  strip.classList.toggle("is-muted", row.mute);
+  if (row.color != null) {
+    const hex = "#" + row.color.toString(16).padStart(6, "0");
+    strip.style.setProperty("--track", hex);
+    strip._more.style.setProperty("--track", hex);
+  }
+
+  const number = row.is_return ? String.fromCharCode(65 + row.index) : String(row.index + 1);
+  r.sel.textContent = number;
+  r.sel.setAttribute("aria-label", `Select ${row.name}`);
+  strip.setAttribute("aria-label", `${row.name}, ${row.is_return ? "return " : "track "}${number}`);
+
+  if (document.activeElement !== r.name) r.name.value = row.name;
+  if (document.activeElement !== m.name) m.name.value = row.name;
+  m.title.textContent = `Channel ${number}`;
+  m.summary.innerHTML = "";
+  m.summary.append(document.createTextNode(row.is_return ? "Shared effect" : routeSentence(row.input, true)));
+  m.summary.insertAdjacentHTML("beforeend", ARROW_SVG);
+  m.summary.append(document.createTextNode(routeSentence(row.output, false)));
+  paintLegend(strip);
 
   // Return tracks (shared effects) aren't sorted into instrument folders.
-  $(".strip-grip", el).hidden = row.is_return;
-  $(".folder-line", el).hidden = row.is_return;
-  const pick = $(".folder-select", el);
+  r.grip.hidden = row.is_return;
+  m.folderLine.hidden = row.is_return;
   const folders = state.folders || [];
   const folderSig = folders.map((f) => f.key + f.label).join("|");
-  if (pick._sig !== folderSig) {
-    pick._sig = folderSig;
-    pick.replaceChildren(...folders.map((f) => new Option(f.label, f.key)));
+  if (m.folderSel._sig !== folderSig) {
+    m.folderSel._sig = folderSig;
+    m.folderSel.replaceChildren(...folders.map((f) => new Option(f.label, f.key)));
   }
-  if (!row.is_return && document.activeElement !== pick) pick.value = row.folder;
+  if (!row.is_return && document.activeElement !== m.folderSel) m.folderSel.value = row.folder;
 
-  const route = row.is_return
-    ? `→ ${routeLabel(row.output)}`
-    : `${row.is_midi ? "MIDI · " : ""}${routeLabel(row.input, true)} → ${routeLabel(row.output)}`;
-  $(".strip-route", el).textContent = route;
-  $(".strip-route", el).title = route;
+  r.mute.setAttribute("aria-pressed", row.mute);
+  r.solo.setAttribute("aria-pressed", row.solo);
+  paintMeter(r.meter, row.meter, 24);
+  paintClip(strip, row.meter);
 
-  $(".mute", el).setAttribute("aria-pressed", row.mute);
-  $(".solo", el).setAttribute("aria-pressed", row.solo);
-
-  const vol = $(".volume input", el);
-  if (!holding.has(vol)) {
-    vol.value = row.volume_db ?? -70;
-    paintFill(vol);
-    $(".volume output", el).textContent = row.volume.replace("-", "−");
+  // the level: while the assistant's light is running, hold what was there before
+  const db = row.volume_db === null || row.volume_db === undefined ? -70 : row.volume_db;
+  const held = strip._running && strip._heldDb !== undefined && performance.now() - strip._heldAt < 4000;
+  // While the volunteer has hold of the fader, what's on screen is the truth: an update that
+  // was already on its way back from Live would otherwise put an older level back.
+  if (!holding.has(r.fader)) {
+    strip._lastDb = db;
+    // the level as it was before the assistant started on this channel (the change and the
+    // news that the assistant is working can arrive in the same update)
+    const lit = (litUntil.get(row.name.toLowerCase()) || 0) > performance.now();
+    if (!strip._running && !lit) strip._stableDb = db;
   }
-  const pan = $(".pan input", el);
-  if (!holding.has(pan)) {
-    pan.value = row.pan_value ?? panFromText(row.pan);
-    $(".pan output", el).textContent = row.pan;
+  if (!holding.has(r.fader)) setFaderPosition(strip, held ? strip._heldDb : db);
+
+  const pan = row.pan_value ?? panFromText(row.pan);
+  if (!holding.has(r.panInput)) {
+    r.panInput.value = String(pan);
+    r.pan.style.setProperty("--p", String((pan + 1) / 2));
+    r.panOut.textContent = panText(pan);
   }
 
   const devSig = JSON.stringify(row.devices);
-  const devices = $(".devices", el);
-  if (devices._sig !== devSig) {
-    devices._sig = devSig;
-    devices.replaceChildren(...row.devices.map((d, i) => deviceChip(el, d, i)));
-    devices.append(button("+ Effect", "add-device", () => openDeviceDialog(el)));
+  if (m.devices._sig !== devSig) {
+    m.devices._sig = devSig;
+    m.devices.replaceChildren(...row.devices.map((d, i) => deviceRow(strip, d, i)));
   }
 
-  const sends = $(".sends", el);
-  if (sends.children.length !== row.sends.length) {
-    sends.replaceChildren(...row.sends.map((s, i) => sendControl(el, i)));
+  if (m.sends.children.length !== row.sends.length) {
+    m.sends.replaceChildren(...row.sends.map((s, i) => sendControl(strip, i)));
   }
   row.sends.forEach((s, i) => {
-    const control = sends.children[i];
-    $(".control-label", control).textContent = s.return;
-    $(".control-label", control).title = s.return;
+    const control = m.sends.children[i];
+    const label = $(".control-label", control);
+    label.textContent = s.return.replace(/^([A-Z])-/, "$1 ");
+    label.title = s.return;
     const input = $("input", control);
     if (!holding.has(input)) {
       input.value = s.level_db ?? -70;
-      paintFill(input);
-      $("output", control).textContent = s.level.replace("-", "−");
+      $("output", control).textContent = s.level_db === null || s.level_db === undefined || s.level_db <= -70 ? "Off" : levelPlain(s.level_db);
     }
   });
-  updateClips(el, row, snap);
-  const extras = [row.sends.length && "sends", row.clips?.length && "clip levels", "outputs"].filter(Boolean);
-  const summary = $(".more summary", el);
-  summary.textContent = row.devices.length ? `More · ${row.devices.length} fx` : "More";
-  summary.title = "Effects, " + extras.join(", ").replace(/, ([^,]*)$/, " & $1") + " and folder";
+  updateClips(strip, row, snap);
 }
 
-/* Live's meters run 0-1 (after the fader). Peak since the last poll. */
-function paintMeter(meter, reading) {
+function paintClip(strip, reading) {
+  const r = strip._r;
+  const now = performance.now();
+  if ((reading?.peak ?? 0) >= 0.95) {
+    strip._clipUntil = now + 4000;
+    clearTimeout(strip._clipTimer);
+    strip._clipTimer = setTimeout(() => r.clipLamp.classList.remove("on"), 4050);
+  }
+  r.clipLamp.classList.toggle("on", !!strip._clipUntil && now < strip._clipUntil);
+}
+
+/* Live's meters run 0-1 (after the fader). Peak since the last poll, shown in n segments. */
+function paintMeter(meter, reading, segments) {
   if (!meter) return;
   meter.hidden = reading == null;
-  const peak = reading?.peak ?? 0;
-  const bar = meter.firstElementChild;
-  bar.style.height = Math.min(100, peak * 100) + "%";
-  meter.classList.toggle("warm", peak >= 0.8 && peak < 0.95);
-  meter.classList.toggle("hot", peak >= 0.95);
+  const peak = Math.min(1, reading?.peak ?? 0);
+  meter.style.setProperty("--lit", String(Math.round(peak * segments)));
 }
 
 function songName(snap, sceneIndex) {
@@ -928,40 +1536,27 @@ function songName(snap, sceneIndex) {
   return scene?.name || `Song ${sceneIndex + 1}`;
 }
 
-function updateClips(el, row, snap) {
+function updateClips(strip, row, snap) {
+  const m = strip._r.more;
   const clips = row.clips || [];
-  const box = $(".clips", el);
-  const sig = JSON.stringify(clips.map((c) => [c.scene_index, c.name, c.is_playing, songName(snap, c.scene_index)]));
-  if (box._sig !== sig) {
-    box._sig = sig;
-    box.replaceChildren(...clips.map((c) => {
-      const chip = document.createElement("span");
-      chip.className = "clip" + (c.is_playing ? " playing" : "");
-      chip.textContent = songName(snap, c.scene_index);
-      chip.title = c.name;
-      return chip;
-    }));
-  }
-
-  const gains = $(".clip-gains", el);
+  const gains = m.clipGains;
   const gainSig = JSON.stringify(clips.filter((c) => c.is_audio).map((c) => [c.scene_index, songName(snap, c.scene_index)]));
   if (gains._sig !== gainSig) {
     gains._sig = gainSig;
-    gains.replaceChildren(...clips.filter((c) => c.is_audio).map((c) => clipGainControl(el, c, snap)));
+    const rows = clips.filter((c) => c.is_audio).map((c) => clipGainControl(strip, c, snap));
+    gains.replaceChildren(...(rows.length ? [el("h3", "", "Clip levels"), ...rows] : []));
   }
-  for (const control of gains.children) {
+  for (const control of gains.querySelectorAll(".clip-gain")) {
     const clip = clips.find((c) => c.scene_index === control._scene);
     const input = $("input", control);
     if (!clip || holding.has(input)) continue;
     input.value = clip.gain_db ?? -24;
-    paintFill(input);
-    $("output", control).textContent = (clip.gain || "").replace("-", "−");
+    $("output", control).textContent = trueMinus(clip.gain || "");
   }
 }
 
-function clipGainControl(el, clip, snap) {
-  const control = document.createElement("div");
-  control.className = "control clip-gain";
+function clipGainControl(strip, clip, snap) {
+  const control = el("div", "control clip-gain");
   control._scene = clip.scene_index;
   control.innerHTML = `<span class="control-label"></span><input type="range" min="-24" max="12" step="0.5"><output></output>`;
   const label = $(".control-label", control);
@@ -969,57 +1564,53 @@ function clipGainControl(el, clip, snap) {
   label.title = `Clip level: ${clip.name}`;
   $("input", control).setAttribute("aria-label", `Clip level in ${songName(snap, clip.scene_index)}`);
   slider($("input", control), $("output", control),
-    (db) => ({ cmd: "set_clip_gain", args: { track_index: el._row.index, scene_index: clip.scene_index, db } }), dbText);
+    (db) => ({ cmd: "set_clip_gain", args: { track_index: strip._row.index, scene_index: clip.scene_index, db } }), dbText);
   return control;
 }
 
-function deviceChip(el, name, index) {
-  const chip = document.createElement("span");
-  chip.className = "device";
-  chip.textContent = name;
-  const remove = button("×", "", () => {
-    if (!confirm(`Remove ${name} from ${el._row.name}? (Cmd+Z in Live brings it back.)`)) return;
-    liveCmd("delete_device", { ...target(el), device_index: index }).catch(() => {});
-  });
+function deviceRow(strip, name, index) {
+  const row = el("div", "device");
+  const remove = el("button", "device-x");
+  remove.type = "button";
   remove.setAttribute("aria-label", `Remove ${name}`);
-  chip.append(remove);
-  return chip;
+  remove.addEventListener("click", () => {
+    if (!confirm(`Remove ${name} from ${strip._row.name}? (Cmd+Z in Live brings it back.)`)) return;
+    liveCmd("delete_device", { ...target(strip), device_index: index }).catch(() => {});
+  });
+  row.append(el("span", "device-idx", String(index + 1)), el("span", "device-name", name), remove);
+  return row;
 }
 
-function sendControl(el, returnIndex) {
-  const control = document.createElement("div");
-  control.className = "control send-level";
+function sendControl(strip, returnIndex) {
+  const control = el("div", "control send-level");
   control.innerHTML = `<span class="control-label"></span><input type="range" min="-70" max="6" step="0.5"><output></output>`;
   const input = $("input", control);
   input.setAttribute("aria-label", `Send ${String.fromCharCode(65 + returnIndex)}`);
-  slider(input, $("output", control), (db) => ({ cmd: "set_send", args: { ...target(el), return_index: returnIndex, db } }), dbText);
+  slider(input, $("output", control), (db) => ({ cmd: "set_send", args: { ...target(strip), return_index: returnIndex, db } }),
+    (db) => (db <= -70 ? "Off" : levelPlain(db)));
   return control;
 }
 
-async function loadRouting(el) {
-  const line = $(".route-line", el);
-  line.innerHTML = "<span>Output</span><span>Loading…</span>";
+async function loadRouting(strip) {
+  const line = strip._r.more.routeLine;
+  line.replaceChildren(el("span", "", "Output"), el("span", "", "Loading…"));
   let routing;
   try {
-    routing = await api("/api/live", { cmd: "get_routing", args: target(el) }).then((d) => d.result);
+    routing = await api("/api/live", { cmd: "get_routing", args: target(strip) }).then((d) => d.result);
   } catch (e) {
-    line.innerHTML = "";
+    line.replaceChildren();
     toast(e.message, "error");
     return;
   }
   const out = routing.output;
   line.replaceChildren();
-  const label = document.createElement("span");
-  label.textContent = "Output";
-  const pick = document.createElement("div");
-  pick.style.display = "flex";
-  pick.style.gap = "8px";
+  const pick = el("div", "pick");
 
   const typeSel = select(out.types, out.type);
   typeSel.setAttribute("aria-label", "Output type");
   typeSel.addEventListener("change", async () => {
-    await liveCmd("set_routing", { ...target(el), direction: "output", type_name: typeSel.value }).catch(() => {});
-    loadRouting(el);
+    await liveCmd("set_routing", { ...target(strip), direction: "output", type_name: typeSel.value }).catch(() => {});
+    loadRouting(strip);
   });
   pick.append(typeSel);
 
@@ -1028,11 +1619,11 @@ async function loadRouting(el) {
     const chanSel = select(channels, out.channel);
     chanSel.setAttribute("aria-label", "Output channel");
     chanSel.addEventListener("change", () => liveCmd("set_routing", {
-      ...target(el), direction: "output", type_name: typeSel.value, channel_name: chanSel.value,
+      ...target(strip), direction: "output", type_name: typeSel.value, channel_name: chanSel.value,
     }).catch(() => {}));
     pick.append(chanSel);
   }
-  line.append(label, pick);
+  line.append(el("span", "", "Output"), pick);
 }
 
 function select(options, current) {
@@ -1046,13 +1637,23 @@ function select(options, current) {
   return sel;
 }
 
+// Load the output routing when a channel is shown in the drawer.
+const drawerWatcher = new MutationObserver(() => {
+  const strip = strips.get(selectedKey);
+  if (strip && $("#drawer").contains(strip._more) && strip._routedFor !== selectedKey + "|" + (strip._row?.output?.type || "")) {
+    strip._routedFor = selectedKey + "|" + (strip._row?.output?.type || "");
+    loadRouting(strip);
+  }
+});
+drawerWatcher.observe($("#drawer"), { childList: true });
+
 // -- add-effect dialog -------------------------------------------------------
 
 let dialogStrip = null;
 
-async function openDeviceDialog(el) {
-  dialogStrip = el;
-  $("#device-track").textContent = el._row.name;
+async function openDeviceDialog(strip) {
+  dialogStrip = strip;
+  $("#device-track").textContent = strip._row.name;
   const sel = $("#device-select");
   if (!stockDevices) {
     try {
@@ -1114,31 +1715,35 @@ $("#device-dialog").addEventListener("close", async () => {
 
 let colorStrip = null;
 
-function openColorDialog(el) {
-  colorStrip = el;
-  $("#color-track").textContent = el._row.name;
+function openColorDialog(strip) {
+  colorStrip = strip;
+  $("#color-track").textContent = strip._row.name;
   const box = $("#swatches");
+  const nameBox = $("#swatch-name");
+  nameBox.textContent = " ";
   box.replaceChildren(...Object.entries(state.colors).map(([name, hex]) => {
     const swatch = button("", "swatch", async () => {
       $("#color-dialog").close();
       const rgb = parseInt(hex.slice(1), 16);
       await liveCmd("set_track_color", { ...target(colorStrip), rgb }).catch(() => {});
     });
-    swatch.style.setProperty("--swatch", hex);
+    swatch.style.setProperty("--track", hex);
     swatch.setAttribute("aria-label", name);
-    swatch.title = name;
+    const label = () => { nameBox.textContent = name; };
+    swatch.addEventListener("mouseenter", label);
+    swatch.addEventListener("focus", label);
     return swatch;
   }));
   $("#color-dialog").showModal();
 }
 
-// -- import with AI -------------------------------------------------------------
+// -- import stems -------------------------------------------------------------
 
 let importPath = null;
 
 async function openImportDialog() {
   if (sending !== null || state?.busy) {
-    toast("Still working on the last message — one moment.");
+    toast("Still working on the last message. One moment.");
     return;
   }
   $("#import-dialog").showModal();
@@ -1147,12 +1752,12 @@ async function openImportDialog() {
 
 async function showFolder(path) {
   const list = $("#folder-list");
-  list.replaceChildren(tag("Looking…", "muted"));
+  list.replaceChildren(el("span", "muted", "Looking…"));
   let folder;
   try {
     folder = await api("/api/folders" + (path ? "?path=" + encodeURIComponent(path) : ""));
   } catch (e) {
-    list.replaceChildren(tag(e.message, "muted"));
+    list.replaceChildren(el("span", "muted", e.message));
     return;
   }
   importPath = folder.path;
@@ -1167,12 +1772,12 @@ async function showFolder(path) {
   list.replaceChildren(...folder.folders.map((f) => {
     const li = document.createElement("li");
     const b = button("", "folder", () => showFolder(f.path));
-    b.append(tag(f.name, "folder-name"));
-    if (f.audio) b.append(tag(`${f.audio} audio`, "folder-count"));
+    b.append(el("span", "folder-name", f.name));
+    if (f.audio) b.append(el("span", "folder-count", `${f.audio} file${f.audio === 1 ? "" : "s"}`));
     li.append(b);
     return li;
   }));
-  if (!folder.folders.length) list.replaceChildren(tag("No folders in here.", "muted"));
+  if (!folder.folders.length) list.replaceChildren(el("span", "muted", "No folders in here."));
 
   const n = folder.audio.length;
   $("#folder-files").textContent = n
@@ -1202,67 +1807,95 @@ $("#import-go").addEventListener("click", async () => {
     chatSig = "";
     if (state) renderChat();
     go.disabled = false;
-    go.textContent = "Import with AI";
+    go.textContent = "Import stems";
   }
 });
 
-// -- songs -------------------------------------------------------------------
+// -- songs: a cue list ---------------------------------------------------------
+
+function playingScenes(snap) {
+  const out = new Set();
+  for (const t of snap.tracks) for (const c of t.clips || []) if (c.is_playing) out.add(c.scene_index);
+  return out;
+}
 
 function renderSongs(snap) {
   const list = $("#songs");
+  $("#songs-empty").hidden = snap.scenes.length > 0;
   if (list.contains(document.activeElement)) return;
-  const sig = JSON.stringify(snap.scenes);
+  const playing = playingScenes(snap);
+  const sig = JSON.stringify([snap.scenes, [...playing]]);
   if (sig === songsSig) return;
   songsSig = sig;
-  list.replaceChildren(...snap.scenes.map(songRow));
+  list.replaceChildren(...snap.scenes.map((scene) => songRow(scene, playing.has(scene.index))));
 }
 
-function songRow(scene) {
-  const li = document.createElement("li");
-  li.className = "song";
-  li.innerHTML = `<span class="song-num"></span><input class="song-name" aria-label="Song title" placeholder="Untitled"><input class="song-bpm" type="number" inputmode="decimal" min="20" max="999" placeholder="BPM" aria-label="Tempo">`;
-  $(".song-num", li).textContent = scene.index + 1;
-  const name = $(".song-name", li);
-  const bpm = $(".song-bpm", li);
+function songRow(scene, isPlaying) {
+  const li = el("li", "song");
+  li.classList.toggle("playing", isPlaying);
+  li.append(el("span", "song-num", String(scene.index + 1)));
+
+  const titleBox = el("div", "song-title");
+  const name = el("input", "song-name");
+  name.setAttribute("aria-label", "Song title");
+  name.placeholder = "Name this song";
   name.value = scene.name;
-  bpm.value = scene.tempo ?? "";
+  const fit = () => { if (!CSS.supports("field-sizing", "content")) name.style.width = Math.max(8, name.value.length + 1) + "ch"; };
+  fit();
+  name.addEventListener("input", fit);
   name.addEventListener("change", () => liveCmd("set_scene", { scene_index: scene.index, name: name.value.trim() }).catch(() => {}));
+  titleBox.append(name, el("span", "song-leader"));
+  li.append(titleBox);
+
+  const bpm = el("input", "song-bpm");
+  bpm.type = "number";
+  bpm.inputMode = "decimal";
+  bpm.min = "20"; bpm.max = "999";
+  bpm.placeholder = "—";
+  bpm.setAttribute("aria-label", "Tempo");
+  bpm.value = scene.tempo ?? "";
   bpm.addEventListener("change", () => {
     const value = parseFloat(bpm.value);
     if (value >= 20 && value <= 999) liveCmd("set_scene", { scene_index: scene.index, bpm: value }).catch(() => {});
   });
+  li.append(bpm);
+
   li.append(transposer(scene));
-  const start = button("", "btn start", () => liveCmd("fire_scene", { scene_index: scene.index }).catch(() => {}));
-  start.innerHTML = "▶<span> Start</span>";
+
+  const start = el("button", "key start");
+  start.type = "button";
+  start.innerHTML = isPlaying
+    ? "<span>Playing</span>"
+    : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1v10l9-5z"/></svg><span>Start</span>';
+  start.addEventListener("click", () => liveCmd("fire_scene", { scene_index: scene.index }).catch(() => {}));
   start.setAttribute("aria-label", `Start ${scene.name || "song " + (scene.index + 1)}`);
   li.append(start);
   return li;
 }
 
-/* Key: − and + move every audio clip in the song a semitone; the middle button goes back
-   to the original key. A song off its original key is highlighted so nobody forgets it on
-   Sunday. Clips that disagree show "Mixed" until a key is picked. */
+/* Key: the minus and plus keys move every audio clip in the song a semitone; the middle key goes
+   back to the original key. A song off its original key is the one lit key in the list, so nobody
+   forgets it on Sunday. Clips that disagree read "Mixed keys" until a key is picked. */
 function transposer(scene) {
-  const el = document.createElement("div");
-  el.className = "transpose";
+  const box = el("div", "transpose");
   // An older RigLink doesn't report keys; Live needs a restart before this can work.
   if (!("transpose" in scene)) {
-    el.hidden = true;
-    return el;
+    box.hidden = true;
+    return box;
   }
   const name = scene.name || "song " + (scene.index + 1);
-  const down = button("−", "btn key-step", () => set((key ?? 0) - 1));
-  const value = button("", "btn key-value", () => set(0));
-  const up = button("+", "btn key-step", () => set((key ?? 0) + 1));
+  const down = button(MINUS, "key key-step", () => set((key ?? 0) - 1));
+  const value = button("", "key key-value", () => set(0));
+  const up = button("+", "key key-step", () => set((key ?? 0) + 1));
   down.setAttribute("aria-label", `Transpose ${name} down a semitone`);
   up.setAttribute("aria-label", `Transpose ${name} up a semitone`);
   value.title = "Back to the original key";
   let key = scene.transpose;
   const show = () => {
-    const text = key === null ? "Mixed" : key === 0 ? "Original" : (key > 0 ? "+" : "−") + Math.abs(key);
+    const text = key === null ? "Mixed keys" : key === 0 ? "Original key" : (key > 0 ? "Up " : "Down ") + Math.abs(key);
     value.textContent = text;
     value.setAttribute("aria-label", `Key of ${name}: ${text}. Press to go back to the original key.`);
-    el.classList.toggle("shifted", key !== 0);
+    box.classList.toggle("shifted", key !== 0);
     down.disabled = key !== null && key <= -12;
     up.disabled = key !== null && key >= 12;
   };
@@ -1273,12 +1906,12 @@ function transposer(scene) {
     key = n;
     show();
     liveCmd("transpose_song", { scene_index: scene.index, semitones: n })
-      .then((r) => { if (r && !r.clips) { toast("That song has no audio clips to transpose."); key = before; show(); } })
+      .then((res) => { if (res && !res.clips) { toast("That song has no audio clips to transpose."); key = before; show(); } })
       .catch(() => { key = before; show(); });
   };
   show();
-  el.append(down, value, up);
-  return el;
+  box.append(down, value, up);
+  return box;
 }
 
 $("#add-song").addEventListener("submit", async (e) => {
@@ -1296,7 +1929,7 @@ $("#add-song").addEventListener("submit", async (e) => {
   }
 });
 
-// -- room memory ---------------------------------------------------------------
+// -- room memory: a ledger -------------------------------------------------------
 
 let roomSig = "";
 
@@ -1308,19 +1941,17 @@ function renderRoom() {
   roomSig = sig;
   $("#facts-empty").hidden = facts.length > 0;
   list.replaceChildren(...facts.map((f) => {
-    const li = document.createElement("li");
-    li.className = "fact";
-    li.append(tag(f.text, "fact-text"));
-    li.append(tag(f.added, "fact-date"));
-    const remove = button("×", "fact-remove", async () => {
+    const li = el("li", "fact");
+    li.append(el("span", "fact-date", shortDate(f.added)), el("span", "fact-text", f.text));
+    const forget = button("Forget", "text-btn", async () => {
       try {
         render(await api("/api/room", { remove: f.id }));
       } catch (e) {
         toast(e.message, "error");
       }
     });
-    remove.setAttribute("aria-label", `Forget: ${f.text}`);
-    li.append(remove);
+    forget.setAttribute("aria-label", `Forget: ${f.text}`);
+    li.append(forget);
     return li;
   }));
 }
@@ -1343,32 +1974,45 @@ let currentTab = "mixer";
 
 function setTab(tab) {
   currentTab = tab;
-  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === tab));
+  $$(".tab").forEach((t) => {
+    const on = t.dataset.tab === tab;
+    t.setAttribute("aria-selected", on);
+    t.tabIndex = on ? 0 : -1;
+  });
   if (state) renderLive();
 }
 
 function setView(view) {
   $("#layout").dataset.view = view;
-  document.querySelectorAll(".bottom-nav button").forEach((b) => {
+  $$(".bottom-nav button").forEach((b) => {
     if (b.dataset.view === view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
   if (view !== "chat") setTab(view);
+  chatSig = "";
+  if (state) renderChat();
 }
 
-document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
-document.querySelectorAll(".bottom-nav button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+$$(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
+$(".tabs").addEventListener("keydown", (e) => {
+  const tabs = $$(".tab");
+  const at = tabs.findIndex((t) => t.getAttribute("aria-selected") === "true");
+  const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (next === undefined) return;
+  e.preventDefault();
+  const tab = tabs[(next + tabs.length) % tabs.length];
+  setTab(tab.dataset.tab);
+  tab.focus();
+});
+$$(".bottom-nav button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
 
 // -- toasts ------------------------------------------------------------------
 
 function toast(message, kind = "info") {
-  const el = document.createElement("div");
-  el.className = "toast " + kind;
-  el.textContent = message;
-  $("#toasts").append(el);
-  setTimeout(() => el.remove(), kind === "error" ? 8000 : 5000);
+  const node = el("div", "toast " + kind, message);
+  $("#toasts").append(node);
+  setTimeout(() => node.remove(), kind === "error" ? 8000 : 4000);
 }
 
-syncTabsOffset();
 listen();
 poll();
