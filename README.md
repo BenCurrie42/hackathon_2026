@@ -13,7 +13,8 @@ The idea here is that you just say what your Sunday looks like (who's playing,
 what's plugged in, what songs) and get a session that's ready to go.
 
 We're building it for the 2026 Gloo AI Hackathon (Ministry Resourcing track).
-It's a prototype.
+It's a prototype. Latest release: [v1.1.0](https://github.com/BenCurrie42/hackathon_2026/releases/tag/v1.1.0)
+([changelog](CHANGELOG.md)).
 
 ## How it works
 
@@ -42,9 +43,13 @@ phone on the same Wi-Fi. It can also:
 - import a folder of stems (or a Washed/MultiTracks download, reading its set
   for tempo and sections), guess the key, and put every song on the same part
   tracks (Drums, Keys, BGVs...), mixing a part's stems into one
+- tidy an older set with a track per stem into those part tracks, keeping how
+  each song sounds
 - give each song its own mix: pick a song in the mixer to set its levels and
-  switch parts off for that song only, and save checkpoints of a mix to go back to
+  leave parts out of that song only (instantly, even mid-song), and save
+  checkpoints of a mix to go back to
 - change a song's key without changing its speed, leaving the click alone
+- reorder the setlist, carrying each song's clips with it
 - play a song, listen to Live's meters, and follow up on what it heard
 - remember your room (interface, who's on which input, which outputs go to the
   in-ears) so next week you don't have to say it again
@@ -64,6 +69,8 @@ uv run rig.py mix volume Click -6
 uv run rig.py effect add "Lead Vocal" Compressor --preset "Gentle Squeeze"
 uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170
 uv run rig.py song transpose "Let's Have Church" -2   # down a whole step
+uv run rig.py song move "Let's Have Church" 1
+uv run rig.py track tidy                    # a track per stem → part tracks
 uv run rig.py song play "Let's Have Church"
 ```
 
