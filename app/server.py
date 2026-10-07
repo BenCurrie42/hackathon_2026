@@ -32,7 +32,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app import audio_files, parts, song_key, song_mixes, vendor_set
-from app.actions import ActionFailed, Executor, Listen, run_all, to_rigspec
+from app.actions import ActionFailed, Executor, Listen, SetEq, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
 from app.assistant import _playing_scene as _playing_scene_of
 from app.live import LiveLink, LiveUnavailable
@@ -56,7 +56,7 @@ DIRECT_COMMANDS = {
     "play", "stop", "fire_scene", "load_device", "delete_device", "set_track_name",
     "create_scene", "set_scene", "set_routing", "create_audio_track", "create_midi_track",
     "create_return_track", "get_routing", "set_track_color", "set_clip_gain", "set_clip_active",
-    "transpose_song",
+    "transpose_song", "set_eq_band",
 }
 
 
@@ -415,6 +415,15 @@ class App:
                 pass  # the results still show; the volunteer can ask about them
         return results
 
+    def eq_flat(self, track):
+        """The mixer's Flat button: a track's EQ back to EQ Eight's flat default, in the song on the mixer."""
+        action = SetEq(action="set_eq", track=track, flat_first=True)
+        with self._apply_lock:
+            result = run_all(self.live, [action], self.files, folders=self.folders, mixes=self.mixes,
+                             mix_control=self)[0]
+        if not result["ok"]:
+            raise UserError(result["text"])
+
     def dismiss(self, pid):
         self._pending(pid)
         self.chat.record_outcome(pid, "dismissed")
@@ -641,6 +650,12 @@ def make_handler(app):
                     if not track:
                         raise UserError("Say which track.")
                     app.folders.set_follows_key(track, bool(body.get("follows")))
+                    return self._json(app.state())
+                if path == "/api/eq-flat":
+                    track = str(body.get("track", "")).strip()
+                    if not track:
+                        raise UserError("Say which track.")
+                    app.eq_flat(track)
                     return self._json(app.state())
                 if path == "/api/song-mix":
                     action = body.get("action")

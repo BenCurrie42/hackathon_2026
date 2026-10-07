@@ -67,6 +67,7 @@ Top to bottom, in section-comment order:
 | Mixer | `renderMixer`, `renderMixSong`, `songClip`, `songMix`, `renderCheckpoints`, `buildMixerGroups`, `ensureGroup`, `moveTrack`, `matchColours`, `placeStrips` |
 | Selection and drawer | `keepSelection`, `selectStrip` |
 | Channel strip | `buildMore`, `createStrip`, `wireFader`, `setFaderPosition`, `slider`, `describeRouting`, `paintNote`, `updateStrip`, `updateSongMix`, `paintMeter`, `updateClips`, `deviceRow`, `sendControl`, `loadRouting` |
+| Tone (EQ) | `buildTone`, `updateTone`, `paintTone`, `setBand`, `eqFlat`, `buildHandles`, `wireHandle`, `eqKind`, `bandDb`, `curvePath` |
 | Dialogs | `openDeviceDialog`, `loadPresets`, `DEVICE_HELP`, `openColorDialog`, `openImportDialog`, `showFolder` |
 | Songs (a cue list) | `renderSongs`, `songRow`, `transposer` |
 | Room (a ledger) | `renderRoom` |
@@ -126,6 +127,7 @@ All through `api()`: GET when no body, else JSON POST. Non-2xx responses throw a
 | `POST /api/room` `{add}` or `{remove}` | Room tab: Save and Forget. |
 | `POST /api/track-folder` `{track, folder}` | `moveTrack()`: drag a name plate to a folder, or the drawer's Folder select. |
 | `POST /api/track-key` `{track, follows}` | The drawer's **Changes with the song key** checkbox. Returns state. |
+| `POST /api/eq-flat` `{track}` | The drawer's **Flat** button (`eqFlat`). Returns state. |
 | `POST /api/song-mix` | `songMix()`: the Song mix picker (`pick`) and the Checkpoints dialog (`checkpoint`, `restore`, `delete`). Returns state. |
 | `GET /api/devices` | First open of the add-effect dialog, cached in `stockDevices`. |
 | `GET /api/presets?device=` | Each time the effect select changes. Failures are ignored. |
@@ -140,6 +142,7 @@ All through `api()`: GET when no body, else JSON POST. Non-2xx responses throw a
 | Track name, colour (also folder moves and "Copy folder colours") | `set_track_name`, `set_track_color` |
 | Output routing (loaded when a channel is shown in the drawer) | `get_routing`, `set_routing` |
 | Effects | `load_device`, `delete_device` |
+| Tone (EQ): drag, keys, type, On, Add EQ | `set_eq_band`, `load_device` (EQ Eight) |
 | Songs | `create_scene`, `set_scene` (name or bpm), `fire_scene`, `transpose_song` |
 | Level in a song, Playing / Left out | `set_clip_gain`, `set_mute` (plus `set_clip_active` on to bring back a clip switched off in Live) |
 
@@ -209,7 +212,7 @@ Fader, balance, sends and clip levels all throttle `liveCmd` to about one call p
 
 Below the bank, `#drawer` shows one channel. With nothing selected it reads "Tap a channel to rename it, add an effect or change where it plays." Tapping a name plate (or the strip's own padding) selects it; on phones the pane scrolls so the drawer's first section shows while the channel's fader and Mute stay on screen. Each strip owns its drawer content (`strip._more`, built by `buildMore`), and `keepSelection` swaps it in.
 
-Four sections:
+Five sections:
 
 | Section | Contents |
 | --- | --- |
@@ -217,8 +220,18 @@ Four sections:
 | **Sound** | Mute and Solo (the same state as the strip's buttons), "Mute silences it. Solo plays only this channel.", and **Balance** with its value in words. With a song picked in Song mix and this track playing in it: **In <song>**, a switch reading **Playing in this song** or **Left out of this song** (that song's mute, so it takes effect at once while the song plays), and that song's **Level** (-24 to +12 dB, `set_clip_gain`). |
 | **Reverb and delay** (titled after the return tracks, e.g. "Reverb and Delay") then **Other effects** | One send slider per return track, in percent. Then the track's effects, numbered, each with a remove button that asks first ("Remove Reverb?" … "Undo in Ableton brings it back."), and **Add effect**. |
 | **Where it plays** | **Folder** select, **Copy folder colours to Ableton**, **Plays to** (output type: "The room (main speakers)", "Another output (in-ears, etc.)", "Only the shared effects", plus a channel select when there is a choice), **Changes with the song key** checkbox, and **Level in each song** with one slider per song the track has a clip in. |
+| **Tone (EQ)** | The track's first EQ Eight (`row.eq`), full drawer width. See below. |
 
 For shared effects, Balance, sends, folder and Copy colours are hidden and the effects heading reads "Effects". The key checkbox is hidden for shared effects and MIDI tracks and is checked when `!row.keeps_key`. Output routing is fetched with `get_routing` when the channel is shown in the drawer and again when its output changes.
+
+### Tone (EQ)
+
+An SVG graph, 20 Hz to 20 kHz on a log x axis and ±15 dB on y, with the summed curve of every band that's on and one numbered handle per band. The curve is display only: `bandDb` evaluates textbook (RBJ) biquads at 48 kHz (steep cuts drawn as four times a 12 dB one), not EQ Eight's own filters.
+
+- **Drag** a handle: left-right sets frequency, up-down sets gain (in 0.5 dB steps; only for bell and shelves). Dragging a band that's off turns it on. **Arrow keys** move a focused handle a semitone (Shift: four) or 0.5 dB (Shift: 2 dB). **Double-click** resets gain to 0.
+- Below the graph, the selected band: its **type** select (Live's own type names, labelled in plain words via `eqKind`), an **On** checkbox, and a readout ("1.20 kHz · -3.0 dB · Q 0.71"). **Flat** posts `/api/eq-flat`.
+- `setBand` updates the screen at once and sends `set_eq_band`, throttled to one call per 120 ms while dragging; polls don't redraw the graph during a drag or for 1.5 s after a change, so it doesn't jump back. `updateTone` redraws only when the EQ's JSON signature changes.
+- A track with no EQ Eight shows "No EQ on this channel yet." and **Add EQ** (`load_device` EQ Eight). With a song picked, the help line says the curve is saved with that song.
 
 ### Song mix
 
@@ -227,7 +240,7 @@ The bar above the bank holds **Song mix** (a select listing "Every track" and ev
 With a song picked:
 
 - `buildMixerGroups` keeps only tracks with an audio clip in that song (`songClip(row)`); shared effects stay.
-- The faders, balance, mute and sends are that song's. The server saves changes as they happen and puts them back when the song is picked, started with **Start**, or started in Ableton (see `app/song_mixes.py`). Solo and the main fader are not kept per song.
+- The faders, balance, mute, sends and EQ are that song's. The server saves changes as they happen and puts them back when the song is picked, started with **Start**, or started in Ableton (see `app/song_mixes.py`). Solo and the main fader are not kept per song.
 - Each channel's drawer gets **In <song>**: Playing / Left out and the song's Level. Playing / Left out is the track's mute, saved with the song's mix; Level is clip gain, which Ableton applies when the song starts, with or without the page open.
 - A strip muted in the picked song, or whose clip is switched off there, greys out (`.song-off`) and its note reads "Left out". Bringing it back unmutes it and turns a switched-off clip back on.
 
@@ -266,7 +279,7 @@ Error strings come from the server as full sentences, matching the project rule 
 
 - **Tokens on `:root`**, grouped: ground greys (`--enamel` page, `--recess` slots and inputs, `--face` strips, drawer and dialogs, `--key`, `--key-line`, `--hair`, `--edge`), text (`--text`, `--text-2`, `--legend`), one accent (`--accent` green, `--accent-ink`, `--accent-edge`) plus `--lit-bg`/`--lit-ink` for lit keys, paper (`--paper`, `--paper-edge`, `--ink`, `--ink-2`, `--paper-red`, `--paper-green`), status (`--green`, `--amber`, `--red`, `--red-text`, `--blue`, `--mute`, `--solo`…), type (`--display` Big Shoulders Display, `--body` Source Sans 3, `--mono` is the body face), the two radii `--r1`/`--r2`, `--focus`, and strip geometry (`--strip-w`, `--pad`, `--plate-h`, `--mute-h`, `--throw` fader travel, `--cap-h`, `--cap-w`). Component-local values: `--track` (track colour) and `--tape` (derived plate colour) on `.strip` and the drawer, `--p` (position) on the fader zone and balance bar, `--lit` on meters.
 - **Theme:** dark only, `color-scheme: dark`. No light theme and no `data-theme`.
-- **Sections** (comment banners): fonts, tokens, base, keys and inputs, header, layout, chat, change slip, session pane, mixer, channel strip, drawer, songs, room, dialogs and toasts, phone, song mix.
+- **Sections** (comment banners): fonts, tokens, base, keys and inputs, header, layout, chat, change slip, session pane, mixer, channel strip, drawer, songs, room, dialogs and toasts, phone, song mix, tone (the EQ graph: `.m-tone`, `.eq-*`, `.tone-*`).
 - **Responsive:** one breakpoint for phones and short screens, `(max-width: 820px), (max-height: 500px)`: single column, bottom nav, wider strips with 44px Mute/Solo, the bank snaps sideways, the drawer stacks, the Main meter is hidden, song rows wrap to two lines, toasts sit above the nav. Smaller tweaks at 380px wide and 760px / 560px tall. `env(safe-area-inset-*)` and `viewport-fit=cover` for phones.
 - `@media (pointer: coarse)` turns off the native fader input and shows `.cap-hit`. `@media (forced-colors: active)` draws outlines for states shown by colour. `@media (prefers-reduced-motion: reduce)` stops all animation and transitions.
 - `[hidden] { display: none !important; }` is global, so setting `el.hidden` always works whatever the component's `display` rule is.
@@ -278,6 +291,7 @@ Error strings come from the server as full sentences, matching the project rule 
 - Each strip is `role="group"` labelled "Lead Vocal, track 3". The name plate is a button ("Select Lead Vocal", `aria-pressed` when selected). Mute, Solo and Playing/Left out use `aria-pressed`. Folder buses use `aria-expanded`.
 - Every range input has an `aria-label` and an `aria-valuetext` in words ("68 percent", "Off", "25% left", "+1.5 dB").
 - `:focus-visible` has a white outline. Dialogs are native `<dialog>` with `showModal()` for focus trapping and Esc. The app's own confirm dialog replaces `window.confirm` (which would say "localhost says").
+- EQ handles are focusable `role="slider"` elements labelled "Band 2, Bell" with the band's values as `aria-valuetext`; arrow keys move them.
 - Meters, the running light and the drag handle are `aria-hidden`; the drawer's Folder select is the keyboard path for moving a track.
 
 ## Conventions for contributors

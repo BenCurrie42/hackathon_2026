@@ -24,7 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app import audio_files, fake_live, mixdown, parts, song_key, song_map, song_mixes, vendor_set
+from app import audio_files, eq, fake_live, mixdown, parts, song_key, song_map, song_mixes, vendor_set
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.folders import FolderMemory, classify
@@ -1487,8 +1487,8 @@ class AddTrackWordingTest(unittest.TestCase):
         self.assertEqual(track.describe(), "Add a track “Keys” on input 5/6, with Reverb (Large Hall), balance 50% left")
 
 
-class SongMixTest(FakeLiveCase):
-    """Faders, pan, mute and sends kept per song, put back when the song is picked."""
+class SongMixCase(FakeLiveCase):
+    """A set with two songs, a vocal, keys and a reverb, and the app keeping their mixes."""
 
     def setUp(self):
         super().setUp()
@@ -1512,6 +1512,14 @@ class SongMixTest(FakeLiveCase):
 
     def track(self, name):
         return next(t for t in self.live.snapshot(max_age=0)["tracks"] if t["name"] == name)
+
+    def apply(self, *actions):
+        parsed = Proposal(actions=list(actions)).actions
+        return run_all(self.live, parsed, mixes=self.mixes, mix_control=self.app)
+
+
+class SongMixTest(SongMixCase):
+    """Faders, pan, mute and sends kept per song, put back when the song is picked."""
 
     def test_each_song_gets_its_own_faders_pan_mute_and_sends_back(self):
         self.app.pick_song_mix(0)
@@ -1615,10 +1623,6 @@ class SongMixTest(FakeLiveCase):
         with self.assertRaisesRegex(UserError, "name"):
             self.app.pick_song_mix(2)
 
-    def apply(self, *actions):
-        parsed = Proposal(actions=list(actions)).actions
-        return run_all(self.live, parsed, mixes=self.mixes, mix_control=self.app)
-
     def test_ai_change_for_another_song_saves_it_without_moving_the_faders(self):
         self.app.pick_song_mix(0)
         self.look()
@@ -1709,6 +1713,112 @@ class SongMixTest(FakeLiveCase):
         del mix["tracks"]["keys"]
         self.assertEqual(song_mixes.commands(mix, snap),
                          [("set_volume", {"track_index": 0, "is_return": False, "db": -5.0})])
+
+
+
+class EqRulesTest(unittest.TestCase):
+    """app/eq.py: Live's type names, and the problems a curve has by rule."""
+
+    def band(self, n, kind, hz, db=0.0, q=0.71, on=True):
+        return {"band": n, "on": on, "type": kind, "freq_hz": hz, "gain_db": db, "q": q}
+
+    def test_live_type_names_map_to_one_vocabulary(self):
+        self.assertEqual(eq.kind_of("Low Cut 48"), "low cut 48")
+        self.assertEqual(eq.kind_of("High Pass"), "low cut")
+        self.assertEqual(eq.kind_of("Low Pass 48"), "high cut 48")
+        self.assertEqual(eq.kind_of("Bell"), "bell")
+        self.assertEqual(eq.kind_of("High Shelf"), "high shelf")
+        self.assertIsNone(eq.kind_of("Something New"))
+        self.assertEqual(eq.type_index("bell", ["Low Cut 48", "Low Cut 12", "Low Shelf", "Bell"]), 3)
+
+    def test_a_messed_up_vocal_gets_every_problem_named(self):
+        bands = [self.band(1, "low cut", 450), self.band(2, "bell", 1000, 12, q=6),
+                 self.band(3, "high cut", 4000), self.band(4, "low shelf", 200, 5)]
+        found = " | ".join(eq.problems(bands, "Lead Vocal"))
+        for words in ("below 450 Hz", "boosts 1 kHz by 12.0 dB", "narrow boost", "above 4 kHz", "low end below 200 Hz"):
+            self.assertIn(words, found)
+
+    def test_a_gentle_curve_has_no_problems(self):
+        vocal = [self.band(1, "low cut", 100), self.band(2, "bell", 300, -3, q=1.2), self.band(3, "bell", 4000, 2)]
+        self.assertEqual(eq.problems(vocal, "Lead Vocal"), [])
+        self.assertEqual(eq.problems([self.band(1, "low cut", 35), self.band(2, "bell", 80, 3)], "Bass"), [])
+        self.assertEqual(eq.problems(eq.flat(), "Lead Vocal"), ["no low cut on a vocal (rumble and mic pops come through)"])
+        self.assertEqual(eq.describe(eq.flat()), "flat")
+
+
+class EqTest(SongMixCase):
+    """EQ Eight from the mixer and the assistant, kept per song like the faders."""
+
+    def eq_of(self, name):
+        return eq.bands_of(self.track(name)["eq"])
+
+    def test_set_eq_adds_an_eq_eight_and_shapes_it(self):
+        [result] = self.apply({"action": "set_eq", "track": "Lead Vocal", "bands": [
+            {"band": 1, "type": "low cut", "freq_hz": 100},
+            {"band": 2, "freq_hz": 300, "gain_db": -3, "q": 1.2}]})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("Added EQ Eight", result["text"])
+        self.assertEqual(self.track("Lead Vocal")["devices"], ["EQ Eight"])
+        low, mud = self.eq_of("Lead Vocal")[:2]
+        self.assertEqual((low["type"], low["freq_hz"]), ("low cut", 100.0))
+        self.assertEqual((mud["type"], mud["freq_hz"], mud["gain_db"], mud["q"]), ("bell", 300.0, -3.0, 1.2))
+
+    def test_eq_changes_with_the_song(self):
+        self.live.call("load_device", track_index=0, device_name="EQ Eight")
+        self.app.pick_song_mix(0)
+        self.live.call("set_eq_band", track_index=0, band=2, freq_hz=250, gain_db=-4)  # as the page does
+        self.look()
+        self.app.pick_song_mix(1)
+        self.live.call("set_eq_band", track_index=0, band=2, freq_hz=3000, gain_db=3)
+        self.look()
+
+        self.app.pick_song_mix(0)
+        band = self.eq_of("Lead Vocal")[1]
+        self.assertEqual((band["freq_hz"], band["gain_db"]), (250.0, -4.0))
+        self.app.pick_song_mix(1)
+        band = self.eq_of("Lead Vocal")[1]
+        self.assertEqual((band["freq_hz"], band["gain_db"]), (3000.0, 3.0))
+        self.assertIn("(EQ 2: bell 3 kHz +3.0 dB", self.app.notes())
+
+    def test_eq_for_another_song_waits_for_it(self):
+        self.live.call("load_device", track_index=1, device_name="EQ Eight")
+        self.app.pick_song_mix(0)
+        self.look()
+        [result] = self.apply({"action": "set_eq", "track": "Keys", "song": "Gratitude",
+                               "bands": [{"band": 4, "gain_db": 2.5}]})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("in Gratitude", result["text"])
+        self.assertEqual(self.eq_of("Keys")[3]["gain_db"], 0.0)  # Living Hope is on the mixer
+        self.app.pick_song_mix(1)
+        self.assertEqual(self.eq_of("Keys")[3]["gain_db"], 2.5)
+
+    def test_a_messed_up_eq_is_flagged_and_a_fix_clears_it(self):
+        self.live.call("load_device", track_index=0, device_name="EQ Eight")
+        self.app.pick_song_mix(0)
+        self.live.call("set_eq_band", track_index=0, band=2, freq_hz=800, gain_db=13, q=7)
+        self.live.call("set_eq_band", track_index=0, band=8, on=True, freq_hz=3500)
+        self.assertIn("EQ PROBLEMS", self.app.notes())
+        [result] = self.apply({"action": "set_eq", "track": "Lead Vocal", "flat_first": True, "bands": [
+            {"band": 1, "type": "low cut", "freq_hz": 100},
+            {"band": 2, "freq_hz": 300, "gain_db": -2.5, "q": 1.2},
+            {"band": 3, "freq_hz": 4000, "gain_db": 2}]})
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("EQ PROBLEMS", self.app.notes())
+        self.assertFalse(self.eq_of("Lead Vocal")[7]["on"])  # the high cut went with the flat reset
+        self.look()
+        self.assertEqual(self.mixes.saved("Living Hope")["tracks"]["lead vocal"]["eq"][1]["gain_db"], -2.5)
+
+    def test_flat_button_resets_through_the_server(self):
+        self.live.call("load_device", track_index=0, device_name="EQ Eight")
+        self.live.call("set_eq_band", track_index=0, band=3, gain_db=9)
+        self.app.eq_flat("Lead Vocal")
+        self.assertEqual(eq.describe(self.eq_of("Lead Vocal")), "flat")
+
+    def test_eq_limits_are_tighter_than_the_device(self):
+        with self.assertRaises(ValidationError):
+            Proposal(actions=[{"action": "set_eq", "track": "Keys", "bands": [{"band": 2, "gain_db": 14}]}])
+        with self.assertRaises(ValidationError):
+            Proposal(actions=[{"action": "set_eq", "track": "Keys", "bands": [{"band": 9}]}])
 
 
 if __name__ == "__main__":

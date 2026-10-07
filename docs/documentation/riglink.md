@@ -81,9 +81,11 @@ RigLink never uses a dB formula. `_set_db(param, db)` (volume, sends):
 
 `_parse_db` takes the first whitespace token of the display text, normalizes Unicode minus (U+2212), and `float()`s it (`"-inf"` works). Result is the nearest value Live can display at or above the request, so the returned string, not the request, is the truth. Clip gain (`_set_clip_gain_db`) does the same over `clip.gain` 0..1 using `clip.gain_display_string`, 30 steps. Pan is the one exception: it is clamped to `[param.min, param.max]` and set directly.
 
+The search itself is `_set_by_display(param, wanted, parse)`, for any parameter whose display rises with its value; `_set_db` is it with `_parse_db`. EQ Eight's frequency, gain and Q use it with `_parse_number`, which reads `"1.20 kHz"`, `"250 Hz"`, `"0.71"` or `"-3.5 dB"` as a number (kHz in Hz).
+
 ## Command reference
 
-All 49 entries of `COMMANDS`. `is_return` (bool, default false) selects return tracks wherever shown. "Display string" means Live's own text, e.g. `"-6.0 dB"`.
+All 52 entries of `COMMANDS`. `is_return` (bool, default false) selects return tracks wherever shown. "Display string" means Live's own text, e.g. `"-6.0 dB"`.
 
 ### Connection and introspection
 
@@ -94,7 +96,7 @@ All 49 entries of `COMMANDS`. `is_return` (bool, default false) selects return t
 | `get_snapshot` | none | See below | Whole set in one call. Newer than the other commands; clients fall back if `unknown cmd`. |
 | `list_stock_devices` | none | `{audio_effects, midi_effects, instruments: [names]}` | Browser search depth 2. |
 
-`get_snapshot` result: `song` (as `get_song`), `tracks[]` and `returns[]` (strips: `index, name, is_return, color, meter{peak,average}|null, volume, volume_db, pan, pan_value, mute, solo, sends[{return,level,level_db}], devices[names], output{type,channel}`; tracks add `is_midi, input{type,channel}, clips[{scene_index,name,is_audio,is_playing,length,gain,gain_db,active}]`), `master{volume,volume_db,meter}`, `scenes` (as `list_scenes`), `locators`, `ext_outputs` (Master's Ext. Out channel names, `[]` if Master isn't on Ext. Out). `*_db` is `null` for `-inf`. Meters are peak/average since the previous snapshot (uses the separate `_display_meters` window, which the call then resets).
+`get_snapshot` result: `song` (as `get_song`), `tracks[]` and `returns[]` (strips: `index, name, is_return, color, meter{peak,average}|null, volume, volume_db, pan, pan_value, mute, solo, sends[{return,level,level_db}], devices[names], eq, output{type,channel}`; tracks add `is_midi, input{type,channel}, clips[{scene_index,name,is_audio,is_playing,length,gain,gain_db,active}]`), `master{volume,volume_db,meter}`, `scenes` (as `list_scenes`), `locators`, `ext_outputs` (Master's Ext. Out channel names, `[]` if Master isn't on Ext. Out). `*_db` is `null` for `-inf`. Meters are peak/average since the previous snapshot (uses the separate `_display_meters` window, which the call then resets). `eq` is the track's first EQ Eight as `get_eq` returns it, or `null` if it has none or it can't be read.
 
 ### Tracks
 
@@ -136,6 +138,18 @@ All 49 entries of `COMMANDS`. `is_return` (bool, default false) selects return t
 | `load_device` | `track_index, device_name, preset=None, is_return` | `{track_index, device, preset}` | Selects the track, then `browser.load_item`. Preset match ignores case and `.adv`. Searches only audio_effects, midi_effects, instruments (not Sounds/Drums), to depth 2. Appends to the device chain; blocks Live while loading. |
 | `list_devices` | `track_index, is_return` | `[{index, name, class_name, is_rack}]` | |
 | `delete_device` | `track_index, device_index, is_return` | `{index, name}` | |
+| `device_parameters` | `track_index, device_index, is_return` | `{name, class_name, parameters[{name, value, min, max, display, is_quantized, items}]}` | Every parameter as Live names and shows it. For probing, not used by the app. |
+
+### EQ Eight
+
+The one device whose settings can be changed, and only through these named controls. Frequency, gain and Q are set by `_set_by_display` (above), so Live does every conversion; the filter type is passed back as an index into Live's own type names (`value_items`). Each command uses the track's first EQ Eight (`class_name == "Eq8"`) unless `device_index` is given; `LookupError` if there is none, or if that device isn't an EQ Eight.
+
+| Command | Params | Returns | Notes |
+|---|---|---|---|
+| `get_eq` | `track_index, is_return, device_index=None` | `{device_index, on, types[], bands[{band, on, type_index, type, freq_hz, gain_db, q}]}` | `types` is Live's type menu; `type` is the band's display text; numbers are parsed from display text. `on` is the device's `Device On`. |
+| `set_eq_band` | `track_index, band, is_return, device_index=None, on, type_index, freq_hz, gain_db, q` | that band, as in `get_eq` | `band` 1-8. Only given fields change; `type_index` is clamped to the menu. |
+
+Parameters are looked up by name: `"<band> Filter On A"`, `"<band> Filter Type A"`, `"<band> Frequency A"`, `"<band> Gain A"`, `"<band> Q A"` (A is the curve used in Stereo mode; each band also has a B set). Probed in Live 12.4.6 with `device_parameters`: 84 parameters (`Device On`, `Output`, `Scale`, `Adaptive Q`, then 8 bands × A/B × 5). Displays read `"37.5 Hz"`, `"1000 Hz"`, `"3.23 kHz"`, `"-15.0 dB"`, `"0.71"`. Filter type `value_items` are `High Pass 48dB`, `High Pass 12dB`, `Low Shelf`, `Bell`, `Notch`, `High Shelf`, `Low Pass 12dB`, `Low Pass 48dB`. Frequency and Q are 0..1 internally, so they can only be set through their display text.
 
 ### Meters
 
@@ -203,13 +217,13 @@ Within Live itself, features are probed with `hasattr`/`getattr` (`create_audio_
 | `set_tempo`, `create_scene`, `move_scene`, `set_scene`, `transpose_song`, `count_scene_clips`, `delete_scene`, `fire_scene` | as command table |
 | `add_locator`, `delete_locator`, `jump_to_locator` | as command table |
 
-Not wrapped: `song_files`. Optional args are always sent (as `null` when `None`); RigLink's handlers treat `None` as unset.
+Not wrapped: `song_files`, `device_parameters`, `get_eq`, `set_eq_band` (the app uses `send` / `app/live.py` `call`). Optional args are always sent (as `null` when `None`); RigLink's handlers treat `None` as unset.
 
 Keep in mind: `send` writes a request then blocks reading until a newline, and the 5 s timeout applies to each socket operation. `load_device` or a large `import_audio` can approach that. `app/live.py` adds locking and reconnection on top.
 
 ## Known limitations
 
-- No record-arm, monitoring, effect parameters, rack internals, plugins, User Library presets, MIDI mapping, group tracks (see `docs/td_next.md`).
+- No record-arm, monitoring, effect parameters other than EQ Eight bands, rack internals, plugins, User Library presets, MIDI mapping, group tracks (see `docs/td_next.md`).
 - Device loading searches only stock effects and instruments, depth 2; it appends and cannot choose position. `load_device` changes Live's selected track.
 - `import_audio` targets Session slots on audio tracks only.
 - Locator add/delete move the playhead.
@@ -222,5 +236,5 @@ Keep in mind: `send` writes a request then blocks reading until a newline, and t
 
 ## Discrepancies
 
-- `CLAUDE.md` says RigLink commands cover "record-arm and monitoring" as missing, consistent with code. It describes `live_connection.py` as covering "RigLink"; the client wrappers are missing `song_files` although the docstring says "one per command in RigLink.COMMANDS".
+- `CLAUDE.md` says RigLink commands cover "record-arm and monitoring" as missing, consistent with code. It describes `live_connection.py` as covering "RigLink"; the client wrappers are missing `song_files` and the EQ commands although the docstring says "one per command in RigLink.COMMANDS".
 - Module docstring in `RigLink/__init__.py` says command vocabulary "matches RigSpec", but CLAUDE.md (and the code: scenes, locators, clips, meters) shows it has run ahead of the spec.

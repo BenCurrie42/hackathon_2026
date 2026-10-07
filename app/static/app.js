@@ -1343,13 +1343,15 @@ function buildMore(strip) {
   keyLine.append(followsKey, el("span", "", "Changes with the song key"));
   routing.append(el("h3", "", "Where it plays"), folderLine, copyColours, routeLine, keyLine, clipGains);
 
-  more.append(channel, sound, effects, routing);
+  const tone = buildTone(strip);
+  more.append(channel, sound, effects, routing, tone.section);
   strip._more = more;
   return {
     title, name, summary, colourChip: chip, mute, solo, soundHelp,
     balance, balanceInput: $("input", balance), balanceOut: $("output", balance),
     sendsTitle, sends, devicesTitle, devices, addDevice, folderLine, copyColours, folderSel, routeLine, clipGains,
     song, songTitle, songOn, songLevelInput: $("input", songLevel), songLevelOut: $("output", songLevel), keyLine, followsKey,
+    tone,
   };
 }
 
@@ -1716,6 +1718,7 @@ function updateStrip(strip, row, snap) {
     }
   });
   updateClips(strip, row, snap);
+  updateTone(strip, row);
 }
 
 /* The picked song's own level and On/Off for this channel, and whether it follows the song key. */
@@ -1784,6 +1787,298 @@ function clipGainControl(strip, clip, snap) {
   slider($("input", control), $("output", control),
     (db) => ({ cmd: "set_clip_gain", args: { track_index: strip._row.index, scene_index: clip.scene_index, db } }), dbText);
   return control;
+}
+
+// -- tone: the channel's EQ Eight, drawn as a curve with a handle per band ----------------
+
+const EQ_H = 200;        // viewBox height; the width follows the graph's shape on screen
+const EQ_TOP = 18;       // room for a handle at +15 dB
+const EQ_BOTTOM = 162;   // and at -15 dB, above the frequency labels
+const EQ_MIN_HZ = 20;
+const EQ_MAX_HZ = 20000;
+const EQ_RANGE_DB = 15;  // EQ Eight's own gain range
+const EQ_RATE = 48000;   // for drawing only
+const EQ_GAINED = new Set(["low shelf", "bell", "high shelf"]);
+const EQ_LABELS = {
+  "low cut 48": "Low cut (steep)", "low cut": "Low cut", "low shelf": "Low shelf", "bell": "Bell",
+  "notch": "Notch", "high shelf": "High shelf", "high cut": "High cut", "high cut 48": "High cut (steep)",
+};
+const EQ_GUESSED = Object.keys(EQ_LABELS);
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/* One of EQ_LABELS' keys for Live's name of a filter type (same rules as app/eq.py). */
+function eqKind(text, index) {
+  const t = (text || "").toLowerCase();
+  const steep = t.includes("48");
+  let side = null;
+  if (t.includes("notch")) return "notch";
+  if (t.includes("bell") || t.includes("peak")) return "bell";
+  if (t.includes("shelf")) return t.includes("low") ? "low shelf" : "high shelf";
+  if (t.includes("pass")) side = t.includes("high") ? "low cut" : "high cut";
+  else if (t.includes("cut")) side = t.includes("low") ? "low cut" : "high cut";
+  if (side) return steep ? side + " 48" : side;
+  return EQ_GUESSED[index] || "bell";
+}
+
+const EQ_MID = (EQ_TOP + EQ_BOTTOM) / 2;
+const EQ_HALF = (EQ_BOTTOM - EQ_TOP) / 2;
+const hzToX = (hz, w) => (Math.log(hz / EQ_MIN_HZ) / Math.log(EQ_MAX_HZ / EQ_MIN_HZ)) * w;
+const xToHz = (x, w) => EQ_MIN_HZ * Math.pow(EQ_MAX_HZ / EQ_MIN_HZ, Math.min(1, Math.max(0, x / w)));
+const dbToY = (db) => EQ_MID - (db / EQ_RANGE_DB) * EQ_HALF;
+const yToDb = (y) => Math.max(-EQ_RANGE_DB, Math.min(EQ_RANGE_DB, ((EQ_MID - y) / EQ_HALF) * EQ_RANGE_DB));
+
+function hzText(hz) {
+  return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+/* A band's response in dB at one frequency: the textbook (RBJ) biquads, close enough to draw. */
+function bandDb(b, hz) {
+  const w0 = (2 * Math.PI * b.freq_hz) / EQ_RATE;
+  const cos = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * Math.max(0.1, b.q));
+  const A = Math.pow(10, b.gain_db / 40);
+  const sq = 2 * Math.sqrt(A) * alpha;
+  let c;  // [b0, b1, b2, a0, a1, a2]
+  switch (b.kind.replace(" 48", "")) {
+    case "bell": c = [1 + alpha * A, -2 * cos, 1 - alpha * A, 1 + alpha / A, -2 * cos, 1 - alpha / A]; break;
+    case "low shelf": c = [A * ((A + 1) - (A - 1) * cos + sq), 2 * A * ((A - 1) - (A + 1) * cos), A * ((A + 1) - (A - 1) * cos - sq),
+      (A + 1) + (A - 1) * cos + sq, -2 * ((A - 1) + (A + 1) * cos), (A + 1) + (A - 1) * cos - sq]; break;
+    case "high shelf": c = [A * ((A + 1) + (A - 1) * cos + sq), -2 * A * ((A - 1) + (A + 1) * cos), A * ((A + 1) + (A - 1) * cos - sq),
+      (A + 1) - (A - 1) * cos + sq, 2 * ((A - 1) - (A + 1) * cos), (A + 1) - (A - 1) * cos - sq]; break;
+    case "low cut": c = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    case "high cut": c = [(1 - cos) / 2, 1 - cos, (1 - cos) / 2, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    case "notch": c = [1, -2 * cos, 1, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    default: return 0;
+  }
+  const w = (2 * Math.PI * hz) / EQ_RATE;
+  const mag = (x0, x1, x2) => {
+    const re = x0 + x1 * Math.cos(w) + x2 * Math.cos(2 * w);
+    const im = x1 * Math.sin(w) + x2 * Math.sin(2 * w);
+    return re * re + im * im;
+  };
+  const db = 10 * Math.log10(mag(c[0], c[1], c[2]) / mag(c[3], c[4], c[5]));
+  return b.kind.endsWith("48") ? db * 4 : db;
+}
+
+function eqBands(eq) {
+  return eq.bands.map((b) => ({ ...b, kind: eqKind(b.type, b.type_index) }));
+}
+
+function curvePath(bands, w) {
+  const on = bands.filter((b) => b.on);
+  let d = "";
+  for (let x = 0; x <= w; x += 3) {
+    const hz = xToHz(x, w);
+    const db = on.reduce((sum, b) => sum + bandDb(b, hz), 0);
+    const y = Math.max(EQ_TOP - 12, Math.min(EQ_BOTTOM + 12, dbToY(db)));
+    d += `${x ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }
+  return d;
+}
+
+function svgEl(name, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+
+function buildTone(strip) {
+  const section = el("section", "m-tone");
+  const head = el("div", "tone-head");
+  const title = el("h3", "", "Tone (EQ)");
+  const flat = button("Flat", "text-btn tone-flat", () => eqFlat(strip));
+  head.append(title, flat);
+  const help = el("p", "tone-help");
+  const svg = svgEl("svg", { class: "eq-graph", role: "group" });
+  const grid = svgEl("g", { class: "eq-grid" });
+  const fill = svgEl("path", { class: "eq-fill" });
+  const curve = svgEl("path", { class: "eq-curve" });
+  const handles = svgEl("g", { class: "eq-handles" });
+  svg.append(grid, fill, curve, handles);
+  const band = el("div", "tone-band");
+  const bandName = el("span", "tone-band-name");
+  const typeSel = el("select", "tone-type");
+  typeSel.setAttribute("aria-label", "Filter type");
+  const onLine = el("label", "tone-on");
+  const onBox = el("input");
+  onBox.type = "checkbox";
+  onLine.append(onBox, el("span", "", "On"));
+  const readout = el("output", "tone-readout");
+  band.append(bandName, typeSel, onLine, readout);
+  const none = el("div", "tone-none");
+  none.append(el("p", "", "No EQ on this channel yet."),
+    button("Add EQ", "add-device", () => liveCmd("load_device", { ...target(strip), device_name: "EQ Eight" }).catch(() => {})));
+  section.append(head, help, none, svg, band);
+
+  const t = { section, title, flat, help, svg, grid, fill, curve, handles, band, bandName, typeSel, onBox, readout, none,
+    selected: 1, bands: null, w: 600 };
+  new ResizeObserver(() => layoutTone(strip)).observe(svg);
+  typeSel.addEventListener("change", () => setBand(strip, t.selected, { type_index: parseInt(typeSel.value, 10) }, true));
+  onBox.addEventListener("change", () => setBand(strip, t.selected, { on: onBox.checked }, true));
+  return t;
+}
+
+/* Fit the drawing to the graph's shape on screen, so it fills the width without stretching. */
+function layoutTone(strip) {
+  const t = strip._r.more.tone;
+  const box = t.svg.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const w = Math.round((box.width / box.height) * EQ_H);
+  if (w === t.w && t.grid.childElementCount) return;
+  t.w = w;
+  t.svg.setAttribute("viewBox", `0 0 ${w} ${EQ_H}`);
+  const lines = [];
+  for (const hz of [50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
+    lines.push(svgEl("line", { x1: hzToX(hz, w), x2: hzToX(hz, w), y1: 0, y2: EQ_BOTTOM + 14 }));
+    const label = svgEl("text", { x: hzToX(hz, w), y: EQ_H - 8, "text-anchor": "middle" });
+    label.textContent = hz >= 1000 ? `${hz / 1000}k` : String(hz);
+    lines.push(label);
+  }
+  for (const db of [-12, -6, 6, 12]) lines.push(svgEl("line", { x1: 0, x2: w, y1: dbToY(db), y2: dbToY(db), class: "minor" }));
+  lines.push(svgEl("line", { x1: 0, x2: w, y1: dbToY(0), y2: dbToY(0), class: "zero" }));
+  t.grid.replaceChildren(...lines);
+  paintTone(strip);
+}
+
+/* Change one band on screen at once, and in Live (throttled while dragging). */
+function setBand(strip, n, change, now = false) {
+  const t = strip._r.more.tone;
+  const b = t.bands && t.bands.find((x) => x.band === n);
+  if (!b) return;
+  Object.assign(b, change);
+  if (change.type_index !== undefined) b.kind = eqKind(t.types[change.type_index], change.type_index);
+  t.heldUntil = performance.now() + 1500;
+  paintTone(strip);
+  t.pending = { ...(t.pending || {}), ...change };
+  const push = () => {
+    const args = { ...target(strip), band: n, device_index: t.deviceIndex, ...t.pending };
+    t.pending = null;
+    t.lastPush = Date.now();
+    liveCmd("set_eq_band", args).catch(() => {});
+  };
+  clearTimeout(t.timer);
+  if (now || Date.now() - (t.lastPush || 0) > 120) push();
+  else t.timer = setTimeout(push, 120);
+}
+
+async function eqFlat(strip) {
+  try {
+    render(await api("/api/eq-flat", { track: strip._row.name, is_return: strip._row.is_return }));
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function updateTone(strip, row) {
+  const t = strip._r.more.tone;
+  const eq = row.eq;
+  t.none.hidden = !!eq;
+  t.svg.style.display = eq ? "" : "none";
+  t.band.hidden = !eq;
+  t.flat.hidden = !eq;
+  t.help.textContent = mixSong != null
+    ? `Drag a dot to shape the sound. Saved with ${songName(state.live.snapshot, mixSong) || "this song"}.`
+    : "Drag a dot to shape the sound: left and right is pitch, up and down is louder or quieter.";
+  if (!eq) { t.bands = null; return; }
+  if (t.dragging || performance.now() < (t.heldUntil || 0)) return;
+  const sig = JSON.stringify(eq);
+  if (t.sig === sig) return;
+  t.sig = sig;
+  t.types = eq.types && eq.types.length ? eq.types : EQ_GUESSED;
+  t.deviceIndex = eq.device_index;
+  t.bands = eqBands(eq);
+  const typesSig = t.types.join("|");
+  if (t.typeSel._sig !== typesSig) {
+    t.typeSel._sig = typesSig;
+    t.typeSel.replaceChildren(...t.types.map((text, i) => new Option(EQ_LABELS[eqKind(text, i)] || text, String(i))));
+  }
+  buildHandles(strip);
+  paintTone(strip);
+}
+
+function buildHandles(strip) {
+  const t = strip._r.more.tone;
+  t.handles.replaceChildren(...t.bands.map((b) => {
+    const g = svgEl("g", { class: "eq-handle", tabindex: "0", role: "slider" });
+    g.append(svgEl("circle", { r: 13 }));
+    const label = svgEl("text", { "text-anchor": "middle", dy: "4.5" });
+    label.textContent = String(b.band);
+    g.append(label);
+    g._band = b.band;
+    wireHandle(strip, g);
+    return g;
+  }));
+}
+
+function wireHandle(strip, g) {
+  const t = strip._r.more.tone;
+  const n = g._band;
+  const toGraph = (e) => {
+    const box = t.svg.getBoundingClientRect();
+    return { x: ((e.clientX - box.left) / box.width) * t.w, y: ((e.clientY - box.top) / box.height) * EQ_H };
+  };
+  g.addEventListener("pointerdown", (e) => {
+    t.selected = n;
+    t.dragging = true;
+    g.setPointerCapture(e.pointerId);
+    paintTone(strip);
+    e.preventDefault();
+  });
+  g.addEventListener("pointermove", (e) => {
+    if (!t.dragging || !g.hasPointerCapture(e.pointerId)) return;
+    const p = toGraph(e);
+    const b = t.bands.find((x) => x.band === n);
+    const change = { freq_hz: Math.round(xToHz(p.x, t.w)) };
+    if (!b.on) change.on = true;
+    if (EQ_GAINED.has(b.kind)) change.gain_db = Math.round(yToDb(p.y) * 2) / 2;
+    setBand(strip, n, change);
+  });
+  const end = () => { t.dragging = false; t.heldUntil = performance.now() + 1500; };
+  g.addEventListener("pointerup", end);
+  g.addEventListener("pointercancel", end);
+  g.addEventListener("focus", () => { t.selected = n; paintTone(strip); });
+  g.addEventListener("dblclick", () => setBand(strip, n, { gain_db: 0 }, true));
+  g.addEventListener("keydown", (e) => {
+    const b = t.bands.find((x) => x.band === n);
+    const step = e.shiftKey ? 4 : 1;
+    let change = null;
+    if (e.key === "ArrowLeft") change = { freq_hz: Math.max(EQ_MIN_HZ, Math.round(b.freq_hz / Math.pow(2, step / 12))) };
+    if (e.key === "ArrowRight") change = { freq_hz: Math.min(EQ_MAX_HZ, Math.round(b.freq_hz * Math.pow(2, step / 12))) };
+    if (e.key === "ArrowUp" && EQ_GAINED.has(b.kind)) change = { gain_db: Math.min(EQ_RANGE_DB, b.gain_db + 0.5 * step) };
+    if (e.key === "ArrowDown" && EQ_GAINED.has(b.kind)) change = { gain_db: Math.max(-EQ_RANGE_DB, b.gain_db - 0.5 * step) };
+    if (!change) return;
+    e.preventDefault();
+    setBand(strip, n, change);
+  });
+}
+
+function bandText(b) {
+  const words = [hzText(b.freq_hz)];
+  if (EQ_GAINED.has(b.kind)) words.push(dbText(b.gain_db));
+  if (b.kind === "bell") words.push(`Q ${b.q.toFixed(2)}`);
+  return words.join(" · ");
+}
+
+function paintTone(strip) {
+  const t = strip._r.more.tone;
+  if (!t.bands) return;
+  const path = curvePath(t.bands, t.w);
+  t.curve.setAttribute("d", path);
+  t.fill.setAttribute("d", `${path}L${t.w},${dbToY(0)}L0,${dbToY(0)}Z`);
+  for (const g of t.handles.children) {
+    const b = t.bands.find((x) => x.band === g._band);
+    const y = EQ_GAINED.has(b.kind) ? dbToY(b.gain_db) : dbToY(0);
+    g.setAttribute("transform", `translate(${hzToX(b.freq_hz, t.w).toFixed(1)},${y.toFixed(1)})`);
+    g.classList.toggle("is-off", !b.on);
+    g.classList.toggle("is-selected", b.band === t.selected);
+    g.setAttribute("aria-label", `Band ${b.band}, ${EQ_LABELS[b.kind]}${b.on ? "" : ", off"}`);
+    g.setAttribute("aria-valuetext", bandText(b));
+  }
+  const b = t.bands.find((x) => x.band === t.selected) || t.bands[0];
+  t.bandName.textContent = `Band ${b.band}`;
+  if (document.activeElement !== t.typeSel) t.typeSel.value = String(b.type_index);
+  t.onBox.checked = b.on;
+  t.readout.textContent = bandText(b);
 }
 
 function deviceRow(strip, name, index) {

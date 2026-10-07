@@ -1,7 +1,7 @@
 """Each song's own mixer settings, put back when the song is picked.
 
 A song's clips already carry its part levels and on/off (clip gain, the clip
-activator), and Live applies those itself. Faders, pan, mute and sends belong to
+activator), and Live applies those itself. Faders, pan, mute, sends and EQ belong to
 the track, so they're shared by every song. This keeps them per song: the app
 stores every track's and shared effect's mixer state under the song picked in the
 mixer, saves changes as they happen (from the volunteer, the assistant or Live
@@ -13,6 +13,9 @@ checkpoints the mix it replaces, so a restore can be undone.
 Kept by song name and track name in ~/.holysound/song_mixes.json (or
 $HOLYSOUND_HOME), so moving songs or adding tracks doesn't lose anything. Solo
 isn't kept: it's for listening, not part of a mix. Neither is the Master fader.
+
+EQ is a track's first EQ Eight, band by band (app/eq.py). Adding or removing the
+device isn't per song; a song saved before a track had one leaves it as it is.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ import secrets
 import threading
 import time
 from pathlib import Path
+
+from app import eq
 
 MAX_CHECKPOINTS = 20
 DB_STEP = 0.05  # Live reads faders back to about 0.01 dB; anything smaller isn't a change
@@ -42,6 +47,8 @@ def mix_of(snapshot):
         if row.get("pan_value") is not None:
             state["pan"] = row["pan_value"]
         state["sends"] = {s["return"]: s.get("level_db") for s in row.get("sends", [])}
+        if row.get("eq"):
+            state["eq"] = eq.bands_of(row["eq"])
         return state
 
     return {
@@ -73,6 +80,8 @@ def commands(saved, snapshot):
             for i, send in enumerate(row.get("sends", [])):
                 if send["return"] in sends and _db_differs(sends[send["return"]], send.get("level_db")):
                     calls.append(("set_send", dict(where, return_index=i, db=_db(sends[send["return"]]))))
+            if want.get("eq") and row.get("eq"):
+                calls.extend(eq.commands(where, row["eq"], want["eq"]))
     return calls
 
 
@@ -89,6 +98,8 @@ def same(a, b):
                 return False
             xs, ys = x.get("sends", {}), y.get("sends", {})
             if set(xs) != set(ys) or any(_db_differs(xs[r], ys[r]) for r in xs):
+                return False
+            if ("eq" in x) != ("eq" in y) or ("eq" in x and not eq.same(x["eq"], y["eq"])):
                 return False
     return True
 
@@ -129,6 +140,8 @@ def _strip_words(strip, clip_off=False):
     sends = [f"{r} {v:g} dB" for r, v in strip.get("sends", {}).items() if v is not None and v > SILENT_DB]
     if sends:
         words.append("sends " + ", ".join(sends))
+    if strip.get("eq"):
+        words.append("(EQ " + eq.describe(strip["eq"]) + ")")
     return " ".join(words)
 
 
@@ -195,10 +208,10 @@ class SongMixMemory:
             self._save()
             return True
 
-    def edit(self, song, seed, is_return, track, volume_db=None, pan=None, mute=None, send=None):
+    def edit(self, song, seed, is_return, track, volume_db=None, pan=None, mute=None, send=None, eq_bands=None):
         """Change one track in a song's saved mix. seed() gives a mix to start from if it has none.
 
-        send: (return name, dB).
+        send: (return name, dB). eq_bands: the track's whole EQ, every band (app/eq.py).
         """
         with self._lock:
             entry = self._entry(song)
@@ -214,6 +227,8 @@ class SongMixMemory:
                 strip["mute"] = bool(mute)
             if send is not None:
                 strip.setdefault("sends", {})[send[0]] = float(send[1])
+            if eq_bands is not None:
+                strip["eq"] = [dict(b) for b in eq_bands]
             entry["saved_at"] = self.clock()
             self._save()
 

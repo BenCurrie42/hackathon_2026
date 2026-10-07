@@ -28,9 +28,10 @@ is a small command pair: `mix monitor <track> in|auto|off` and, if needed,
 
 ## 3. Effect settings
 
-`effect` loads a stock device or one of its presets and removes it. It can't
-change any parameter: delay time, feedback, reverb decay, dry/wet, EQ bands.
-The only way to "make the reverb longer" is to pick a different preset.
+`effect` loads a stock device or one of its presets and removes it. Beyond
+that, the only settings it can change are EQ Eight's bands (below). Delay time,
+feedback, reverb decay and dry/wet are still out of reach; the only way to
+"make the reverb longer" is to pick a different preset.
 
 This was on purpose. The model describes intent, never raw numbers, because
 LLM-written parameter values are guesswork. But some adjustments are intent
@@ -45,6 +46,13 @@ The fix keeps the principle: expose a short, named list of safe controls per
 device (Delay time and feedback, Reverb decay, dry/wet everywhere) and set them
 the way volume is already set: by searching the parameter's own display text,
 so Live remains the source of truth for units. No arbitrary parameter access.
+
+**EQ Eight bands: done.** RigLink's `get_eq` / `set_eq_band` (on, type, Hz,
+dB, Q per band) work that way, the assistant's `set_eq` fixes a messed-up EQ
+from rule-based problems (`app/eq.py`), EQ is part of each song's mix, and the
+channel drawer has a draggable curve. Parameter names were probed in Live
+12.4.6 (see `docs/documentation/riglink.md`).
+Delay time/feedback, reverb decay and dry/wet remain.
 
 ## 4. Non-stock and user content
 

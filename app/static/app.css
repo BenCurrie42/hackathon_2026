@@ -580,14 +580,42 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 
 .devices { display: flex; flex-direction: column; gap: 4px; }
 .devices:empty::before { content: "None yet."; font-size: 14.5px; color: var(--text-2); }
-.device { display: grid; grid-template-columns: 1fr 36px; align-items: center; min-height: 36px; border: 1px solid var(--hair); background: var(--recess); border-radius: var(--r2); }
-.device-name { padding: 0 10px; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device { display: grid; grid-template-columns: 28px 1fr 36px; align-items: center; min-height: 36px; border: 1px solid var(--hair); background: var(--recess); border-radius: var(--r2); }
+.device-idx { padding-left: 10px; font: 700 13px/1 var(--body); color: var(--legend); }
+.device-name { padding: 0 10px 0 4px; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .device-x { position: relative; width: 36px; height: 36px; border: 0; background: none; }
 .device-x::before, .device-x::after { content: ""; position: absolute; left: 12px; right: 12px; top: 17px; height: 2px; background: var(--legend); transform: rotate(45deg); }
 .device-x::after { transform: rotate(-45deg); }
 .device-x:hover::before, .device-x:hover::after { background: var(--red-text); }
 .add-device { margin-top: 6px; width: 100%; min-height: 40px; border: 1px dashed var(--edge); background: none; border-radius: var(--r2); color: var(--text-2); font: 700 15px/1 var(--body); }
 .add-device:hover { color: var(--text); border-color: var(--text-2); }
+
+/* tone: the EQ curve takes the drawer's whole width */
+.more > section.m-tone { grid-column: 1 / -1; padding: 16px 0 0; border-left: 0; border-top: 1px solid var(--hair); }
+.tone-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.tone-flat { min-height: 32px; font-size: 14.5px; }
+.tone-help { margin: -4px 0 10px; font-size: 14px; color: var(--text-2); }
+.tone-none p { margin: 0 0 4px; font-size: 14.5px; color: var(--text-2); }
+.tone-none .add-device { max-width: 220px; }
+.eq-graph { display: block; width: 100%; height: 220px; background: var(--recess); border: 1px solid var(--hair); border-radius: var(--r2); touch-action: none; user-select: none; }
+.eq-grid line { stroke: var(--hair); stroke-width: 1; }
+.eq-grid line.minor { stroke-dasharray: 2 4; }
+.eq-grid line.zero { stroke: var(--edge); }
+.eq-grid text { fill: var(--legend); font: 400 11px/1 var(--body); }
+.eq-fill { fill: var(--track, var(--accent)); opacity: 0.14; }
+.eq-curve { fill: none; stroke: var(--track, var(--accent)); stroke-width: 2.5; stroke-linejoin: round; }
+.eq-handle { cursor: grab; outline: none; }
+.eq-handle circle { fill: var(--face); stroke: var(--text-2); stroke-width: 2; }
+.eq-handle text { fill: var(--text); font: 700 12px/1 var(--body); pointer-events: none; }
+.eq-handle.is-off { opacity: 0.4; }
+.eq-handle.is-selected circle { fill: var(--paper); stroke: var(--paper); }
+.eq-handle.is-selected text { fill: var(--ink); }
+.eq-handle:focus-visible circle { stroke: var(--accent); stroke-width: 3; }
+.tone-band { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; font-size: 14.5px; }
+.tone-band-name { font-weight: 700; }
+.tone-on { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
+.tone-on input { width: 18px; height: 18px; min-height: 0; accent-color: var(--accent); }
+.tone-readout { margin-left: auto; font-weight: 700; }
 
 .control { display: grid; grid-template-columns: 74px 1fr 64px; align-items: center; gap: 8px; min-height: 36px; }
 .control-label { font-size: 14px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -736,6 +764,7 @@ dialog::backdrop { background: rgba(8, 7, 6, 0.72); }
   .drawer-name { min-height: 44px; }
   .colour-key, .add-device { min-height: 44px; }
   .control { min-height: 44px; }
+  .eq-graph { height: 180px; }
   .control input[type="range"] { height: 40px; }
 
   .tabs { display: none; }
