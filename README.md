@@ -107,7 +107,7 @@ that Holy Sound can use.
 
 ### From another agent (MCP)
 
-Start the app, then add Holy Sound to any MCP client. For Claude Code:
+Add Holy Sound to any MCP client; the app doesn't need to be running, only Ableton. For Claude Code:
 
 ```sh
 claude mcp add holy-sound -- uv run --directory "$PWD" python -m app.mcp

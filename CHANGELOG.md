@@ -4,14 +4,17 @@ All notable changes are documented here.
 
 ---
 
-## [1.2.1] — unreleased
+## [1.3.0] — 2026-10-08
 
 ### Added
+- **Headless MCP** — `uv run python -m app.mcp` no longer needs the web app: it builds the `App` itself (`build_app`) and answers each tool through the same `api()` the HTTP handler uses (`LocalHolySound`), talking to RigLink directly. A background `follow_live` looks at Live every second, as the page's poll does, so song mixes are still saved and put back. `--fake-live` runs it on a pretend Live Set; `HOLYSOUND_URL` or `--url` goes through a running web app as before.
 - **Expert mode** — `app/expert.py`: a lead engineer agent briefs four specialists (vocals, rhythm, band, playback), who work in parallel, each only on its own tracks and only with fader, pan, mute, sends and EQ. Their changes apply without Apply, for up to three rounds plus a final check, with the song's mix checkpointed "Before expert mode" and "After expert mode". The **Expert mode** button in the chat, `POST /api/expert`, the `expert_mode` MCP tool and `uv run python -m app.expert [goal]`.
 - **RigLink installer** — `scripts/install_riglink.py` links RigLink into Ableton's Remote Scripts and picks it as a Control Surface by editing `Preferences.cfg` with Live closed (backup kept), then opens Live and waits for it. Verified against 12.2.7, 12.4.5 and 12.4.6 settings files.
 - **Live meters** — RigLink `get_live_meters` and `GET /api/meters`: the page polls meters on their own feed at RigLink's ~100 ms tick and draws peak-and-fall, falling back to the snapshot's meters on an older RigLink.
 
 ### Changed
+- **The JSON API is one function** — `api(app, method, path, query, body)` in `app/server.py` holds every route's logic; the HTTP handler keeps access checks, the event stream, static files and status codes.
+- **MCP default** — with no `HOLYSOUND_URL`, the MCP server runs headless instead of looking for the app on port 8765. A running web app and a headless MCP don't share pending proposals or the chat.
 - **Play starts the picked song** — with a song picked in Song mix, the header's Play button fires that song's scene and reads "Play <song>".
 - **README** rewritten as a short pitch, with the finals demo video.
 
