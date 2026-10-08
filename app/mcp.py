@@ -1,22 +1,28 @@
 """Holy Sound as an MCP server, so any agent can run the Sunday set.
 
-    uv run python -m app.mcp                         # the app at http://127.0.0.1:8765
-    HOLYSOUND_URL=http://127.0.0.1:9000 uv run python -m app.mcp
+    uv run python -m app.mcp                         # headless: no web app needed
+    uv run python -m app.mcp --fake-live             # headless, on a pretend Live Set
+    HOLYSOUND_URL=http://127.0.0.1:8765 uv run python -m app.mcp   # through the running web app
 
-A thin layer over the web app's JSON API (app/server.py): the app must be
-running (`uv run python -m app`, or `--fake-live` without Ableton). The agent's
-changes go through the same actions, validation and Apply as the built-in
-assistant's, and show on every open page as a proposal.
+Headless (the default), it runs the app's own App and JSON API (app/server.py `api`)
+in this process and talks to RigLink itself, so only Ableton has to be open. With
+HOLYSOUND_URL it is a thin layer over a running web app instead, and the agent's
+proposals show on every open page. Either way the agent's changes go through the
+same actions, validation and Apply as the built-in assistant's.
 
 MCP over stdio, by hand: newline-delimited JSON-RPC 2.0 on stdin/stdout, no
-SDK (the project's dependencies are fixed). Only tools are offered.
+SDK (the project's dependencies are fixed). Only tools are offered. Stdout is the
+protocol, so nothing else may print to it.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
+import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +31,7 @@ from pathlib import Path
 from app.assistant import _tools
 
 DEFAULT_URL = "http://127.0.0.1:8765"
+FOLLOW_SECONDS = 1.0  # headless: how often to look at Live, as the page's poll does
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 TIMEOUT = 600  # seconds; a chat turn or an Apply that loads devices can take a while
 
@@ -66,6 +73,48 @@ class HolySound:
 
     def post(self, path, body=None):
         return self.request("POST", path, body or {})
+
+
+class LocalHolySound(HolySound):
+    """The app itself, in this process: the same API as over HTTP, with no server running."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def request(self, method, path, body=None, raw=False):
+        from app.actions import _sentence
+        from app.assistant import AssistantUnavailable
+        from app.live import LiveUnavailable
+        from app.server import UserError, api
+        from live_control.live_connection import RigLinkError
+
+        route, _, query = path.partition("?")
+        query = dict(urllib.parse.parse_qsl(query))
+        try:
+            result = api(self.app, method, route, query, body)
+        except (UserError, LiveUnavailable, AssistantUnavailable) as e:
+            raise HolySoundError(str(e)) from e
+        except RigLinkError as e:
+            raise HolySoundError(_sentence(e)) from e
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            raise HolySoundError("Something went wrong inside Holy Sound. Try again; if it keeps "
+                                 "happening, restart the agent's Holy Sound server.") from e
+        if result is None:
+            raise HolySoundError("Not found.")
+        if isinstance(result, bytes):
+            return result
+        return json.loads(json.dumps(result))  # exactly what the HTTP API would have sent
+
+
+def follow_live(app, stop, every=FOLLOW_SECONDS):
+    """Look at Live on a timer, as the page's poll does, so each song's mix is saved as it
+    changes and put back when that song starts, even while no agent is calling a tool."""
+    while not stop.wait(every):
+        try:
+            app.live_state()
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
 
 
 # -- tools ----------------------------------------------------------------------
@@ -335,7 +384,7 @@ def handle(hs, message):
         return ok({
             "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "holy-sound", "version": "1.2.0"},
+            "serverInfo": {"name": "holy-sound", "version": "1.3.0"},
             "instructions": (
                 "Holy Sound runs a church worship team's Ableton Live set. Read read_session first. "
                 "Make changes with propose_changes then apply_changes; say what you want in intent "
@@ -375,11 +424,29 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, hs=None):
             stdout.flush()
 
 
-def main():
+def main(argv=None):
     from app.server import load_dotenv
 
-    load_dotenv()  # HOLYSOUND_URL may be in .env
-    serve()
+    parser = argparse.ArgumentParser(description="Holy Sound's MCP server, over stdio.")
+    parser.add_argument("--url", help="Go through the web app running here instead of headless "
+                                      "(or set HOLYSOUND_URL).")
+    parser.add_argument("--fake-live", action="store_true", help="Headless, on a pretend Live Set.")
+    args = parser.parse_args(argv)
+    load_dotenv()  # HOLYSOUND_URL and the AI provider's settings may be in .env
+    url = args.url or os.environ.get("HOLYSOUND_URL")
+    if url:
+        return serve(hs=HolySound(url))
+
+    from app.server import build_app
+
+    app = build_app(fake_live=args.fake_live)
+    stop = threading.Event()
+    threading.Thread(target=follow_live, args=(app, stop), daemon=True).start()
+    try:
+        serve(hs=LocalHolySound(app))
+    finally:
+        stop.set()
+        app.live.close()
 
 
 if __name__ == "__main__":

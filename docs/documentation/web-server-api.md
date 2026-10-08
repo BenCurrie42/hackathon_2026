@@ -45,7 +45,9 @@ flowchart LR
   A -->|export| W[to_rigspec + render]
 ```
 
-- `App` holds all state and logic; `make_handler(app)` returns a `BaseHTTPRequestHandler` subclass closed over it. Handlers contain routing only.
+- `App` holds all state and logic; `make_handler(app)` returns a `BaseHTTPRequestHandler` subclass closed over it.
+- `api(app, method, path, query, body)` is every JSON route: it returns a dict, the bytes of an export, or `None` for no such route, and raises `UserError` / `LiveUnavailable` / `AssistantUnavailable` / `RigLinkError`. The handler adds access checks, `/api/events`, static files and turning those errors into status codes. The headless MCP server ([mcp.md](mcp.md)) calls `api` directly.
+- `build_app(fake_live, key)` builds the `App` over Live on port 9877 (or a pretend Live), with room memory and `imports.json`; `main` and the headless MCP both use it.
 - `App.state()` is the single payload most endpoints return. Keys: `live` (`connected`, `snapshot`, `message`), `ai` (`ready`, `message`), `chat` (transcript, proposals expanded via `describe_proposal`), `busy`, `usage`, `colors`, `folders`, `room`, `activity`, `demo`, `song_mix` (see [Song mixes](#song-mixes)), `applying` (see [Apply progress](#apply-progress)).
 - `activity` lists tracks the assistant touched in the last `AI_GLOW_SECONDS` (3 s); `App.touch` is passed to `run_all` as `on_touch`.
 - Snapshot tracks get a `folder` field and a `keeps_key` field (true if a song transpose leaves the track alone) added by `App.with_folders` (see [audio-analysis-and-memory.md](audio-analysis-and-memory.md)).

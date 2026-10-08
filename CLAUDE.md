@@ -276,7 +276,7 @@ app/                            Web app: chat + mixer, `uv run python -m app`
                                 assistant, rule-based EQ problems, set_eq_band diffs
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
     mcp.py                      MCP server (stdio JSON-RPC, stdlib): any agent drives the
-                                running app's JSON API
+                                app's JSON API, headless in-process or over a running app
     static/                     The page: HTML/CSS/JS, served as-is
 tests/                          unittest suite; needs neither Live nor an API key.
                                 `uv run python -m unittest` runs all of it

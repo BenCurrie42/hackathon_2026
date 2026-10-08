@@ -1,6 +1,6 @@
 # Holy Sound
 
-Describe your Sunday, get a working Ableton Live session. Holy Sound builds and runs a Live set for a church worship team from a plain-English chat. Product framing is in the top-level [README](../../README.md); what is missing, ranked, is in [td_next.md](../td_next.md). Current version: 1.2.0 (see the [changelog](../../CHANGELOG.md)).
+Describe your Sunday, get a working Ableton Live session. Holy Sound builds and runs a Live set for a church worship team from a plain-English chat. Product framing is in the top-level [README](../../README.md); what is missing, ranked, is in [td_next.md](../td_next.md). Current version: 1.3.0 (see the [changelog](../../CHANGELOG.md)).
 
 This folder is mirrored to the GitHub wiki: edit the pages here, then publish them with `scripts/publish_wiki.py`.
 

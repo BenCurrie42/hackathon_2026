@@ -499,6 +499,146 @@ class UserError(Exception):
     """A problem to show the volunteer as-is."""
 
 
+def api(app, method, path, query=None, body=None):
+    """One JSON API call: a dict to answer with, the bytes of a file, or None for no such route.
+
+    The HTTP handler and the headless MCP server (app/mcp.py) both answer through this, so
+    the two can't drift. Raises UserError, LiveUnavailable, AssistantUnavailable or
+    RigLinkError for the caller to put in a sentence.
+    """
+    query = query or {}
+    body = body or {}
+    if method == "GET":
+        if path == "/api/state":
+            return app.state()
+        if path == "/api/meters":
+            return {"meters": app.live.meters()}
+        if path == "/api/notes":
+            return {"notes": app.notes()}
+        if path == "/api/presets":
+            return {"presets": app.live.presets(query.get("device", ""))}
+        if path == "/api/devices":
+            return {"devices": app.live.stock_devices()}
+        if path == "/api/folders":
+            try:
+                return audio_files.browse(query.get("path"))
+            except audio_files.AudioFileError as e:
+                raise UserError(str(e)) from e
+        match = re.fullmatch(r"/api/proposals/(\d+)/export", path)
+        if match:
+            data, _notes = app.export(match.group(1))
+            return data
+        if path == "/api/proposals/export-notes":
+            p = app.chat.proposal(query.get("id", ""))
+            notes = to_rigspec(p["actions"])[1] if p else []
+            return {"notes": notes}
+        return None
+    if method != "POST":
+        return None
+    if path == "/api/chat":
+        text = str(body.get("message", "")).strip()
+        if not text:
+            raise UserError("Type a message first.")
+        if app.chat.busy:
+            raise UserError("Still working on the last message. One moment.")
+        app.send_message(text)
+        return app.state()
+    if path == "/api/expert":
+        result = app.expert(str(body.get("goal", "")))
+        return dict(app.state(), expert=result)
+    if path == "/api/import":
+        if app.chat.busy:
+            raise UserError("Still working on the last message. One moment.")
+        folder = str(body.get("folder", "")).strip()
+        if not folder:
+            raise UserError("Pick a folder first.")
+        if body.get("report_only"):  # an outside agent reads it instead of the assistant
+            return {"report": app.measure_folder(folder)[2]}
+        app.import_folder(folder, str(body.get("note", "")))
+        return app.state()
+    if path == "/api/room":
+        if app.room is None:
+            raise UserError("Memory isn't available.")
+        if body.get("add"):
+            app.room.add([str(body["add"])])
+        if body.get("remove") is not None:
+            app.room.remove([int(body["remove"])])
+        return app.state()
+    if path == "/api/track-folder":
+        track = str(body.get("track", "")).strip()
+        if not track:
+            raise UserError("Say which track to move.")
+        try:
+            app.folders.move(track, body.get("folder"))
+        except ValueError as e:
+            raise UserError(str(e))
+        return app.state()
+    if path == "/api/track-key":
+        track = str(body.get("track", "")).strip()
+        if not track:
+            raise UserError("Say which track.")
+        app.folders.set_follows_key(track, bool(body.get("follows")))
+        return app.state()
+    if path == "/api/eq-flat":
+        track = str(body.get("track", "")).strip()
+        if not track:
+            raise UserError("Say which track.")
+        app.eq_flat(track)
+        return app.state()
+    if path == "/api/song-mix":
+        action = body.get("action")
+        if action == "pick":
+            index = body.get("scene_index")
+            app.pick_song_mix(None if index is None or index == "" else int(index))
+        elif action == "checkpoint":
+            app.checkpoint_song_mix(str(body.get("label") or ""))
+        elif action == "restore":
+            app.restore_song_mix(str(body.get("id", "")))
+        elif action == "delete":
+            app.mixes.delete_checkpoint(app._current_song(), str(body.get("id", "")))
+        else:
+            raise UserError("The page asked for something the song mix can't do.")
+        return app.state()
+    if path == "/api/proposals":
+        actions = body.get("actions")
+        if not isinstance(actions, list):
+            raise UserError("Send the changes as a list of actions.")
+        pid = app.propose(actions, str(body.get("text") or "").strip() or None)
+        return {"proposal": describe_proposal(app.chat.proposal(pid))}
+    if path == "/api/reset":
+        app.chat.reset()
+        return app.state()
+    match = re.fullmatch(r"/api/proposals/(\d+)/(apply|dismiss)", path)
+    if match:
+        pid, verb = match.groups()
+        if verb == "apply":
+            app.apply(pid)
+        else:
+            app.dismiss(pid)
+        return app.state()
+    if path == "/api/live":
+        cmd = body.get("cmd")
+        if cmd not in DIRECT_COMMANDS:
+            raise UserError("The app can't do that from here.")
+        args = body.get("args") or {}
+        if not isinstance(args, dict):
+            raise UserError("The page sent something the app couldn't read.")
+        old_name = app.track_name(args) if cmd == "set_track_name" else None
+        old_song = app.scene_name(args) if cmd == "set_scene" and args.get("name") else None
+        if cmd == "transpose_song":
+            # Click, guide and anything the volunteer opted out keep their key.
+            args["skip_tracks"] = app.folders.kept_tracks(app.live.snapshot()["tracks"])
+        result = app.live.call(cmd, **args)
+        if old_name and args.get("name"):
+            app.folders.rename(old_name, str(args["name"]))
+        if old_song:
+            app.mixes.rename(old_song, str(args["name"]))
+        if cmd == "fire_scene" and app.scene_name(args):
+            app.pick_song_mix(int(args["scene_index"]))  # starting a song here puts its mix on
+        return {"result": result, "live": app.live_state()}
+    return None
+
+
 def make_handler(app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "HolySound"
@@ -590,40 +730,20 @@ def make_handler(app):
                 return self._error("Not allowed.", HTTPStatus.FORBIDDEN)
 
             try:
-                if url.path == "/api/state":
-                    return self._json(app.state())
                 if url.path == "/api/events":
                     return self._events()
-                if url.path == "/api/meters":
-                    return self._json({"meters": app.live.meters()})
-                if url.path == "/api/notes":
-                    return self._json({"notes": app.notes()})
-                if url.path == "/api/presets":
-                    device = parse_qs(url.query).get("device", [""])[0]
-                    return self._json({"presets": app.live.presets(device)})
-                if url.path == "/api/devices":
-                    return self._json({"devices": app.live.stock_devices()})
-                if url.path == "/api/folders":
-                    path = parse_qs(url.query).get("path", [None])[0]
-                    try:
-                        return self._json(audio_files.browse(path))
-                    except audio_files.AudioFileError as e:
-                        raise UserError(str(e)) from e
-                match = re.fullmatch(r"/api/proposals/(\d+)/export", url.path)
-                if match:
-                    data, _notes = app.export(match.group(1))
+                query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                result = api(app, "GET", url.path, query)
+                if isinstance(result, bytes):
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Disposition", 'attachment; filename="Holy Sound.als"')
-                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Length", str(len(result)))
                     self.end_headers()
-                    self.wfile.write(data)
+                    self.wfile.write(result)
                     return
-                if url.path == "/api/proposals/export-notes":
-                    pid = parse_qs(url.query).get("id", [""])[0]
-                    p = app.chat.proposal(pid)
-                    notes = to_rigspec(p["actions"])[1] if p else []
-                    return self._json({"notes": notes})
+                if result is not None:
+                    return self._json(result)
                 return self._static(url.path)
             except (UserError, LiveUnavailable) as e:
                 return self._error(str(e))
@@ -642,107 +762,9 @@ def make_handler(app):
             path = urlparse(self.path).path
             try:
                 body = self._body()
-                if path == "/api/chat":
-                    text = str(body.get("message", "")).strip()
-                    if not text:
-                        raise UserError("Type a message first.")
-                    if app.chat.busy:
-                        raise UserError("Still working on the last message. One moment.")
-                    app.send_message(text)
-                    return self._json(app.state())
-                if path == "/api/expert":
-                    result = app.expert(str(body.get("goal", "")))
-                    return self._json(dict(app.state(), expert=result))
-                if path == "/api/import":
-                    if app.chat.busy:
-                        raise UserError("Still working on the last message. One moment.")
-                    folder = str(body.get("folder", "")).strip()
-                    if not folder:
-                        raise UserError("Pick a folder first.")
-                    if body.get("report_only"):  # an outside agent reads it instead of the assistant
-                        return self._json({"report": app.measure_folder(folder)[2]})
-                    app.import_folder(folder, str(body.get("note", "")))
-                    return self._json(app.state())
-                if path == "/api/room":
-                    if app.room is None:
-                        raise UserError("Memory isn't available.")
-                    if body.get("add"):
-                        app.room.add([str(body["add"])])
-                    if body.get("remove") is not None:
-                        app.room.remove([int(body["remove"])])
-                    return self._json(app.state())
-                if path == "/api/track-folder":
-                    track = str(body.get("track", "")).strip()
-                    if not track:
-                        raise UserError("Say which track to move.")
-                    try:
-                        app.folders.move(track, body.get("folder"))
-                    except ValueError as e:
-                        raise UserError(str(e))
-                    return self._json(app.state())
-                if path == "/api/track-key":
-                    track = str(body.get("track", "")).strip()
-                    if not track:
-                        raise UserError("Say which track.")
-                    app.folders.set_follows_key(track, bool(body.get("follows")))
-                    return self._json(app.state())
-                if path == "/api/eq-flat":
-                    track = str(body.get("track", "")).strip()
-                    if not track:
-                        raise UserError("Say which track.")
-                    app.eq_flat(track)
-                    return self._json(app.state())
-                if path == "/api/song-mix":
-                    action = body.get("action")
-                    if action == "pick":
-                        index = body.get("scene_index")
-                        app.pick_song_mix(None if index is None or index == "" else int(index))
-                    elif action == "checkpoint":
-                        app.checkpoint_song_mix(str(body.get("label") or ""))
-                    elif action == "restore":
-                        app.restore_song_mix(str(body.get("id", "")))
-                    elif action == "delete":
-                        app.mixes.delete_checkpoint(app._current_song(), str(body.get("id", "")))
-                    else:
-                        raise UserError("The page asked for something the song mix can't do.")
-                    return self._json(app.state())
-                if path == "/api/proposals":
-                    actions = body.get("actions")
-                    if not isinstance(actions, list):
-                        raise UserError("Send the changes as a list of actions.")
-                    pid = app.propose(actions, str(body.get("text") or "").strip() or None)
-                    return self._json({"proposal": describe_proposal(app.chat.proposal(pid))})
-                if path == "/api/reset":
-                    app.chat.reset()
-                    return self._json(app.state())
-                match = re.fullmatch(r"/api/proposals/(\d+)/(apply|dismiss)", path)
-                if match:
-                    pid, verb = match.groups()
-                    if verb == "apply":
-                        app.apply(pid)
-                    else:
-                        app.dismiss(pid)
-                    return self._json(app.state())
-                if path == "/api/live":
-                    cmd = body.get("cmd")
-                    if cmd not in DIRECT_COMMANDS:
-                        raise UserError("The app can't do that from here.")
-                    args = body.get("args") or {}
-                    if not isinstance(args, dict):
-                        raise UserError("The page sent something the app couldn't read.")
-                    old_name = app.track_name(args) if cmd == "set_track_name" else None
-                    old_song = app.scene_name(args) if cmd == "set_scene" and args.get("name") else None
-                    if cmd == "transpose_song":
-                        # Click, guide and anything the volunteer opted out keep their key.
-                        args["skip_tracks"] = app.folders.kept_tracks(app.live.snapshot()["tracks"])
-                    result = app.live.call(cmd, **args)
-                    if old_name and args.get("name"):
-                        app.folders.rename(old_name, str(args["name"]))
-                    if old_song:
-                        app.mixes.rename(old_song, str(args["name"]))
-                    if cmd == "fire_scene" and app.scene_name(args):
-                        app.pick_song_mix(int(args["scene_index"]))  # starting a song here puts its mix on
-                    return self._json({"result": result, "live": app.live_state()})
+                result = api(app, "POST", path, body=body)
+                if result is not None:
+                    return self._json(result)
                 return self._error("Not found.", HTTPStatus.NOT_FOUND)
             except UserError as e:
                 return self._error(str(e))
@@ -820,6 +842,19 @@ def lan_address():
             return "127.0.0.1"
 
 
+def build_app(fake_live=False, key=None):
+    """The App over Ableton, or over a pretend Live Set: what the web app and the headless MCP run."""
+    live_port = 9877
+    if fake_live:
+        from app import fake_live as pretend
+
+        fake_server, _ = pretend.serve(port=0)
+        live_port = fake_server.server_address[1]
+    room = RoomMemory()
+    return App(LiveLink(port=live_port), Conversation(room=room), key=key, demo=fake_live,
+               imports_path=room.path.with_name("imports.json"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Holy Sound: describe your Sunday, get a working Ableton set.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -836,17 +871,7 @@ def main(argv=None):
 
         print(list_models_text())
         return
-    live_port = 9877
-    if args.fake_live:
-        from app import fake_live
-
-        fake_server, _ = fake_live.serve(port=0)
-        live_port = fake_server.server_address[1]
-
-    key = secrets.token_urlsafe(9) if args.lan else None
-    room = RoomMemory()
-    app = App(LiveLink(port=live_port), Conversation(room=room), key=key, demo=args.fake_live,
-              imports_path=room.path.with_name("imports.json"))
+    app = build_app(fake_live=args.fake_live, key=secrets.token_urlsafe(9) if args.lan else None)
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), make_handler(app))
     server.daemon_threads = True

@@ -1869,14 +1869,20 @@ class McpTest(StemFolderCase):
         self.live.call("create_audio_track", name="Keys")
         room = RoomMemory(Path(self._tmp.name) / "room.json")
         self.app = App(self.live, Conversation(client_factory=lambda: None, room=room))
-        self.http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
-        threading.Thread(target=self.http.serve_forever, daemon=True).start()
-        self.hs = mcp.HolySound("http://%s:%d" % self.http.server_address)
+        self.http = None
+        self.hs = self.client()
         self._ids = iter(range(1, 1000))
 
+    def client(self):
+        """Over HTTP to a running web app."""
+        self.http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+        return mcp.HolySound("http://%s:%d" % self.http.server_address)
+
     def tearDown(self):
-        self.http.shutdown()
-        self.http.server_close()
+        if self.http:
+            self.http.shutdown()
+            self.http.server_close()
         self.live.close()
         self.server.shutdown()
         self.server.server_close()
@@ -1964,6 +1970,59 @@ class McpTest(StemFolderCase):
         text, failed = self.tool("read_session")
         self.assertTrue(failed)
         self.assertIn("isn't running", text)
+
+
+class McpHeadlessTest(McpTest):
+    """The same tools with no web app: app/mcp.py runs the App and its API in-process."""
+
+    def client(self):
+        return mcp.LocalHolySound(self.app)
+
+    def test_app_not_running_is_a_sentence(self):
+        self.skipTest("headless has no web app to be missing")
+
+    def test_export_writes_the_file(self):
+        text, failed = self.tool("propose_changes", actions=[
+            {"action": "add_track", "name": "Click", "kind": "audio"}])
+        self.assertFalse(failed, text)
+        pid = next(iter(self.app.chat.proposals))
+        out = Path(self._tmp.name) / "Sunday.als"
+        text, failed = self.tool("export_session_file", proposal_id=pid, path=str(out))
+        self.assertFalse(failed, text)
+        self.assertEqual(out.read_bytes()[:2], b"\x1f\x8b")
+
+    def test_a_bug_is_a_sentence_not_a_crash(self):
+        with mock.patch.object(self.app, "notes", side_effect=RuntimeError("boom")), \
+                mock.patch("traceback.print_exc"):
+            text, failed = self.tool("read_session")
+        self.assertTrue(failed)
+        self.assertIn("Something went wrong", text)
+
+
+class HeadlessFollowTest(SongMixCase):
+    """With no page polling, the headless MCP looks at Live itself so song mixes keep up."""
+
+    def test_a_fader_move_is_saved_to_the_song_with_no_tool_call(self):
+        self.app.pick_song_mix(0)  # Living Hope saved at 0 dB
+        self.now[0] += 10
+        self.live.call("set_volume", track_index=0, db=-6.0)
+        before = self.mixes.saved("Living Hope")
+        stop = threading.Event()
+        follower = threading.Thread(target=mcp.follow_live, args=(self.app, stop, 0.01))
+        follower.start()
+        try:
+            for _ in range(300):
+                if self.mixes.saved("Living Hope") != before:
+                    break
+                threading.Event().wait(0.01)
+        finally:
+            stop.set()
+            follower.join()
+
+        self.live.call("set_volume", track_index=0, db=-20.0)
+        self.app.pick_song_mix(1)
+        self.app.pick_song_mix(0)
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -6.0, places=1)
 
 
 class CrewModel:

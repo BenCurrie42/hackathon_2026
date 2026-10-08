@@ -1,18 +1,17 @@
 # MCP server
 
-`app/mcp.py` lets any MCP agent (Claude Code, Claude Desktop, Cursor, ...) run the Sunday set: read what's in it, propose changes, apply them. It is a thin layer over the web app's JSON API ([web-server-api.md](web-server-api.md)), so the app must be running. An agent's changes go through the same actions, validation and Apply as the built-in assistant ([assistant-and-actions.md](assistant-and-actions.md)), and show on every open page as a proposal.
+`app/mcp.py` lets any MCP agent (Claude Code, Claude Desktop, Cursor, ...) run the Sunday set: read what's in it, propose changes, apply them. It answers through the web app's JSON API ([web-server-api.md](web-server-api.md)) in one of two ways:
+
+- **Headless** (the default): it builds the `App` itself and calls `api()` in-process, talking to RigLink on its own. Only Ableton has to be open.
+- **Through the web app**: with `HOLYSOUND_URL` (or `--url`) set, it sends the same calls over HTTP to a running app, and the agent's proposals show on every open page.
+
+Either way an agent's changes go through the same actions, validation and Apply as the built-in assistant ([assistant-and-actions.md](assistant-and-actions.md)).
 
 Related pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assistant-and-actions.md), [testing-and-development.md](testing-and-development.md).
 
 ## Setup
 
-Start the app (with Ableton, or `--fake-live` without it):
-
-```
-uv run python -m app --fake-live --no-browser
-```
-
-Add the server to the agent. Claude Code, from the repo root:
+Open Ableton with RigLink (see [riglink.md](riglink.md)); the web app needn't run. Add the server to the agent. Claude Code, from the repo root:
 
 ```
 claude mcp add holy-sound -- uv run --directory "$PWD" python -m app.mcp
@@ -27,9 +26,21 @@ Then `/mcp` in Claude Code (or restart it) to load the tools. Claude Desktop or 
 }}}
 ```
 
-`HOLYSOUND_URL` (environment or `.env`) points it at an app on another port; default `http://127.0.0.1:8765`. The server always reaches the app as localhost, so the `--lan` key isn't needed.
+Add `--fake-live` to the args to try it on a pretend Live Set without Ableton.
+
+To go through a running web app instead, set `HOLYSOUND_URL` (environment or `.env`), e.g. `http://127.0.0.1:8765`, or pass `--url`. The server reaches the app as localhost, so the `--lan` key isn't needed.
+
+### Headless and the web app together
+
+They're separate processes with separate `App`s. Both can stay connected to RigLink (it serves several clients), but they don't share pending proposals, the chat, or which song the mixer is on, and both write `~/.holysound/*.json` (last save wins). Run one or the other, or point the MCP at the app with `HOLYSOUND_URL`.
+
+### Song mixes headless
+
+The page's poll is what saves fader moves into the current song and puts a song's mix on when it starts (`App.follow_mix`, inside `App.live_state`). With no page, `follow_live` does that on a background thread every `FOLLOW_SECONDS` (1 s).
 
 ## Tools
+
+The API column is the route; headless calls the same route through `api()`.
 
 | Tool | API | What it does |
 | --- | --- | --- |
@@ -55,18 +66,18 @@ Errors come back as tool results with `isError: true` and the app's own sentence
 
 Newline-delimited JSON-RPC 2.0 on stdin/stdout, written by hand (no `mcp` package; the dependency list is fixed). Handled: `initialize` (echoes the client's protocol version if it's one of `2025-06-18`, `2025-03-26`, `2024-11-05`, else the newest; capabilities `tools` only; `instructions` tell the agent to read first and speak in intent), `ping`, `tools/list`, `tools/call`. Notifications get no reply; anything else is `-32601`. Bad JSON is `-32700`.
 
-The HTTP client (`HolySound`) uses `urllib` with a 600 s timeout, since a chat turn or an Apply that loads devices can be slow.
+The HTTP client (`HolySound`) uses `urllib` with a 600 s timeout, since a chat turn or an Apply that loads devices can be slow. `LocalHolySound` has the same `get` / `post` / `request` and turns the app's exceptions into the same sentences the HTTP handler sends; an unexpected error logs its traceback to stderr (stdout is the protocol) and answers "Something went wrong inside Holy Sound."
 
 ## Testing
 
-`McpTest` in `tests/test_app.py` runs `mcp.serve` over in-memory stdio against a real `App` and HTTP server on the fake Live: the handshake and tool list, propose then apply (and applying twice is refused), a bad proposal, the import report, browsing, room memory, and the app not running.
+`McpTest` in `tests/test_app.py` runs `mcp.serve` over in-memory stdio against a real `App` and HTTP server on the fake Live: the handshake and tool list, propose then apply (and applying twice is refused), a bad proposal, the import report, browsing, room memory, and the app not running. `McpHeadlessTest` runs the same tests through `LocalHolySound`, plus exporting a `.als` and a bug coming back as a sentence. `HeadlessFollowTest` checks a fader move is saved to the song by `follow_live` with no tool call.
 
-By hand, with the app running, drive the real process:
+By hand, drive the real process headless on a pretend Live:
 
 ```
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_session","arguments":{}}}' \
-  | uv run python -m app.mcp
+  | uv run python -m app.mcp --fake-live
 ```
 
 ## Limits
