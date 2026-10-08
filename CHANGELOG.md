@@ -4,6 +4,27 @@ All notable changes are documented here.
 
 ---
 
+## [1.2.0] — 2026-10-07
+
+### Added
+- **MCP server** — `app/mcp.py` (`uv run python -m app.mcp`) lets any MCP agent (Claude Code, Claude Desktop, Cursor…) run the Sunday set through the running app's API. Tools: `read_session`, `read_state`, `propose_changes` / `apply_changes` / `dismiss_changes` (the same actions, validation and Apply as the built-in assistant, shown on every open page), `ask_assistant`, `browse_folders`, `import_folder`, `mixer_command`, `song_mix`, `remember`, `list_devices`, `list_presets`, `export_session_file`, `reset_conversation`. Hand-written JSON-RPC over stdio, no SDK; `HOLYSOUND_URL` points it at the app (default `http://127.0.0.1:8765`).
+- **Gloo AI Studio provider** — `HOLYSOUND_PROVIDER=gloo` with `GLOO_API_KEY` (or the older `GLOO_CLIENT_ID` / `GLOO_CLIENT_SECRET`, OAuth client credentials with a cached token). `GlooProvider` speaks Gloo's Completions V2 (`/ai/v2/guarded`): `HOLYSOUND_MODEL` is a Gloo model id, `auto` (`auto_routing`) or a family (`model_family`); optional `GLOO_TRADITION`; the session id goes as `prompt_cache_key`. Models are checked against Gloo's public catalog (must exist and call tools); `--list-models` lists them. Default `gloo-anthropic-claude-sonnet-5.5`.
+- **Outside proposals** — `POST /api/proposals {actions, text?}` validates against `Proposal` and adds a pending proposal to the chat (`Conversation.add_proposal`), superseding older ones.
+- **Session notes over HTTP** — `GET /api/notes` returns the text the assistant reads.
+- **Import report** — `POST /api/import` with `report_only: true` measures and remembers the files and returns the report without asking the built-in assistant (`App.measure_folder`).
+- **EQ Eight control** — RigLink `get_eq` / `set_eq_band` by display text (probed in Live 12.4.6); a Tone (EQ) graph in the channel drawer; the `set_eq` action with `flat_first`; each track's EQ and rule-based `EQ PROBLEMS` in the session notes (`app/eq.py`); EQ saved per song; `POST /api/eq-flat`; `scripts/eq_eval.py`.
+- **Animation** — faders, pan, sends, levels, tempo and the EQ curve glide to new values; chat, proposal steps, strips, drawer, tabs, toasts and dialogs ease in. Reduced motion turns it off.
+
+### Changed
+- **Silent proposals get a sentence** — a proposal the model sends with no text gets one from `proposal_sentence`, with no extra model call.
+- **Chat provider hooks** — `OpenAIChatProvider` builds its request in `body()` and `headers()`, so a gateway can change them.
+
+### New files
+- `app/mcp.py` — MCP server over the web app's API
+- `app/eq.py` — EQ Eight in words
+- `scripts/eq_eval.py` — scores the model fixing a broken EQ
+- `docs/documentation/mcp.md` — MCP setup and tool reference
+
 ## [1.1.0] — 2026-10-06
 
 ### Added

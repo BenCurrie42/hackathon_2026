@@ -220,6 +220,8 @@ own track, each with Live's default input. These hold everywhere audio comes in
   plus static files, no framework or build step. OpenCode Go's
   OpenAI-compatible models go over stdlib `urllib`, not the `openai` package;
   its Anthropic-format models reuse the `anthropic` SDK with a custom `base_url`.
+  Gloo AI Studio uses the same stdlib Chat path. The MCP server is hand-written
+  JSON-RPC, not the `mcp` package.
 - Stock Ableton devices only. No third-party plugins.
 - **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop. Git
   doesn't record that bit, so a fresh clone needs `chmod a-w templates/*` again.
@@ -271,6 +273,8 @@ app/                            Web app: chat + mixer, `uv run python -m app`
     eq.py                       EQ Eight in words: filter types, the curve as text for the
                                 assistant, rule-based EQ problems, set_eq_band diffs
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
+    mcp.py                      MCP server (stdio JSON-RPC, stdlib): any agent drives the
+                                running app's JSON API
     static/                     The page: HTML/CSS/JS, served as-is
 tests/                          unittest suite; needs neither Live nor an API key.
                                 `uv run python -m unittest` runs all of it

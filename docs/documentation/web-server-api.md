@@ -69,6 +69,7 @@ All API responses are JSON with `Cache-Control: no-store` unless noted. Errors a
 | --- | --- | --- |
 | `/` and any other path | Static file from `app/static/` (`/` serves `index.html`). See [Static files](#static-files). | 404 plain text `Not found.` |
 | `/api/state` | `App.state()` | none from Live: a Live outage is reported inside `live`, not as an HTTP error |
+| `/api/notes` | `{"notes": str}`: `App.notes()`, the session notes the assistant reads | none; a Live outage is described in the text |
 | `/api/events` | `text/event-stream` of assistant reply events (below) | none; ends when the client disconnects |
 | `/api/presets?device=<name>` | `{"presets": [...]}` via RigLink `list_presets` | 400 if Live unreachable or RigLink rejects the device |
 | `/api/devices` | `{"devices": {...}}` via `list_stock_devices`; `null` if RigLink can't say (older RigLink) | 400 if Live unreachable |
@@ -89,12 +90,13 @@ All bodies are JSON objects (`{}` is assumed when empty).
 | Path | Request body | Response | Errors |
 | --- | --- | --- | --- |
 | `/api/chat` | `{"message": str}` | `App.state()` after the assistant finishes (the call blocks for the whole turn) | 400 empty message; 400 if `chat.busy`; 503 `AssistantUnavailable` (no API key etc.) |
-| `/api/import` | `{"folder": str, "note"?: str}` | `App.state()` | 400 empty folder / no audio found / unreadable folder / busy; 503 as above. Sends the assistant the measurements plus `<parts>`, `<song_keys>` and, if matched, a `<vendor_set>` block (`App.import_folder`, `song_keys`, `vendor_song`). |
+| `/api/import` | `{"folder": str, "note"?: str}` | `App.state()` | 400 empty folder / no audio found / unreadable folder / busy; 503 as above. Sends the assistant the measurements plus `<parts>`, `<song_keys>` and, if matched, a `<vendor_set>` block (`App.import_folder`, `song_keys`, `vendor_song`). With `"report_only": true`, returns `{"report": str}` (that same block) instead and the assistant isn't asked (`App.measure_folder`); the files are still remembered for `import_part`. |
 | `/api/room` | `{"add"?: str, "remove"?: int}` | `App.state()` | 400 if memory unavailable |
 | `/api/track-folder` | `{"track": str, "folder": str\|null}` | `App.state()` | 400 missing track or invalid folder |
 | `/api/track-key` | `{"track": str, "follows": bool}` | `App.state()` | 400 "Say which track." if `track` is empty. Saves whether a song transpose moves this track (`FolderMemory.set_follows_key`). |
 | `/api/song-mix` | `{"action": "pick", "scene_index": int\|null}`, `{"action": "checkpoint", "label"?: str}`, `{"action": "restore"\|"delete", "id": str}` | `App.state()` | 400 unnamed song, no song picked, checkpoint gone |
 | `/api/eq-flat` | `{"track": str}` | `App.state()` | 400 "Say which track." if empty; 400 with the action's sentence if it fails. The channel drawer's Flat button: runs a `set_eq` action with `flat_first` (`App.eq_flat`, under `_apply_lock`), so it adds EQ Eight if missing and lands in the current song's mix. |
+| `/api/proposals` | `{"actions": [...], "text"?: str}` | `{"proposal": describe_proposal(...)}` | 400 if not a list, if busy, or if it doesn't validate against `Proposal` (the pydantic errors, one per line). An outside agent's proposal (`App.propose`, `Conversation.add_proposal`): shown in the chat like the assistant's, older pending ones superseded, applied with `/api/proposals/<id>/apply`. The model's history doesn't hear of it. |
 | `/api/reset` | `{}` | `App.state()` after `chat.reset()` | none |
 | `/api/proposals/<id>/apply` | `{}` | `App.state()` after every step has run (the call blocks; see [Apply progress](#apply-progress)) | 400 if proposal missing or not pending; 503 if Live unreachable |
 | `/api/proposals/<id>/dismiss` | `{}` | `App.state()` | 400 as above |

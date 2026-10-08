@@ -13,7 +13,7 @@ The idea here is that you just say what your Sunday looks like (who's playing,
 what's plugged in, what songs) and get a session that's ready to go.
 
 We're building it for the 2026 Gloo AI Hackathon (Ministry Resourcing track).
-It's a prototype. Latest release: [v1.1.0](https://github.com/BenCurrie42/hackathon_2026/releases/tag/v1.1.0)
+It's a prototype. Latest release: [v1.2.0](https://github.com/BenCurrie42/hackathon_2026/releases/tag/v1.2.0)
 ([changelog](CHANGELOG.md)).
 
 ## How it works
@@ -112,6 +112,35 @@ HOLYSOUND_MODEL=kimi-k3    # optional, kimi-k3 is the default
 now. A few (Grok, the GPT ones) only speak a format we don't support yet, and
 Holy Sound will tell you if you pick one. Claude is still what we test against,
 so expect open models to be a bit rougher.
+
+### Using Gloo AI Studio
+
+A [Gloo AI Studio](https://studio.ai.gloo.com) key works too (API Credentials
+page). Gloo hosts Claude, GPT, Gemini and open models behind one key:
+
+```sh
+HOLYSOUND_PROVIDER=gloo
+GLOO_API_KEY=your-key
+HOLYSOUND_MODEL=gloo-anthropic-claude-sonnet-5.5   # optional; or auto, or anthropic / openai / google / open source
+GLOO_TRADITION=evangelical                         # optional
+```
+
+`HOLYSOUND_MODEL=auto` lets Gloo pick a model per message. An older Studio
+account with a client ID and secret instead of a key can set `GLOO_CLIENT_ID`
+and `GLOO_CLIENT_SECRET`. `--list-models` shows Gloo's models that can call
+tools, which Holy Sound needs.
+
+### Using it from another agent (MCP)
+
+Any MCP client can drive Holy Sound: read the set, propose changes, apply them.
+Start the app, then add the server. For Claude Code:
+
+```sh
+claude mcp add holy-sound -- uv run --directory "$PWD" python -m app.mcp
+```
+
+For Claude Desktop or Cursor, the same command in their MCP config. Details in
+[docs/documentation/mcp.md](docs/documentation/mcp.md).
 
 `uv run rig.py status` checks that Live is connected. If you change RigLink's
 code, quit and reopen Live, because it only loads RigLink at startup.

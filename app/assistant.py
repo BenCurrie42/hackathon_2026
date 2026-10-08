@@ -413,6 +413,21 @@ class Conversation:
             p["status"] = status
             p["results"] = results
 
+    def add_proposal(self, actions, text=None):
+        """A proposal from an outside agent (app/mcp.py): shown and applied like the assistant's own.
+
+        The model's history doesn't hear of it; the next session notes show what it changed.
+        """
+        with self._lock:
+            pid = str(next(self._ids))
+            self.proposals[pid] = {"id": pid, "actions": actions, "status": "pending", "results": None}
+            for other in self.proposals.values():
+                if other["id"] != pid and other["status"] == "pending":
+                    other["status"] = "superseded"
+            self._entry(role="assistant", text=text or proposal_sentence(actions), proposal_id=pid)
+            self.feed.publish("end")  # open pages refresh and show it
+            return pid
+
     # -- internals ----------------------------------------------------------
 
     def _begin(self):
@@ -536,7 +551,8 @@ class Conversation:
                         if other["id"] != pid and other["status"] == "pending":
                             other["status"] = "superseded"
                     self._open_tool_use = (proposal_call["id"], pid, results)
-                    return shown + [said(reply, proposal_id=pid)]
+                    # Some models propose without a word; the volunteer still gets a sentence.
+                    return shown + [said(reply or proposal_sentence(proposal.actions), proposal_id=pid)]
 
                 if invalid is not None:
                     fixes += 1
@@ -880,6 +896,28 @@ def _strip_line(t, scene_names=None):
     if clips:
         parts.append("clips: " + ", ".join(clips))
     return " | ".join(parts)
+
+
+def proposal_sentence(actions):
+    """One sentence for a proposal the model sent without saying anything."""
+    n = len(actions)
+    if n == 1:
+        what = actions[0].describe().split(":")[0].rstrip(".")
+        return f"{what}. Press Apply to make the change."
+    names = []
+    for a in actions:
+        name = getattr(a, "track", None) or getattr(a, "part", None)
+        if name and name not in names:
+            names.append(name)
+    where = ""
+    if names:
+        shown = names[:3]
+        rest = len(names) - len(shown)
+        listed = ", ".join(shown[:-1]) + (f" and {shown[-1]}" if len(shown) > 1 else shown[0])
+        if rest:
+            listed = ", ".join(shown) + f" and {rest} more"
+        where = f" to {listed}"
+    return f"Here are {n} changes{where}. Press Apply to make them."
 
 
 def describe_proposal(p):

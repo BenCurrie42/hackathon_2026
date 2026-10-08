@@ -55,6 +55,7 @@ sequenceDiagram
 - Every tool call gets a `tool_result`, in order. Unknown tool name -> error result. Non-dict input (provider returned unparseable JSON) -> error asking to resend.
 - One `propose_changes` per reply; extra calls get `ONE_PROPOSAL` back.
 - A reply to a new volunteer message that has no tool call but reads as making a change (`PROMISE`: "I'll…", "Sending…", "I've turned…", not ending in `?`), or is empty, is sent back once with `NUDGE_PROMISE` / `NUDGE_EMPTY`. Smaller models often describe a change instead of proposing it. Never done when reporting applied results, where "I've turned…" is true.
+- A proposal sent with no text gets one written by `proposal_sentence`: one change reads as its step ("Set the EQ on “Acoustic”. Press Apply to make the change."), several as a count and the first three tracks. No extra model call: the proposal's tool call stays open until the volunteer decides.
 - `stop_reason == "refusal"` -> `_Refused`; history is rewound and the volunteer sees "Sorry, I can't help with that one."
 - Any other exception (including `AssistantUnavailable`) rewinds history (`_rewind`), removes the user entry from the transcript, and re-raises, so a failed turn leaves no trace and the message can be resent.
 - If a text reply accompanies a tool call that is not `propose_changes`, it is shown as its own entry; with a proposal, the text is attached to the proposal entry.
@@ -105,22 +106,26 @@ A provider exposes `create(system, tools, messages, on_event=None) -> Reply(stop
 | --- | --- | --- |
 | `AnthropicProvider(gateway=False)` | `anthropic` SDK `client.beta.messages.stream` | Claude directly. Prompt caching on the system block, adaptive thinking with summarized display, `output_config.effort`, `disable_parallel_tool_use`, beta `server-side-fallback-2026-07-01` with `fallbacks="default"`. |
 | `AnthropicProvider(gateway=True)` | `anthropic` SDK `client.messages.stream` against OpenCode Go's root URL | OpenCode Go models that speak Anthropic Messages (Qwen, MiniMax). Plain request only, with `x-opencode-session` header. |
-| `OpenAIChatProvider` | stdlib `urllib.request` POST to `{base}/chat/completions`, SSE streaming | OpenCode Go models that speak Chat Completions (Kimi, GLM, DeepSeek, MiMo). `opener` is injectable for tests. |
+| `OpenAIChatProvider` | stdlib `urllib.request` POST to `{base}/chat/completions`, SSE streaming | OpenCode Go models that speak Chat Completions (Kimi, GLM, DeepSeek, MiMo). `opener` is injectable for tests. Subclasses override `body()` and `headers()`. |
+| `GlooProvider` | `OpenAIChatProvider` against `https://platform.ai.gloo.com/ai/v2/guarded` (Gloo Completions V2) | Gloo AI Studio. Drops `parallel_tool_calls` (not in Gloo's schema) and the OpenCode session header; sends the session id as `prompt_cache_key`. `HOLYSOUND_MODEL=auto` sends `auto_routing: true` and a family name (`anthropic`, `openai`, `google`, `open source`) sends `model_family`, each instead of `model`. Optional `tradition`. Auth is `GLOO_API_KEY` as a Bearer key, or `GlooToken`: OAuth client credentials (Basic auth, `scope=api/access`) at `/oauth2/token`, cached until 60 s before `expires_in`. |
 
 `MAX_TOKENS = 16000`, `REQUEST_TIMEOUT = 180` s (chat provider).
 
 ### Choosing a provider
 
-`chosen_provider_name(env)`: `HOLYSOUND_PROVIDER` if set (`anthropic`, `opencode-go`, or alias `opencode`); else `anthropic` if `ANTHROPIC_API_KEY` is set; else `opencode-go` if `OPENCODE_API_KEY` is set; else `anthropic`. `provider_from_env` is called lazily by `Conversation.client()` on first use (not at server start), so a missing key surfaces in `App.ai_state` as a sentence rather than crashing. `.env` is loaded by `server.load_dotenv` (`os.environ.setdefault`, so real env wins).
+`chosen_provider_name(env)`: `HOLYSOUND_PROVIDER` if set (`anthropic`, `opencode-go` or alias `opencode`, `gloo` or alias `gloo-ai`); else `anthropic` if `ANTHROPIC_API_KEY` is set; else `opencode-go` if `OPENCODE_API_KEY` is set; else `gloo` if `GLOO_API_KEY` or `GLOO_CLIENT_ID` is set; else `anthropic`. `provider_from_env` is called lazily by `Conversation.client()` on first use (not at server start), so a missing key surfaces in `App.ai_state` as a sentence rather than crashing. `.env` is loaded by `server.load_dotenv` (`os.environ.setdefault`, so real env wins).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HOLYSOUND_PROVIDER` | auto (above) | `anthropic` or `opencode-go`; anything else raises `AssistantSetupError`. |
+| `HOLYSOUND_PROVIDER` | auto (above) | `anthropic`, `opencode-go` or `gloo`; anything else raises `AssistantSetupError`. |
 | `ANTHROPIC_API_KEY` | none | Anthropic key. |
-| `HOLYSOUND_MODEL` | `claude-opus-5-5` (Anthropic); `kimi-k3` or first Chat model (OpenCode Go) | Model id. |
+| `HOLYSOUND_MODEL` | `claude-opus-5-5` (Anthropic); `kimi-k3` or first Chat model (OpenCode Go); `gloo-anthropic-claude-sonnet-5.5` (Gloo) | Model id. Gloo also takes `auto` or a model family. |
 | `HOLYSOUND_EFFORT` | `medium` | Anthropic only. |
 | `OPENCODE_API_KEY` | none | OpenCode Go key. |
-| `HOLYSOUND_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenCode Go base URL. |
+| `HOLYSOUND_BASE_URL` | `https://opencode.ai/zen/go/v1` (OpenCode Go); `https://platform.ai.gloo.com/ai/v2/guarded` (Gloo) | Base URL of the chosen gateway. |
+| `GLOO_API_KEY` | none | Gloo AI Studio key. |
+| `GLOO_CLIENT_ID`, `GLOO_CLIENT_SECRET` | none | Gloo OAuth client credentials (deprecated by Gloo; used only without `GLOO_API_KEY`). |
+| `GLOO_TRADITION` | none | `evangelical`, `catholic`, `mainline` or `not_faith_specific`; anything else is a setup error. |
 
 `uv run python -m app --list-models` prints `list_models_text()` and exits.
 
@@ -132,6 +137,10 @@ A provider exposes `create(system, tools, messages, on_event=None) -> Reply(stop
 2. GET `https://models.dev/api.json`; `models_dev_formats` reads provider `opencode-go`, mapping each model's npm package to a format (`@ai-sdk/openai-compatible` -> chat, `@ai-sdk/anthropic` -> messages, `@ai-sdk/openai` -> responses). If models.dev fails, use `guess_format` by family name.
 
 Formats: `chat`, `messages`, `responses`. **Responses-only models (grok, gpt-*-luna, ...) are rejected** with an `AssistantSetupError` telling the volunteer to pick another. If discovery is live and the chosen model isn't listed, that is also a setup error. OpenCode Go does not translate between formats, so each model is called in its own.
+
+### Gloo model catalog
+
+`gloo_models()` GETs `https://platform.ai.gloo.com/platform/v2/models` (public, no key), keeps entries with `supports_streaming`, and caches `({id: entry}, is_live)` per process. With a model id (not `auto` or a family), `_gloo_provider` rejects an id the live catalog doesn't list, and one without `supports_tools`. If the catalog can't be reached the model is used as given. `--list-models` with Gloo chosen prints `gloo_models_text`: tool-capable, non-deprecated models with their family.
 
 ### Format conversion for Chat Completions
 

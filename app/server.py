@@ -3,7 +3,7 @@
     uv run python -m app                 # this computer only
     uv run python -m app --lan           # also phones/tablets on the same Wi-Fi
     uv run python -m app --fake-live     # no Ableton? use a pretend Live Set
-    uv run python -m app --list-models   # which OpenCode Go models can answer
+    uv run python -m app --list-models   # which OpenCode Go (or Gloo) models can answer
 
 Standard library HTTP only. The page is static files in app/static; everything
 else is a small JSON API over Live (app/live.py) and the conversation
@@ -32,8 +32,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app import audio_files, parts, song_key, song_mixes, vendor_set
-from app.actions import ActionFailed, Executor, Listen, SetEq, run_all, to_rigspec
+from pydantic import ValidationError
+
+from app.actions import ActionFailed, Executor, Listen, Proposal, SetEq, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, describe_proposal, session_notes
+from app.assistant import _errors
 from app.assistant import _playing_scene as _playing_scene_of
 from app.live import LiveLink, LiveUnavailable
 from app.folders import FAMILIES, FolderMemory
@@ -329,6 +332,14 @@ class App:
 
     def import_folder(self, path, note=""):
         """Measure every audio file in a folder and hand the list to the assistant."""
+        folder, found, attachment = self.measure_folder(path)
+        text = f"Import the audio in “{folder.name}” ({len(found)} files)."
+        if note.strip():
+            text += " " + note.strip()
+        self.send_message(text, attachment)
+
+    def measure_folder(self, path):
+        """Measure a folder's audio and remember its files. Returns (folder, found, report)."""
         try:
             folder, found = audio_files.scan(path)
         except audio_files.AudioFileError as e:
@@ -357,10 +368,17 @@ class App:
         vendor = self.vendor_song(folder, found)
         if vendor:
             attachment += "\n" + vendor
-        text = f"Import the audio in “{folder.name}” ({len(found)} files)."
-        if note.strip():
-            text += " " + note.strip()
-        self.send_message(text, attachment)
+        return folder, found, attachment
+
+    def propose(self, actions, text=None):
+        """Changes from an outside agent (app/mcp.py), validated like the assistant's. Returns the id."""
+        if self.chat.busy:
+            raise UserError("Still working on the last message. One moment.")
+        try:
+            proposal = Proposal.model_validate({"actions": actions})
+        except ValidationError as e:
+            raise UserError(f"Those changes didn't validate:\n{_errors(e)}") from e
+        return self.chat.add_proposal(proposal.actions, text)
 
     @staticmethod
     def vendor_song(folder, found):
@@ -568,6 +586,8 @@ def make_handler(app):
                     return self._json(app.state())
                 if url.path == "/api/events":
                     return self._events()
+                if url.path == "/api/notes":
+                    return self._json({"notes": app.notes()})
                 if url.path == "/api/presets":
                     device = parse_qs(url.query).get("device", [""])[0]
                     return self._json({"presets": app.live.presets(device)})
@@ -626,6 +646,8 @@ def make_handler(app):
                     folder = str(body.get("folder", "")).strip()
                     if not folder:
                         raise UserError("Pick a folder first.")
+                    if body.get("report_only"):  # an outside agent reads it instead of the assistant
+                        return self._json({"report": app.measure_folder(folder)[2]})
                     app.import_folder(folder, str(body.get("note", "")))
                     return self._json(app.state())
                 if path == "/api/room":
@@ -671,6 +693,12 @@ def make_handler(app):
                     else:
                         raise UserError("The page asked for something the song mix can't do.")
                     return self._json(app.state())
+                if path == "/api/proposals":
+                    actions = body.get("actions")
+                    if not isinstance(actions, list):
+                        raise UserError("Send the changes as a list of actions.")
+                    pid = app.propose(actions, str(body.get("text") or "").strip() or None)
+                    return self._json({"proposal": describe_proposal(app.chat.proposal(pid))})
                 if path == "/api/reset":
                     app.chat.reset()
                     return self._json(app.state())
