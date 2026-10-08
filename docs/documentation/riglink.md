@@ -6,6 +6,10 @@ Callers: the [CLI](cli-and-live-control.md) (`rig.py`) uses `LiveConnection` dir
 
 ## Installation
 
+`uv run python scripts/install_riglink.py` does steps 1 and 2 and checks step 3. Step 2 without the UI: Live keeps its Control Surface slots in `~/Library/Preferences/Ableton/Live <version>/Preferences.cfg` as the file's last 21 length-prefixed UTF-16 strings (7 slots × surface, input, output). Picking RigLink in Live changes only the first empty slot's `None` to `RigLink` (diffed 12.4.5 before against 12.4.6 after), so the script makes that swap with Live closed (Live rewrites the file on quit) and falls back to the manual step if the layout doesn't match. Verified against 12.2.7, 12.4.5 and 12.4.6 files.
+
+By hand:
+
 1. Symlink the folder into Live's Remote Scripts directory:
    `ln -s "$PWD/ableton_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink`
 2. In Live: Preferences > Link/MIDI, pick **RigLink** in a Control Surface slot.

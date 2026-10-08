@@ -102,7 +102,7 @@ Rerun it after changing the Tone (EQ) prompt rules or `app/eq.py`'s problem rule
 1. Regenerate and reopen: `open -a "Ableton Live 12 Trial" out.als` (`out/` is gitignored).
 2. **Never generate over a set that is currently open.** Live reads the `.als` once and holds it in memory; the rewrite does nothing and is clobbered on Live's next save.
 3. **RigLink edits need a Live restart.** Live imports `ableton_script/RigLink` once at startup. Symptom of stale code: `unknown cmd`. Edits to `rig.py`, `live_control/` and `app/` need no restart.
-4. RigLink install: symlink `ableton_script/RigLink` into `~/Music/Ableton/User Library/Remote Scripts/`, select it under Preferences > Link/MIDI. Socket `localhost:9877`. Step by step in [getting-started.md](getting-started.md); symptoms in [troubleshooting.md](troubleshooting.md).
+4. RigLink install: `uv run python scripts/install_riglink.py`, or by hand: symlink `ableton_script/RigLink` into `~/Music/Ableton/User Library/Remote Scripts/`, select it under Preferences > Link/MIDI. Socket `localhost:9877`. Step by step in [getting-started.md](getting-started.md); symptoms in [troubleshooting.md](troubleshooting.md).
 5. No Live handy: `uv run python -m app --fake-live`.
 
 ## Probe-and-diff loop for `.als` facts

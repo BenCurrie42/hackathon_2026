@@ -16,11 +16,11 @@ Run these from the project folder.
 
 ```sh
 uv sync
-ln -s "$PWD/ableton_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink
+uv run python scripts/install_riglink.py   # sets up RigLink; no Ableton settings to click
 cp .env.example .env            # then paste your API key into .env
 ```
 
-Then in Ableton, open **Settings**, then **Link, Tempo & MIDI**, and under Control Surface pick **RigLink**. RigLink listens on `localhost:9877`. The app shows the same three steps whenever Ableton isn't connected.
+The RigLink setup links it into Ableton's Remote Scripts folder, picks it as a Control Surface by editing Ableton's settings file while Ableton is closed (it asks you to quit first, and keeps a backup as `Preferences.cfg.before-riglink`), then opens Ableton and waits until RigLink answers. If Ableton has never been opened on this Mac, or its settings file isn't in the layout the script knows, it tells you to do the one step by hand: in Ableton, open **Settings**, then **Link, Tempo & MIDI**, and under Control Surface pick **RigLink**. RigLink listens on `localhost:9877`. The app shows the same three steps whenever Ableton isn't connected.
 
 ### Using OpenCode Go instead of Anthropic
 
