@@ -237,7 +237,7 @@ An SVG graph, 20 Hz to 20 kHz on a log x axis and ±15 dB on y, with the summed 
 
 ### Song mix
 
-The bar above the bank holds **Song mix** (a select listing "Every track" and every named song as "1. Way Maker"), **Changes save to <song>** and **Checkpoints** (with a count once there are some). The picker follows `state.song_mix.scene_index`, which is server state shared by every viewer, except while its own pick is in flight (`pick._busy`). A poll that started before the last pick keeps the page's `song_mix` (`mixPickedAt`).
+The bar above the bank holds **Song mix** (a select listing "Every track" and every named song as "1. Way Maker"), **Changes save to <song>** and **Checkpoints** (with a count once there are some). The picker follows `state.song_mix.scene_index`, which is server state shared by every viewer, except while its own pick is in flight (`pick._busy`). A poll that started before the last pick keeps the page's `song_mix` (`mixPickedAt`). With a song picked, the header's Play button starts that song (`fire_scene`, which also puts its mix on) and reads "Play <song>"; with Every track it's Live's plain play.
 
 With a song picked:
 

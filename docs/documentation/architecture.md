@@ -20,7 +20,11 @@ The two do **not** share a vocabulary. RigLink does not consume `RigSpec`; see [
 flowchart LR
     V[Volunteer in browser] -->|chat, Apply, Download| S[app/server.py<br/>stdlib http.server]
     S --> A[app/assistant.py<br/>conversation]
-    A --> P[app/providers.py<br/>Anthropic / OpenCode Go]
+    A --> P[app/providers.py<br/>Anthropic / Gloo / OpenCode Go]
+    S -->|Expert mode| EX[app/expert.py<br/>lead + 4 specialists]
+    EX --> P
+    EX -->|applies without Apply| AC
+    MCP[app/mcp.py<br/>MCP server] -->|HTTP| S
     A -->|typed proposals| AC[app/actions.py]
     S -->|Apply| AC
     AC -->|RigLink commands| L[app/live.py<br/>shared connection]
@@ -50,6 +54,8 @@ Flow of one request:
 
 When the volunteer imports a folder of stems, `App.import_folder` also attaches a part plan (`app/parts.py`), a key guess per song (`app/song_key.py`) and, if the folder has a vendor's `.als`, what it says (`app/vendor_set.py`). The assistant answers with one `import_part` per part per song; several stems for one part are mixed into one file (`app/mixdown.py`). See [part-tracks-and-imports.md](part-tracks-and-imports.md).
 
+**Expert mode** (`app/expert.py`) skips step 2's button: a lead engineer agent briefs four specialists, each allowed only mixer moves on its own tracks; their actions are merged into one proposal and applied at once, for up to three rounds, with the song's mix checkpointed before and after. See [expert-mode.md](expert-mode.md).
+
 Each song can have its own faders, pan, mute, sends and EQ. `app/song_mixes.py` keeps them by song name; the server puts a song's mix back when it is picked in the page or starts playing in Live, and saves changes while the mixer is on it. See [web-server-api.md](web-server-api.md#song-mixes).
 
 Pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assistant-and-actions.md), [audio-analysis-and-memory.md](audio-analysis-and-memory.md), [frontend.md](frontend.md).
@@ -69,7 +75,9 @@ Pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assist
 | `file_builder/write_als.py` | `render(spec, template_path) -> bytes` |
 | `app/server.py` | HTTP server, JSON API, `.env` loading, CLI flags |
 | `app/assistant.py` | Claude conversation producing proposed actions |
-| `app/providers.py` | Provider selection (Anthropic, OpenCode Go in OpenAI or Anthropic format), model discovery |
+| `app/expert.py` | Expert mode: a lead and four specialists fix the mix and apply it; also `python -m app.expert` |
+| `app/providers.py` | Provider selection (Anthropic, Gloo AI Studio, OpenCode Go in OpenAI or Anthropic format), model discovery |
+| `app/mcp.py` | MCP server (stdio JSON-RPC, stdlib) over the running app's API |
 | `app/actions.py` | Proposable actions and how each runs; `to_rigspec` |
 | `app/live.py` | Shared, self-reconnecting RigLink connection |
 | `app/audio_files.py` | Folder browsing, WAV/AIFF level measurement |
@@ -87,7 +95,7 @@ Pages: [web-server-api.md](web-server-api.md), [assistant-and-actions.md](assist
 | `app/static/` | HTML/CSS/JS, served as-is |
 | `tests/` | `unittest` suite (`test_app.py`, `test_providers.py`, `test_write_als.py`); needs neither Live nor an API key |
 | `templates/` | Reference Live sets; read-only fixtures |
-| `scripts/` | `eq_eval.py` (scores the model fixing a messed-up EQ; costs model calls), `publish_wiki.py` |
+| `scripts/` | `install_riglink.py` (links RigLink and picks it as a Control Surface), `eq_eval.py` (scores the model fixing a messed-up EQ; costs model calls), `publish_wiki.py` |
 | `docs/` | `td_next.md` (ranked gaps) and this documentation |
 
 ## Design principles

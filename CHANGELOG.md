@@ -4,6 +4,17 @@ All notable changes are documented here.
 
 ---
 
+## [1.2.1] — unreleased
+
+### Added
+- **Expert mode** — `app/expert.py`: a lead engineer agent briefs four specialists (vocals, rhythm, band, playback), who work in parallel, each only on its own tracks and only with fader, pan, mute, sends and EQ. Their changes apply without Apply, for up to three rounds plus a final check, with the song's mix checkpointed "Before expert mode" and "After expert mode". The **Expert mode** button in the chat, `POST /api/expert`, the `expert_mode` MCP tool and `uv run python -m app.expert [goal]`.
+- **RigLink installer** — `scripts/install_riglink.py` links RigLink into Ableton's Remote Scripts and picks it as a Control Surface by editing `Preferences.cfg` with Live closed (backup kept), then opens Live and waits for it. Verified against 12.2.7, 12.4.5 and 12.4.6 settings files.
+- **Live meters** — RigLink `get_live_meters` and `GET /api/meters`: the page polls meters on their own feed at RigLink's ~100 ms tick and draws peak-and-fall, falling back to the snapshot's meters on an older RigLink.
+
+### Changed
+- **Play starts the picked song** — with a song picked in Song mix, the header's Play button fires that song's scene and reads "Play <song>".
+- **README** rewritten as a short pitch, with the finals demo video.
+
 ## [1.2.0] — 2026-10-07
 
 ### Added

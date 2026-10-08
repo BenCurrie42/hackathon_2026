@@ -1,95 +1,77 @@
 # Holy Sound
 
-**Describe your Sunday. Get a working Ableton session.**
+**Sunday-ready sound, without a sound engineer.**
 
-[Watch the 90-second intro](https://drive.google.com/file/d/1Kq2hpUynWhhkNWITW27_fQQ-kfCkewfi/view?usp=sharing)
+[Watch the demo (80 seconds)](https://drive.google.com/file/d/1aSR4sKnkiegDsENYAPddvguQtW6_a5OT/view?usp=sharing)
 
-Most small churches running tracks on Sunday have one volunteer who figured out
-Ableton on their own, and they rebuild the same session every week: name the
-tracks, patch the inputs, send click to the drummer, set each song's tempo. Some
-churches don't have that person at all.
+8 out of 10 churches say they don't have a qualified sound technician. Those
+that run backing tracks usually have one volunteer who taught themselves Ableton
+and rebuilds the session by hand every week: importing dozens of stems, setting
+tempos and keys, sending the click to the band's in-ears and balancing every
+song. That can take up to five hours a week. Churches without that volunteer
+play without tracks.
 
-The idea here is that you just say what your Sunday looks like (who's playing,
-what's plugged in, what songs) and get a session that's ready to go.
+Holy Sound gives those hours back.
 
-We're building it for the 2026 Gloo AI Hackathon (Ministry Resourcing track).
-It's a prototype. Latest release: [v1.2.0](https://github.com/BenCurrie42/hackathon_2026/releases/tag/v1.2.0)
-([changelog](CHANGELOG.md)). The technical writeup for the judges is
-[AGENT_BUILD.md](AGENT_BUILD.md).
+## Say what's wrong. Hear it fixed.
 
-## How it works
+- **"The lead vocal is getting buried."** The vocal comes up, live, while the
+  song plays.
+- **"The acoustic sounds like it's in a tin can."** Holy Sound finds the cause
+  (a harsh EQ boost and two deep cuts), explains it in plain words and puts in
+  a gentle curve once you approve.
+- **"Here are this week's songs."** Point it at the download from Washed or
+  MultiTracks. Every stem lands on the right track, at the right tempo and key,
+  with the click and guide in the in-ears and away from the room.
+- **Expert mode.** One button. A lead engineer and four AI specialists (vocals,
+  rhythm, band, playback) work through the whole mix together. On a messy
+  vendor set they made 49 fixes in one pass. Before and after are saved, so
+  you can flip between them.
 
-There are two ways it talks to Ableton:
+It remembers your room (your interface, who's on which input, where the in-ears
+go), so next Sunday starts where this one ended. Each song keeps its own mix,
+and it works from a phone on the church Wi-Fi.
 
-- **Build a file.** Write a `.als` from scratch with Live closed. You open it and
-  everything's there. Works without Ableton even installed, which makes it easy
-  to test.
-- **Drive Live directly.** A small script that runs inside Live (RigLink) takes
-  commands over a local connection, so changes show up in the set you already
-  have open. This is the one that feels like magic in a demo.
+## Safe by design
 
-The AI never touches Ableton's file format or dials in knob values. It says what
-it wants ("lead vocal, gentle compression") and our code picks a real stock
-Ableton preset for that. LLMs are bad at guessing compressor settings and great
-at understanding what a person means, so we let each side do its part.
+- **You approve every change** in chat before it reaches the room. Expert
+  mode is the one exception you choose: it only moves mixer settings, and it
+  saves the mix before it starts. Ableton's undo still works for every step.
+- **The AI says what it wants, never knob values.** It asks for "gentle
+  compression on the lead vocal." Holy Sound turns that into Ableton's own stock
+  settings, so the result is always something Ableton would make itself.
+- **Nothing plays in the room without you.** Anything you'd hear is flagged
+  before you apply it.
 
-## What works today
+## Under the hood
 
-**The web app.** You chat with Claude about your Sunday, it suggests changes, and
-nothing happens until you hit Apply, then each step shows as it runs. Next to the
-chat is a console-style mixer and song list that follow your open set: tap a
-channel to rename it, add an effect or change where it plays. It works from a
-phone on the same Wi-Fi. It can also:
+Holy Sound runs Ableton Live, which many worship teams already use for click and
+tracks. A small add-on inside Ableton, RigLink, makes changes in the open set
+live. When Ableton is closed, Holy Sound writes a session file instead. The
+conversation runs on **Claude**, or on **Gloo AI Studio** with one key for
+Claude, GPT, Gemini and open models. Other AI agents can drive Holy Sound
+through MCP.
 
-- import a folder of stems (or a Washed/MultiTracks download, reading its set
-  for tempo and sections), guess the key, and put every song on the same part
-  tracks (Drums, Keys, BGVs...), mixing a part's stems into one
-- tidy an older set with a track per stem into those part tracks, keeping how
-  each song sounds
-- give each song its own mix: pick a song in the mixer to set its levels and
-  leave parts out of that song only (instantly, even mid-song), and save
-  checkpoints of a mix to go back to
-- change a song's key without changing its speed, leaving the click alone
-- reorder the setlist, carrying each song's clips with it
-- play a song, listen to Live's meters, and follow up on what it heard
-- remember your room (interface, who's on which input, which outputs go to the
-  in-ears) so next week you don't have to say it again
-- listen to a song's stem files (without playing them) to tell the lead vocal
-  from the backing vocals and find the choruses
-- sort the mixer into Vocals, Instruments and Click & playback folders, and
-  move a track that landed in the wrong one
-- show its reply and its thinking as it writes them
-- hand you a `.als` to download when Live isn't open
+Built in Python, with a plain web app and no install for the volunteer beyond
+one setup command.
 
-**The command line**, `rig.py`, does the same kind of thing by hand:
+## Run it yourself
 
-```sh
-uv run rig.py track add "Click"
-uv run rig.py route out Click "Ext. Out" 1
-uv run rig.py mix volume Click -6
-uv run rig.py effect add "Lead Vocal" Compressor --preset "Gentle Squeeze"
-uv run rig.py song import ~/Downloads/"Let's Have Church" --bpm 170
-uv run rig.py song transpose "Let's Have Church" -2   # down a whole step
-uv run rig.py song move "Let's Have Church" 1
-uv run rig.py track tidy                    # a track per stem → part tracks
-uv run rig.py song play "Let's Have Church"
-```
-
-What it can't do yet is in [docs/td_next.md](docs/td_next.md).
-
-## Running it
-
-You'll need macOS, Python 3.11+, [uv](https://docs.astral.sh/uv/), Ableton Live
-12, and an Anthropic API key (or an OpenCode Go one, see below).
+You'll need a Mac, Python 3.11+, [uv](https://docs.astral.sh/uv/), Ableton Live
+12, and an API key from Gloo AI Studio, Anthropic or OpenCode Go.
 
 ```sh
 uv sync
-ln -s "$PWD/ableton_script/RigLink" ~/Music/Ableton/User\ Library/Remote\ Scripts/RigLink
-cp .env.example .env            # then paste your API key in
+uv run python scripts/install_riglink.py   # connects Ableton; no settings to click
+cp .env.example .env                       # then paste your API key in
 ```
 
-Then in Live, open Preferences → Link/MIDI, pick **RigLink** as a Control
-Surface, and start the app:
+The RigLink setup asks you to quit Ableton, picks RigLink as a Control Surface,
+reopens Ableton and waits until RigLink answers. If it can't do that on your
+Mac, it tells you the one step to do by hand: in Ableton, open **Settings →
+Link, Tempo & MIDI** and pick **RigLink** under Control Surface.
+
+Then start the app:
 
 ```sh
 uv run python -m app               # opens http://127.0.0.1:8765
@@ -97,27 +79,10 @@ uv run python -m app --lan         # also prints a link for phones on your Wi-Fi
 uv run python -m app --fake-live   # no Ableton needed, a pretend set to play with
 ```
 
-### Using OpenCode Go
+### Choosing the AI
 
-Don't have an Anthropic key? An [OpenCode Go](https://opencode.ai/docs/go/)
-subscription works too, with open models like Kimi, GLM and Qwen. Put this in
-`.env` instead:
-
-```sh
-HOLYSOUND_PROVIDER=opencode-go
-OPENCODE_API_KEY=your-key
-HOLYSOUND_MODEL=kimi-k3    # optional, kimi-k3 is the default
-```
-
-`uv run python -m app --list-models` shows every model OpenCode Go has right
-now. A few (Grok, the GPT ones) only speak a format we don't support yet, and
-Holy Sound will tell you if you pick one. Claude is still what we test against,
-so expect open models to be a bit rougher.
-
-### Using Gloo AI Studio
-
-A [Gloo AI Studio](https://studio.ai.gloo.com) key works too (API Credentials
-page). Gloo hosts Claude, GPT, Gemini and open models behind one key:
+**Gloo AI Studio.** One key for Claude, GPT, Gemini and open models (the key is
+on Studio's API Credentials page):
 
 ```sh
 HOLYSOUND_PROVIDER=gloo
@@ -126,41 +91,38 @@ HOLYSOUND_MODEL=gloo-anthropic-claude-sonnet-5.5   # optional; or auto, or anthr
 GLOO_TRADITION=evangelical                         # optional
 ```
 
-`HOLYSOUND_MODEL=auto` lets Gloo pick a model per message. An older Studio
-account with a client ID and secret instead of a key can set `GLOO_CLIENT_ID`
-and `GLOO_CLIENT_SECRET`. `--list-models` shows Gloo's models that can call
-tools, which Holy Sound needs.
+**Anthropic.** Put `ANTHROPIC_API_KEY=your-key` in `.env`. This is the default,
+and Claude is what we test against.
 
-### Using it from another agent (MCP)
+**OpenCode Go.** Open models like Kimi, GLM and Qwen, for a tighter budget:
 
-Any MCP client can drive Holy Sound: read the set, propose changes, apply them.
-Start the app, then add the server. For Claude Code:
+```sh
+HOLYSOUND_PROVIDER=opencode-go
+OPENCODE_API_KEY=your-key
+HOLYSOUND_MODEL=kimi-k3    # optional, kimi-k3 is the default
+```
+
+`uv run python -m app --list-models` shows which models your provider offers
+that Holy Sound can use.
+
+### From another agent (MCP)
+
+Start the app, then add Holy Sound to any MCP client. For Claude Code:
 
 ```sh
 claude mcp add holy-sound -- uv run --directory "$PWD" python -m app.mcp
 ```
 
-For Claude Desktop or Cursor, the same command in their MCP config. Details in
-[docs/documentation/mcp.md](docs/documentation/mcp.md).
+### Tests
 
-`uv run rig.py status` checks that Live is connected. If you change RigLink's
-code, quit and reopen Live, because it only loads RigLink at startup.
-
-Tests don't need Ableton or an API key:
+They need neither Ableton nor an API key:
 
 ```sh
 uv run python -m unittest discover tests
 ```
 
-How the code works, page by page, is in [docs/documentation](docs/documentation/README.md)
-(mirrored to the [wiki](https://github.com/BenCurrie42/hackathon_2026/wiki)). What
-to add for the Gloo Agents of Flourishing judges is in
-[docs/agents_of_flourishing.md](docs/agents_of_flourishing.md).
+---
 
-[CLAUDE.md](CLAUDE.md) has the deep stuff if you're into that: what we've figured
-out about Ableton's file format and the rules that keep generated sets from
-breaking.
-
-## License
-
-[MIT](LICENSE)
+Built for the 2026 Gloo AI Hackathon, Ministry Resourcing track.
+[Build document](AGENT_BUILD.md) · [Setup and docs](docs/documentation/README.md) ·
+[Changelog](CHANGELOG.md) · [MIT licence](LICENSE)

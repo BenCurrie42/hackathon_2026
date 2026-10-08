@@ -1,9 +1,9 @@
 # Holy Sound: Agent Build Document
 
-Saul Hernandez · 2026 Gloo AI Hackathon, Ministry Resourcing · 7 October 2026
-Source: [BenCurrie42/hackathon_2026](https://github.com/BenCurrie42/hackathon_2026), `release/v1.2.0`, commit `358e4eb`. Items marked **[Team]** are still for the team to fill in.
+Saul Hernandez · 2026 Gloo AI Hackathon, Ministry Resourcing · 8 October 2026
+Source: [BenCurrie42/hackathon_2026](https://github.com/BenCurrie42/hackathon_2026), `release/v1.2.1`, commit `dea5d96`. Demo: [80-second finals video](https://drive.google.com/file/d/1aSR4sKnkiegDsENYAPddvguQtW6_a5OT/view?usp=sharing). Items marked **[Team]** are still for the team to fill in.
 
-Holy Sound builds a church's Sunday Ableton Live session from a plain-English conversation. It imports the week's stems onto fixed part tracks, sets tempo and key, routes the click to the in-ears, levels and EQs each song, and then reads Live's meters to check the result. It drives the open set through RigLink, a script that runs inside Ableton, and writes a `.als` file when Ableton is closed. The volunteer approves every batch of changes before anything reaches the room. The aim is to give a volunteer their Saturday night back and make sure the band hears the right thing on Sunday.
+Holy Sound builds a church's Sunday Ableton Live session from a plain-English conversation. It imports the week's stems onto fixed part tracks, sets tempo and key, routes the click to the in-ears, levels and EQs each song, and then reads Live's meters to check the result. It drives the open set through RigLink, a script that runs inside Ableton, and writes a `.als` file when Ableton is closed. The volunteer approves every batch of changes before anything reaches the room. The one exception is Expert mode, which the volunteer starts on purpose: a lead engineer and four specialist agents fix the mix and apply their changes themselves. The aim is to give a volunteer their Saturday night back and make sure the band hears the right thing on Sunday.
 
 ## 1. The user and the burden
 
@@ -20,7 +20,7 @@ Each of these is now a rule in the code (§5, §6).
 
 ## 2. Architecture
 
-Holy Sound is **one agent with three tools**: a hand-written control loop around the model (`app/assistant.py`) and a deterministic executor (`app/actions.py`). The model decides *what* should change, the code decides *how*, and the volunteer decides *whether*.
+Holy Sound has **two agent shapes over one executor**. The chat is **one agent with three tools**: a hand-written control loop around the model (`app/assistant.py`). **Expert mode** is a crew of five agents (`app/expert.py`, below). Both hand their changes to the same deterministic executor (`app/actions.py`). The model decides *what* should change, the code decides *how*, and the volunteer decides *whether*.
 
 ```
 volunteer ──message──▶ app reads the open set via RigLink ──▶ <session> notes + message
@@ -45,11 +45,36 @@ Each decision has a fixed owner:
 - **Mechanism** belongs to the code. Levels are set in dB by searching Live's own display text, so Live's fader law is the only conversion. Effects come from Live's stock presets.
 - **Approval** belongs to the volunteer.
 
-The same pipeline is exposed as an **MCP server** (`app/mcp.py`, 15 tools). Another agent, such as a Gloo-hosted one, can read the set and propose changes, and its proposals show in the app the same way the assistant's own do.
+### Expert mode: a lead and four specialists
+
+```
+volunteer presses Expert mode (optional goal) ──▶ checkpoint "Before expert mode"
+        │
+        ▼
+Lead engineer reads <session> notes ──brief_crew──▶ done? ──yes──▶ checkpoint "After expert mode"
+        │ one brief per specialist with work
+        ▼
+Vocals tech ┃ Rhythm tech ┃ Band tech ┃ Playback tech     (parallel threads)
+        │ hand_back: set_volume / set_pan / set_mute / set_send / set_eq, own tracks only
+        ▼
+Code rejects a move on another specialist's track ──▶ sent back (max 2 retries)
+        │
+        ▼
+Merged into one proposal, applied at once through RigLink ──▶ lead reads the set again (max 3 rounds + final check)
+```
+
+- **Ownership is code, not prompt.** `crew_for(name, folder)` assigns every track to exactly one specialist, by its mixer folder and then its part name. A specialist that touches another's track gets its tool call rejected and retries.
+- **Mixer moves only.** No routing, devices other than EQ Eight, clip gain, imports or deletes. All five kinds are in the action schema the chat already uses.
+- **Reversible by design.** The song's mix is checkpointed before and after. Restoring either flips between them, and Cmd+Z in Ableton undoes each step.
+- The lead judges from the session notes (levels, pan, sends, EQ and rule-found EQ problems), not by listening.
+
+In the finals demo, one run on a messy Washed set applied 49 changes in round 1: playback tracks parked at +6 dB and hard panned, a +9 dB click EQ spike and over-loud returns.
+
+The same pipeline is exposed as an **MCP server** (`app/mcp.py`, 16 tools, including `expert_mode`). Another agent, such as a Gloo-hosted one, can read the set and propose changes, and its proposals show in the app the same way the assistant's own do.
 
 ## 3. Prompts
 
-There is one system prompt (41 rules), three tool descriptions and three automatic messages. All of them are verbatim in Appendix A. Three earlier versions failed, and those failures shaped the current prompt:
+The chat has one system prompt (41 rules), three tool descriptions and three automatic messages. Expert mode adds a lead prompt, a specialist prompt and two tools. All of them are verbatim in Appendix A. Three earlier versions failed, and those failures shaped the current prompt:
 
 1. **v1 (`9a3aefe`)** asked the model to run the room and collect every missing fact in one message. Its written rule against one track per stem didn't hold, and an import made 93 tracks for three songs.
    *Fix:* replies are limited to 1–3 sentences with one question. Per-stem import was **removed from the action schema**, so the model can't propose it at all.
@@ -64,10 +89,10 @@ There is one system prompt (41 rules), three tool descriptions and three automat
 |---|---|
 | Models | Three providers, one tool interface. **Claude Opus 5.5** at medium effort is the model we test against, and its reasoning is shown to the volunteer. **Gloo AI Studio** (`HOLYSOUND_PROVIDER=gloo`, default `gloo-anthropic-claude-sonnet-5.5`) is the one we recommend for churches: one key for Claude, GPT, Gemini and open models, Gloo's guarded completions endpoint, optional `GLOO_TRADITION`, and `auto` routing. **OpenCode Go** open models (default `kimi-k3`) are for churches on a tight budget. |
 | Framework | Anthropic Python SDK plus the standard library (`urllib` for Gloo and OpenCode). No agent framework. Four dependencies: lxml, pydantic, typer, anthropic. |
-| Orchestration | A hand-written loop: at most 6 model calls per turn, 2 validation retries and 1 "you promised but didn't act" nudge. |
+| Orchestration | Chat: a hand-written loop, at most 6 model calls per turn, 2 validation retries and 1 "you promised but didn't act" nudge. Expert mode: a lead and four specialists in parallel threads, up to 3 rounds plus a final check, 2 validation retries per call. No agent framework in either. |
 | Memory | Room facts, folder assignments and per-song mixes and EQ, stored as JSON in `~/.holysound/` on the volunteer's laptop. The volunteer sees and can delete every room fact in the Room tab. |
 | Retrieval | None. The whole set is small enough to send as `<session>` notes on every turn. Audio analysis (`listen_to_stems`, key guessing) is stdlib DSP, not an LLM. |
-| Hosting | The volunteer's Mac. RigLink listens inside Ableton on `localhost:9877`. The web app is served locally and also works from a phone on the same Wi-Fi. |
+| Hosting | The volunteer's Mac. RigLink listens inside Ableton on `localhost:9877`, installed by one command (`scripts/install_riglink.py`) that also picks it as Ableton's Control Surface. The web app is served locally and also works from a phone on the same Wi-Fi. Meters stream at Ableton's own rate (about 10 per second). |
 | Cost per run | About **$3.85 per weekly session** on Opus 5.5 at list price, roughly **$200 a year per church**. This assumes 25 calls at measured prompt sizes ($0.09 cached prefix, $3.00 uncached input, $0.75 output). It was measured on v1.1.0; v1.2.0 adds four EQ rules. Input dominates because each turn re-sends the conversation with fresh session notes. Caching the latest message as well would bring it to about $1. **[Team: Gloo per-session cost on its default model.]** |
 
 ## 5. Tools and permissions
@@ -77,6 +102,7 @@ There is one system prompt (41 rules), three tool descriptions and three automat
 | `propose_changes` | Up to 150 typed actions of 31 kinds: tracks, mixer, routing, stock effects, EQ Eight bands, songs (tempo, key, order), per-song mixes and checkpoints, stem imports, listening | Running before Apply; any device parameter except EQ Eight bands; the Master fader; deleting clips; one track per stem (not in the schema); an output not listed in the session notes (prompt rule 11) |
 | `listen_to_stems` | Reads stem files that were imported this session or are used in the open set | Any other file; playing audio |
 | `remember` | Saves or forgets facts about the room, gear and team | Anything the volunteer can't see and delete |
+| Expert mode (`brief_crew`, `hand_back`) | The lead briefs; each specialist sets volume, pan, mute, sends and EQ Eight bands on **its own tracks only**, applied without Apply | Any track another specialist owns (rejected by code); routing, other devices, clip gain, imports, deletes, playback; more than 3 rounds |
 | The app itself | Writes mixed parts to `~/Music/Holy Sound/Parts`, exports `.als` files, calls the chosen model provider | Changing vendor stems or overwriting an open set; email, messaging, payments, publishing |
 | MCP server | An outside agent can read the set, propose changes, ask the assistant and import folders | Raw parameters. Its `apply_changes` is gated by the MCP client's own tool approval, **not** by the app's Apply button. |
 
@@ -86,7 +112,7 @@ There is one system prompt (41 rules), three tool descriptions and three automat
 
 | Layer | What it is | Result |
 |---|---|---|
-| Regression suite | 168 `unittest` cases against a scripted model and the in-memory Ableton. Includes `TrackLayoutGuardTest` (no track per stem, playback has No Input) and a pointee-ID check on every generated `.als` | 168/168 pass in 50 s. Two skip on machines without Ableton installed. |
+| Regression suite | 179 `unittest` cases against a scripted model and the in-memory Ableton. Includes `TrackLayoutGuardTest` (no track per stem, playback has No Input), `ExpertModeTest` (ownership, a specialist sent back for touching another's track, the checkpoints) and a pointee-ID check on every generated `.als` | 179/179 pass in 53 s. Two skip on machines without Ableton installed. |
 | Prompt run | 23 common requests on `qwen3.8-flash`, scored by 69 hand-written checks | v2 61/69, then v3 69/69 (§3) |
 | EQ eval (`scripts/eq_eval.py`) | Deliberately breaks a track's EQ, sends the volunteer's complaint, applies the fix, and scores it as clean, gentle, small (≤4 bands) and heard (the right frequency range) | **[Team: run it and paste the scores.]** |
 | Agent cases | 20 hand-built cases with pass rules a script can check (Appendix B) | **Not run yet.** This is an honest gap. |
@@ -118,14 +144,16 @@ Every change is a proposal. The volunteer approves each batch, and Cmd+Z in Able
 | Unknown output, unclear key or lead vocal | Prompt rules 11, 20, 37 | One question to the volunteer |
 | Invalid proposal, or a change claimed but not proposed | Code: 2 retries, 1 nudge | Model apologises; nothing runs |
 | A step fails, or Ableton is closed | Code: a result for every step | A proposed fix, or a `.als` download |
+| Expert mode applies a mix the volunteer dislikes | Code: checkpoints "Before expert mode" and "After expert mode" | Volunteer: restore "Before" in Checkpoints, or Cmd+Z |
+| The AI provider fails mid-run | Code | The run stops and says so in the chat. Earlier rounds stay applied; the unfinished round's changes don't |
 
 **Known issues before judging:**
 - The `tidy_into_parts` step shows "Removes this effect from the track", although it actually deletes stem tracks (`app/static/app.js`, `consequence()`).
-- On the brief's rule that a human must not perform every step: approval is per batch, not per step. A planned "Get Sunday ready" run would plan once, take one approval, then import, level, check and correct by itself. **[Team: does this ship for the demo?]**
+- On the brief's rule that a human must not perform every step: in chat, approval is per batch, not per step. Expert mode now covers mixing end to end without a human step: one button, then the crew plans, applies, checks and corrects by itself. Import and routing still need the volunteer's Apply.
 
 ## 8. Reproduction
 
-- **Repo:** github.com/BenCurrie42/hackathon_2026, `release/v1.2.0`, MIT licence.
+- **Repo:** github.com/BenCurrie42/hackathon_2026, `release/v1.2.1`, MIT licence.
 - **Needs:** Python 3.11+, [uv](https://docs.astral.sh/uv/), and one of `GLOO_API_KEY`, `ANTHROPIC_API_KEY` or `OPENCODE_API_KEY`. The full workflow also needs macOS and Ableton Live 12.
 
 ```sh
@@ -133,16 +161,19 @@ uv sync
 cp .env.example .env                    # paste a key; HOLYSOUND_PROVIDER=gloo for Gloo
 uv run python -m app --fake-live        # no Ableton: a simulated set
 uv run python -m unittest discover tests  # no key, no Ableton
-# Real Live: symlink ableton_script/RigLink into ~/Music/Ableton/User Library/Remote Scripts,
-# pick RigLink in Preferences → Link/MIDI, then: uv run python -m app
+# Real Live:
+uv run python scripts/install_riglink.py  # links RigLink and picks it as Ableton's Control Surface
+uv run python -m app
+uv run python -m app.expert "vocals on top"  # Expert mode from the terminal, against the running app
 ```
 
 **Known gaps:**
 - Tested on macOS only.
-- Installing RigLink needs the terminal until a first-run setup screen exists.
+- Installing RigLink is one terminal command; there is no first-run setup screen in the app yet. If Ableton's settings file isn't in the known layout (verified on 12.2.7, 12.4.5 and 12.4.6), the installer falls back to the one manual step.
 - No record-arm control.
 - Hardware output routing in exported `.als` files is unverified.
 - There is no session log yet.
+- Expert mode judges the mix from numbers in the session notes, not by listening.
 
 **What other builders can reuse:**
 - The model states intent and the code sets parameters.
@@ -155,7 +186,7 @@ uv run python -m unittest discover tests  # no key, no Ableton
 - One track per vendor stem.
 - An automatic levelling "live mode". It compared each track with Master, so cutting one track pulled every other track down in a cascade. Comparing with the median fixed that, but the mode was dropped after one real session.
 
-## Appendix A. Prompts (verbatim, `release/v1.2.0`)
+## Appendix A. Prompts (verbatim, `release/v1.2.1`)
 
 ### A.1 System prompt
 
@@ -267,6 +298,67 @@ The problem with this version: it was one dense paragraph that mixed clip gain, 
 ```
 14. Each song has its own mix, saved in its clips and applied the moment the song starts: clip gain (set_clip_gain) for its level, and set_clip_active to leave a track out of that song only (a part the band plays live, a sax nobody wants). Use these for "in Washed, ...". Clip gain (gain_db, set_clip_gain) evens out stems inside a song. Faders, pan, mute and sends are kept per song too, by the app: while the mixer is on a song (the notes say which), every change is saved to that song and put back when it's picked or starts. With no song picked they're shared by every song. For "in Washed, ..." give set_volume, set_pan, set_mute and set_send that song: for another song it changes only that song's saved mix (the faders don't move now); leave it null for the song the mixer is on. pick_song_mix puts the mixer on a song's mix now; the notes list how each other song's saved mix differs.
 ```
+
+### A.5 Expert mode prompts (`app/expert.py`)
+
+Lead engineer system prompt:
+
+```
+You are the lead engineer of Holy Sound's expert mode, mixing a church worship team's Ableton Live set on your own. Nobody presses Apply: what your crew hands back is applied straight away, then you see the set again.
+
+Your crew, each working only on their own tracks:
+- vocals: Vocals tech, the lead vocal, backing vocals and choir
+- rhythm: Rhythm tech, drums, percussion and bass: the groove and the low end
+- band: Band tech, guitars, keys, piano, organ, synths, strings and horns
+- playback: Playback tech, click, guide, loops, FX, crowd, SMPTE and the shared reverb and delay
+
+Each round, read the <session> notes (every track, its level, pan, sends and EQ, and EQ PROBLEMS found by rule) and call brief_crew once:
+- briefs: one short, concrete brief for each specialist whose tracks need work ("Choir and BGVs are buried at -30 dB and drowning in reverb; bring them up under the lead and pull the sends back"). Say how their tracks should sit against the others: balance between groups is your job. Leave out specialists whose tracks are fine.
+- done: true when the mix is ready for Sunday and nothing important is left to change.
+- summary: one or two plain sentences for the volunteer, no jargon: what you found or what changed, and what's left if anything.
+Work on the song the mixer is on. Don't chase perfection: fix what's clearly wrong.
+
+How a worship mix should sit (guides what you do; don't recite it):
+- Vocals on top: lead vocal, then BGVs and choir, then keys and pads. Words must be heard.
+- One source owns the low end. Drums and bass carry the groove; neither buried nor booming.
+- Click, guide, count and SMPTE are for the band, not the room: low or muted in this mix, centre panned. SMPTE stays muted.
+- Part tracks stay panned centre (their stereo is inside the clip). Hard pans are a mistake.
+- Faders from -70 (off) to +6 dB; most parts sit between -18 and -3 dB. Nothing parked at +6.
+- Reverb and delay sends are seasoning: vocals around -18 to -10 dB, never a wash. The shared reverb and delay returns sit around -6 dB.
+- EQ: when a track's EQ has problems, start it over (flat_first true) with a gentle curve of two to four bands. Boosts +4 dB at most and broad (Q 0.7-1.5); cuts down to -6 dB; shelves under ±3 dB. Low cut: vocals 80-120 Hz, guitars 80-120 Hz, keys and pads 40-80 Hz, bass and kick 30-40 Hz or none. No high cut below 12 kHz except on bass. Muddy = cut 200-400 Hz; boxy or honky = 500 Hz-1 kHz; harsh = 2.5-5 kHz.
+- A part the band plays live, or one the song leaves out on purpose, may stay muted; a muted bass with no live bassist is a mistake.
+- Trust what the notes remember about this church over these defaults.
+```
+
+Specialist system prompt (`{title}`, `{what}` and `{tracks}` are filled per specialist):
+
+```
+You are the {title} in Holy Sound's expert mode, mixing a church worship team's Ableton Live set. You look after {what}. The lead engineer briefs you; your changes are applied straight away.
+
+Call hand_back once with every change for your tracks, in plain intent: set_volume, set_pan, set_mute, set_send and set_eq only, and only on these tracks: {tracks}. Leave song null (the song on the mixer). If your tracks are already fine, hand back no actions and say so.
+summary is one plain sentence for the volunteer: what was wrong and what you did.
+
+(the same mix rules as the lead prompt above)
+```
+
+Tools and the turn prompts:
+
+```
+brief_crew: Brief the crew for this round, or say the mix is done.
+  (input schema: BriefCrew: done, summary, briefs[] of {crew, brief}, at most 4)
+
+hand_back: Hand your changes back to the lead engineer.
+  (input schema: HandBack: summary, actions[] of set_volume / set_pan / set_mute / set_send / set_eq, at most 40)
+
+Lead, round 1: Round 1 of at most 3. Find what's wrong and brief your crew.
+Lead, later rounds: Round N of at most 3. This is the set after your crew's last changes. Check them: done, or brief again for what's still wrong.
+Lead, final check: Final check: this is the set after your crew's last changes, and there's no time for another round. Set done true and sum up what changed and anything left for the volunteer.
+Specialist: The lead engineer's brief: <brief>
+A specialist's move on another's track: Fix this and call hand_back again:
+Not your tracks: <names>. Use exact names from yours only: <tracks>.
+No tool call: (Automatic: call <tool> now.)
+```
+
 
 ## Appendix B. Agent test cases (20, hand-built, not yet run)
 

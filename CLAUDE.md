@@ -286,6 +286,7 @@ templates/probe_noinput.als     Live's own save of a generated set; source of
                                 truth for AudioIn/None
 docs/td_next.md                 What's missing, ranked by Sunday impact
 docs/agents_of_flourishing.md   What to add for the Gloo Challenge 1 judges, ranked
+scripts/install_riglink.py      Links RigLink and picks it as Live's Control Surface
 scripts/publish_wiki.py         Copies docs/documentation into a wiki clone
 scripts/eq_eval.py              Messes up an EQ on fake Live, asks the model to fix it, scores it
 
@@ -352,9 +353,10 @@ group tracks.
 - Live 12 Trial at `/Applications/Ableton Live 12 Trial.app`, auto-updated to
   12.4.6. Format facts above were verified on 12.4.5. Trial runs with Suite
   features.
-- RigLink is installed by symlinking `ableton_script/RigLink` into
-  `~/Music/Ableton/User Library/Remote Scripts/` and picking it under
-  Preferences → Link/MIDI. Socket is `localhost:9877`.
+- RigLink is installed by `uv run python scripts/install_riglink.py`: it symlinks
+  `ableton_script/RigLink` into `~/Music/Ableton/User Library/Remote Scripts/` and
+  picks it as a Control Surface by editing `Preferences.cfg` with Live closed
+  (falls back to Preferences → Link/MIDI by hand). Socket is `localhost:9877`.
 - Live imports RigLink once at startup. **After editing it, quit and reopen
   Live**; the symptom otherwise is `unknown cmd`. `rig.py` and client edits need
   no restart.

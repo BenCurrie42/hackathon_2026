@@ -22,6 +22,11 @@ leader's time with the band and the people.
 
 ### 1. A "Get Sunday ready" run
 
+**Status (2026-10-08):** partly done. Expert mode (`app/expert.py`) is the
+plan-act-check-fix loop for mixing: one button, a lead and four specialists,
+up to three rounds, no Apply. Import and routing still go through the chat's
+Apply.
+
 One goal from the volunteer: the setlist, a folder of song files, and "click
 and guide to the in-ears". The agent then works without further prompting:
 
@@ -83,11 +88,18 @@ earns the "published eval set" bonus.
 
 ### 7. Gloo models
 
+**Status:** done in v1.2.0. `HOLYSOUND_PROVIDER=gloo` (Gloo AI Studio,
+guarded completions), named in the build doc.
+
 Gloo runs this challenge. `app/providers.py` already takes any
 OpenAI-compatible endpoint through `HOLYSOUND_BASE_URL`, so a Gloo AI Studio
 model may plug in with little work. Name it in the build doc and say why.
 
 ### 8. Install with no developer
+
+**Status:** mostly done. `scripts/install_riglink.py` links RigLink and picks it
+as the Control Surface with no Ableton settings to click. It's still one
+terminal command, not a first-run screen.
 
 Installing RigLink today means symlinking a folder and picking it in Ableton's
 settings. A first-run screen that copies the script and walks the volunteer
