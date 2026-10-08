@@ -321,7 +321,9 @@ function renderLive() {
   if (snap) {
     const play = $("#play-btn");
     play.classList.toggle("playing", snap.song.is_playing);
-    play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
+    const picked = mixSong !== null ? snap.scenes.find((sc) => sc.index === mixSong)?.name : null;
+    play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : picked ? `Play ${picked}` : "Play");
+    play.title = play.getAttribute("aria-label");
     const tempo = $("#tempo-input");
     if (document.activeElement !== tempo) {
       const bpm = Math.round(snap.song.tempo * 100) / 100;
@@ -358,9 +360,12 @@ function setCount(which, n) {
   }
 }
 
+// With a song picked in Song mix, Play starts that song (its scene), not whatever Live was on.
 $("#play-btn").addEventListener("click", () => {
   const playing = state?.live.snapshot?.song.is_playing;
-  liveCmd(playing ? "stop" : "play").catch(() => {});
+  if (playing) liveCmd("stop").catch(() => {});
+  else if (mixSong !== null) liveCmd("fire_scene", { scene_index: mixSong }).then(poll, () => {});
+  else liveCmd("play").catch(() => {});
 });
 
 $("#tempo-input").addEventListener("change", (e) => {
