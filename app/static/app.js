@@ -403,11 +403,11 @@ function startSending(text) {
   sendingFrom = state ? state.chat.length : 0;
 }
 
-function turn(role, text) {
+function turn(role, text, agent) {
   const node = el("div", "turn " + role);
-  node.append(el("p", "speaker", role === "user" ? "You" : "Holy Sound"));
+  node.append(el("p", "speaker", role === "user" ? "You" : agent || "Holy Sound"));
   const body = el("div", "turn-text");
-  if (role === "assistant") body.innerHTML = markdownLite(text);
+  if (role === "assistant" || role === "expert") body.innerHTML = markdownLite(text);
   else body.textContent = text;
   node.append(body);
   return node;
@@ -456,7 +456,7 @@ function renderChat() {
   const docked = dockedProposal();
   const sig = JSON.stringify([
     state.chat, state.busy, sending, pendingText, state.live.connected, reply !== null,
-    applyingId, state.applying, !!state.demo, $("#layout").dataset.view,
+    applyingId, state.applying, !!state.demo, $("#layout").dataset.view, expertRunning, crewLabel,
   ]);
   if (sig === chatSig) return;
   chatSig = sig;
@@ -484,7 +484,7 @@ function renderChat() {
       continue;
     }
     if (entry.text || entry.thinking) {
-      const node = turn(entry.role, entry.text || "");
+      const node = turn(entry.role, entry.text || "", entry.agent);
       if (entry.thinking) node.insertBefore(thoughts(entry.thinking, entry.id), $(".turn-text", node));
       // the volunteer's own message already slid in while it was being sent
       if (entry.role === "user" && wasSending) chatSeen.add(`t${entry.id}`);
@@ -501,11 +501,11 @@ function renderChat() {
   } else chatSeen.delete("sending");
   if (reply) {
     box.append(once(reply.el, "reply"));
-  } else if (sending !== null || state.busy) {
-    box.append(once(working("Working…"), "working"));
+  } else if (sending !== null || state.busy || expertRunning) {
+    box.append(once(working(crewLabel || "Working…"), "working"));
   }
   if (!reply) chatSeen.delete("reply");
-  if (!(sending !== null || state.busy) || reply) chatSeen.delete("working");
+  if (!(sending !== null || state.busy || expertRunning) || reply) chatSeen.delete("working");
   const dock = $("#slip-dock");
   const keepSteps = docked && dock._lastSlip === docked.id ? $(".steps", dock)?.scrollTop : null;
   dock.replaceChildren(...(docked ? [slipEl(docked, true)] : []));
@@ -538,6 +538,7 @@ function renderChat() {
   else chatNav.removeAttribute("aria-label");
 
   $("#composer .send").disabled = sending !== null || state.busy;
+  $("#expert-btn").disabled = sending !== null || state.busy || expertRunning || !state.live.connected;
   $("#import-btn").disabled = sending !== null || state.busy;
   $("#reset-btn").hidden = state.chat.length === 0 && sending === null;
   $(".chat-head").hidden = $("#reset-btn").hidden;
@@ -645,8 +646,14 @@ function listen() {
   on("text", (t) => { if (reply) reply.text += t; });
   on("tool", (name) => { if (reply) reply.tool = name; });
   on("usage", renderUsage);
+  on("crew", (label) => {   // expert mode: an agent spoke or started something
+    if (label) crewLabel = label;
+    chatSig = "";
+    poll();
+  });
   on("end", () => {
     reply = null;
+    if (!expertRunning) crewLabel = null;
     chatSig = "";
     poll();
   });
@@ -895,6 +902,38 @@ async function send(text) {
     if (state) renderChat();
   }
 }
+
+// -- expert mode: a crew of agents fixes the mix on its own (app/expert.py) ------------
+
+let expertRunning = false;
+let crewLabel = null;   // what the crew is doing now, from the event stream
+
+async function runExpert() {
+  if (expertRunning || sending !== null || state?.busy) return;
+  const input = $("#message-input");
+  const goal = input.value.trim();
+  input.value = "";
+  autosize();
+  expertRunning = true;
+  crewLabel = "The crew is reading the set…";
+  renderChat();
+  try {
+    const next = await api("/api/expert", { goal });
+    render(next);
+    say(next.expert.summary);
+  } catch (e) {
+    toast(e.message, "error");
+    if (!input.value) input.value = goal;
+    autosize();
+  } finally {
+    expertRunning = false;
+    crewLabel = null;
+    chatSig = "";
+    if (state) renderChat();
+  }
+}
+
+$("#expert-btn").addEventListener("click", runExpert);
 
 $("#composer").addEventListener("submit", (e) => {
   e.preventDefault();

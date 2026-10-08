@@ -91,6 +91,7 @@ All bodies are JSON objects (`{}` is assumed when empty).
 | Path | Request body | Response | Errors |
 | --- | --- | --- | --- |
 | `/api/chat` | `{"message": str}` | `App.state()` after the assistant finishes (the call blocks for the whole turn) | 400 empty message; 400 if `chat.busy`; 503 `AssistantUnavailable` (no API key etc.) |
+| `/api/expert` | `{"goal"?: str}` | `App.state()` plus `expert: {ok, rounds, applied, summary}`, after the whole run ([expert mode](expert-mode.md)) | 400 if `chat.busy` or Live isn't connected |
 | `/api/import` | `{"folder": str, "note"?: str}` | `App.state()` | 400 empty folder / no audio found / unreadable folder / busy; 503 as above. Sends the assistant the measurements plus `<parts>`, `<song_keys>` and, if matched, a `<vendor_set>` block (`App.import_folder`, `song_keys`, `vendor_song`). With `"report_only": true`, returns `{"report": str}` (that same block) instead and the assistant isn't asked (`App.measure_folder`); the files are still remembered for `import_part`. |
 | `/api/room` | `{"add"?: str, "remove"?: int}` | `App.state()` | 400 if memory unavailable |
 | `/api/track-folder` | `{"track": str, "folder": str\|null}` | `App.state()` | 400 missing track or invalid folder |

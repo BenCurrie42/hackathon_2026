@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app import audio_files, eq, fake_live, mcp, mixdown, parts, song_key, song_map, song_mixes, vendor_set
+from app import audio_files, eq, expert, fake_live, mcp, mixdown, parts, song_key, song_map, song_mixes, vendor_set
 from app.actions import AddTrack, Proposal, run_all, to_rigspec
 from app.assistant import AssistantUnavailable, Conversation, session_notes
 from app.folders import FolderMemory, classify
@@ -1964,3 +1964,87 @@ class McpTest(StemFolderCase):
         text, failed = self.tool("read_session")
         self.assertTrue(failed)
         self.assertIn("isn't running", text)
+
+
+class CrewModel:
+    """Stands in for the provider in expert mode: answers the lead and each specialist by role."""
+
+    def __init__(self, lead_turns, specialists):
+        self.lead_turns = list(lead_turns)  # brief_crew inputs, in order
+        self.specialists = specialists  # title -> [hand_back inputs, in order of attempts]
+        self.lock = threading.Lock()
+        self.prompts = []
+
+    def create(self, system, tools, messages, on_event=None):
+        tool = tools[0]["name"]
+        with self.lock:
+            self.prompts.append((system, messages[-1]))
+            if tool == "brief_crew":
+                given = self.lead_turns.pop(0)
+            else:
+                title = next(t for t in self.specialists if f"You are the {t}" in system)
+                given = self.specialists[title].pop(0)
+        return reply(Block(type="tool_use", id=f"tu_{len(self.prompts)}", name=tool, input=given))
+
+
+class ExpertModeTest(SongMixCase):
+    def setUp(self):
+        super().setUp()
+        for name in ("Drums", "Click"):
+            self.live.call("create_audio_track", name=name)
+        self.app.pick_song_mix(0)
+
+    def test_crew_owns_tracks_by_folder_then_part(self):
+        self.assertEqual(expert.crew_for("Lead Vocal"), "vocals")
+        self.assertEqual(expert.crew_for("Synth Bass"), "rhythm")
+        self.assertEqual(expert.crew_for("Keys", "instruments"), "band")
+        self.assertEqual(expert.crew_for("Click", "playback"), "playback")
+        self.assertEqual(expert.crew_for("3-Audio", "other"), "playback")
+        self.assertEqual(expert.crew_for("Pad", "vocals"), "vocals")  # moved there by hand
+        owned = expert.roster(self.app.with_folders(self.live.snapshot(max_age=0)))
+        self.assertEqual(owned, {"vocals": ["Lead Vocal"], "rhythm": ["Drums"], "band": ["Keys"],
+                                 "playback": ["Click", "A-Reverb", "B-Delay", "Reverb"]})
+
+    def test_run_briefs_applies_and_checks_without_apply(self):
+        crew = CrewModel(
+            lead_turns=[
+                {"done": False, "summary": "The vocal is too loud and the drums are buried.",
+                 "briefs": [{"crew": "vocals", "brief": "Lead Vocal down 3 dB."},
+                            {"crew": "rhythm", "brief": "Drums down 6 dB."}]},
+                {"done": True, "summary": "Sounds right now.", "briefs": []},
+            ],
+            specialists={
+                "Vocals tech": [{"summary": "Took the vocal down.",
+                                 "actions": [{"action": "set_volume", "track": "Lead Vocal", "db": -3}]}],
+                "Rhythm tech": [
+                    # Not its track: sent back, then it fixes its own.
+                    {"summary": "x", "actions": [{"action": "set_volume", "track": "Lead Vocal", "db": -20}]},
+                    {"summary": "Drums sit under the band now.",
+                     "actions": [{"action": "set_volume", "track": "Drums", "db": -6}]},
+                ],
+            },
+        )
+        self.app.chat._client = crew
+
+        result = self.app.expert("vocals on top")
+
+        self.assertEqual(result, {"ok": True, "rounds": 1, "applied": 2, "summary": "Sounds right now."})
+        self.assertAlmostEqual(self.track("Lead Vocal")["volume_db"], -3.0, places=1)
+        self.assertAlmostEqual(self.track("Drums")["volume_db"], -6.0, places=1)
+        self.assertFalse(self.app.chat.busy)
+        said = [(e["agent"], e["text"]) for e in self.app.chat.transcript if e["role"] == "expert"]
+        self.assertEqual([a for a, _ in said],
+                         ["Lead engineer", "Lead engineer", "Vocals tech", "Rhythm tech", "Lead engineer",
+                          "Lead engineer", "Lead engineer"])
+        self.assertIn("vocals on top", said[0][1])
+        sent_back = [m for s, m in crew.prompts if "Rhythm tech" in s and m["content"][0]["type"] == "tool_result"]
+        self.assertIn("Not your tracks: Lead Vocal", sent_back[0]["content"][0]["content"])
+        proposal = next(p for p in self.app.chat.proposals.values())
+        self.assertEqual(proposal["status"], "applied")
+        labels = [m["label"] for m in self.mixes.checkpoints("Living Hope")]
+        self.assertEqual(labels, [expert.AFTER, expert.BEFORE])
+
+    def test_needs_live_and_a_free_chat(self):
+        self.app.chat.busy = True
+        with self.assertRaises(app_server.UserError):
+            self.app.expert()

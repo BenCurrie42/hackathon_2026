@@ -27,6 +27,7 @@ How the code works, module by module.
 | [Web server API](web-server-api.md) | `app/server.py` endpoints, shared Live connection, `fake_live` |
 | [Assistant and actions](assistant-and-actions.md) | Conversation loop, providers, every proposable action |
 | [MCP server](mcp.md) | `app/mcp.py`: driving Holy Sound from any MCP agent |
+| [Expert mode](expert-mode.md) | `app/expert.py`: a lead engineer and four specialists fix the mix on their own |
 | [Audio analysis and memory](audio-analysis-and-memory.md) | WAV/AIFF reading, song maps, room memory, mixer folders and key choices |
 | [Frontend](frontend.md) | `app/static/`: chat, change slip, console mixer, channel drawer, song mix |
 | [Testing and development](testing-and-development.md) | Setup, test suite, Live dev loop, release process |

@@ -309,6 +309,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 .composer { flex: none; border-top: 1px solid var(--hair); padding: 16px 20px; display: flex; flex-direction: column; gap: 8px; }
 .composer textarea { min-height: 76px; resize: none; max-height: 180px; }
 .composer-row { display: flex; align-items: center; justify-content: space-between; }
+.composer-keys { display: flex; gap: 8px; }
+.turn.expert .speaker { color: var(--accent); }
 .send { width: 84px; padding: 0; }
 
 /* -- the change slip --------------------------------------------------------------- */

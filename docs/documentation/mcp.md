@@ -39,6 +39,7 @@ Then `/mcp` in Claude Code (or restart it) to load the tools. Claude Desktop or 
 | `apply_changes` | `POST /api/proposals/<id>/apply` | Runs the steps; returns each result (`ok:` / `FAILED:`, with meter detail for a listen). |
 | `dismiss_changes` | `POST /api/proposals/<id>/dismiss` | Drops a pending proposal. |
 | `ask_assistant` | `POST /api/chat` | Messages Holy Sound's own assistant; returns its reply and any proposal. Needs the app's AI provider set up. |
+| `expert_mode` | `POST /api/expert` | Runs [expert mode](expert-mode.md) with an optional `goal`; returns what each agent said and how many changes applied. Applies without asking. |
 | `browse_folders` | `GET /api/folders` | A folder listing, for finding stems. |
 | `import_folder` | `POST /api/import` `report_only` | Measures a folder's audio and remembers its file ids; returns the report the built-in assistant would read (file ids, levels, parts, key guesses, vendor set). Then propose `add_song` / `import_part` with those ids. |
 | `mixer_command` | `POST /api/live` | One direct RigLink command from `DIRECT_COMMANDS` (play, stop, a fader by index...), no proposal. |

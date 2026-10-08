@@ -7,7 +7,7 @@
 
 Standard library HTTP only. The page is static files in app/static; everything
 else is a small JSON API over Live (app/live.py) and the conversation
-(app/assistant.py), plus /api/events, which streams the assistant's reply to
+(app/assistant.py) and expert mode (app/expert.py), plus /api/events, which streams the assistant's reply to
 every open page as it's written.
 """
 
@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from app import audio_files, parts, song_key, song_mixes, vendor_set
+from app import audio_files, expert, parts, song_key, song_mixes, vendor_set
 from pydantic import ValidationError
 
 from app.actions import ActionFailed, Executor, Listen, Proposal, SetEq, run_all, to_rigspec
@@ -433,6 +433,14 @@ class App:
                 pass  # the results still show; the volunteer can ask about them
         return results
 
+    def expert(self, goal=""):
+        """Expert mode (app/expert.py): the crew fixes the mix on its own, applying as it goes."""
+        if self.chat.busy:
+            raise UserError("Still working on the last message. One moment.")
+        if not self.live_state()["connected"]:
+            raise UserError("Expert mode mixes the open set, so Ableton needs to be running.")
+        return expert.run(self, goal)
+
     def eq_flat(self, track):
         """The mixer's Flat button: a track's EQ back to EQ Eight's flat default, in the song on the mixer."""
         action = SetEq(action="set_eq", track=track, flat_first=True)
@@ -642,6 +650,9 @@ def make_handler(app):
                         raise UserError("Still working on the last message. One moment.")
                     app.send_message(text)
                     return self._json(app.state())
+                if path == "/api/expert":
+                    result = app.expert(str(body.get("goal", "")))
+                    return self._json(dict(app.state(), expert=result))
                 if path == "/api/import":
                     if app.chat.busy:
                         raise UserError("Still working on the last message. One moment.")

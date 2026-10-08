@@ -252,6 +252,8 @@ file_builder/                   Writes a .als with Live closed
 app/                            Web app: chat + mixer, `uv run python -m app`
     server.py                   HTTP server and JSON API
     assistant.py                Claude conversation → proposed actions
+    expert.py                   Expert mode: a lead and four specialists fix the mix and
+                                apply it without asking; also `python -m app.expert`
     providers.py                Who answers: Anthropic, or OpenCode Go models
                                 (OpenAI Chat or Anthropic format), and discovery
     actions.py                  Proposable actions (intent only) and how each runs

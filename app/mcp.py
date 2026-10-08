@@ -129,6 +129,17 @@ def tool_list():
             "inputSchema": _schema({"message": {"type": "string"}}, ["message"]),
         },
         {
+            "name": "expert_mode",
+            "description": (
+                "Fix the mix on its own, as the app's Expert mode button does: a lead engineer briefs a "
+                "vocals, rhythm, band and playback specialist, each changes only its own tracks (faders, "
+                "pan, mute, sends, EQ), and their changes are applied without asking, for up to three "
+                "rounds. Works on the song the mixer is on and checkpoints its mix before and after. "
+                "Returns what each agent said and did."
+            ),
+            "inputSchema": _schema({"goal": {"type": "string", "description": "Optional, e.g. \"vocals on top\"."}}),
+        },
+        {
             "name": "browse_folders",
             "description": "List a folder on this computer, for finding stems to import. No path: a starting place.",
             "inputSchema": _schema({"path": {"type": "string"}}),
@@ -262,6 +273,12 @@ def call_tool(hs, name, args):
             if entry.get("proposal"):
                 out.append(_proposal_text(entry["proposal"]))
         return "\n\n".join(out) or "The assistant didn't reply."
+    if name == "expert_mode":
+        from app.expert import transcript_text
+
+        before = len(hs.get("/api/state")["chat"])
+        state = hs.post("/api/expert", {"goal": args.get("goal") or ""})
+        return transcript_text(state["chat"][before:]) or "The crew didn't say anything."
     if name == "browse_folders":
         return json.dumps(hs.get("/api/folders", path=args.get("path")), indent=1)
     if name == "import_folder":

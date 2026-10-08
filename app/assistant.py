@@ -413,8 +413,9 @@ class Conversation:
             p["status"] = status
             p["results"] = results
 
-    def add_proposal(self, actions, text=None):
-        """A proposal from an outside agent (app/mcp.py): shown and applied like the assistant's own.
+    def add_proposal(self, actions, text=None, agent=None):
+        """A proposal from an outside agent (app/mcp.py) or expert mode (app/expert.py, which
+        names its agent): shown and applied like the assistant's own.
 
         The model's history doesn't hear of it; the next session notes show what it changed.
         """
@@ -424,9 +425,16 @@ class Conversation:
             for other in self.proposals.values():
                 if other["id"] != pid and other["status"] == "pending":
                     other["status"] = "superseded"
-            self._entry(role="assistant", text=text or proposal_sentence(actions), proposal_id=pid)
+            fields = {"role": "expert", "agent": agent} if agent else {"role": "assistant"}
+            self._entry(**fields, text=text or proposal_sentence(actions), proposal_id=pid)
             self.feed.publish("end")  # open pages refresh and show it
             return pid
+
+    def post_expert(self, agent, text):
+        """A line in the chat from one of expert mode's agents (app/expert.py)."""
+        with self._lock:
+            self._entry(role="expert", agent=agent, text=text)
+        self.feed.publish("crew", None)  # open pages refresh and show it
 
     # -- internals ----------------------------------------------------------
 
