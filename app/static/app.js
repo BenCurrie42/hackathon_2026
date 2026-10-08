@@ -114,6 +114,98 @@ async function liveCmd(cmd, args = {}) {
   }
 }
 
+// -- motion -------------------------------------------------------------------
+//
+// Nothing the volunteer didn't move themselves jumps: a value Live or the assistant
+// changed glides to where it is now, new things slide in, and things that change place
+// travel there. Whatever the volunteer is holding follows their hand with no delay.
+// With reduced motion asked for, everything lands at once.
+
+const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+const GLIDE_MS = 420;
+const motion = () => !reducedMotion.matches;
+const tweens = new WeakMap(); // owner -> {key: animation frame id}
+
+/* Move a number from one value to another over ms, calling apply(value, finished) each frame. */
+function tween(owner, key, from, to, apply, ms = GLIDE_MS) {
+  let running = tweens.get(owner);
+  if (!running) tweens.set(owner, running = {});
+  cancelAnimationFrame(running[key]);
+  delete running[key];
+  if (!motion() || !Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+    apply(to, true);
+    return;
+  }
+  const start = performance.now();
+  const frame = (now) => {
+    const k = Math.min(1, (now - start) / ms);
+    const eased = 1 - Math.pow(1 - k, 3);
+    apply(from + (to - from) * eased, k === 1);
+    if (k < 1) running[key] = requestAnimationFrame(frame);
+    else delete running[key];
+  };
+  running[key] = requestAnimationFrame(frame);
+}
+
+function stopTween(owner, key) {
+  const running = tweens.get(owner);
+  if (running && running[key] !== undefined) {
+    cancelAnimationFrame(running[key]);
+    delete running[key];
+  }
+}
+
+/* A range input set from Live: the thumb glides there. onFrame(value) keeps a readout in step. */
+function glideInput(input, to, onFrame) {
+  to = Number(to);
+  const from = parseFloat(input.value);
+  if (input._glideTo === to && tweens.get(input)?.value !== undefined) return;   // already on its way
+  input._glideTo = to;
+  tween(input, "value", from, to, (v) => {
+    input.value = String(v);
+    onFrame?.(v);
+  });
+}
+
+/* Slide a newly shown element in. */
+function enter(node, delay = 0, from = "translateY(8px)") {
+  if (motion() && node) {
+    node.animate([{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }],
+      { duration: 340, delay, easing: EASE, fill: "backwards" });
+  }
+  return node;
+}
+
+/* Fade an element out, then take it away. */
+function leave(node) {
+  if (!motion() || !node.isConnected) return node.remove();
+  node.animate([{ opacity: 1 }, { opacity: 0, transform: "translateY(-4px) scale(0.98)" }],
+    { duration: 200, easing: "ease-in", fill: "forwards" }).onfinish = () => node.remove();
+}
+
+/* Run a change to the page, then let every keyed element that moved travel from where it was.
+   key(node) names an element across redraws, so rows that are rebuilt still glide. */
+function flip(container, selector, key, change) {
+  const before = new Map();
+  if (motion()) {
+    for (const node of container.querySelectorAll(selector)) {
+      if (key(node) != null) before.set(key(node), node.getBoundingClientRect());
+    }
+  }
+  change();
+  if (!before.size) return;
+  for (const node of container.querySelectorAll(selector)) {
+    if (key(node) == null) continue;
+    const was = before.get(key(node));
+    if (!was) continue;
+    const now = node.getBoundingClientRect();
+    const dx = was.left - now.left;
+    const dy = was.top - now.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    node.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 460, easing: EASE });
+  }
+}
+
 // -- polling ------------------------------------------------------------------
 
 let pollTimer = null;
@@ -176,7 +268,13 @@ function renderLive() {
     play.classList.toggle("playing", snap.song.is_playing);
     play.setAttribute("aria-label", snap.song.is_playing ? "Stop" : "Play");
     const tempo = $("#tempo-input");
-    if (document.activeElement !== tempo) tempo.value = Math.round(snap.song.tempo * 100) / 100;
+    if (document.activeElement !== tempo) {
+      const bpm = Math.round(snap.song.tempo * 100) / 100;
+      if (tempo._glideTo !== bpm) {
+        tempo._glideTo = bpm;
+        tween(tempo, "value", parseFloat(tempo.value), bpm, (v, done) => { tempo.value = done ? bpm : Math.round(v); });
+      }
+    }
     paintMeter($("#master-meter"), snap.master?.meter);
     setCount("mixer", snap.tracks.length);
     setCount("songs", snap.scenes.length);
@@ -295,6 +393,9 @@ function dockedProposal() {
   return found;
 }
 
+const chatSeen = new Set();   // chat entries already drawn once, so only new ones slide in
+let chatShown = false;
+
 function renderChat() {
   const pendingText = pendingMessage();
   const docked = dockedProposal();
@@ -309,39 +410,56 @@ function renderChat() {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   const welcome = $("#welcome");
   box.replaceChildren(welcome);
+  // each entry slides in the first time it's drawn; what was there when the page opened just shows
+  let fresh = 0;
+  const once = (node, key) => {
+    if (!chatSeen.has(key)) {
+      chatSeen.add(key);
+      if (chatShown) enter(node, 60 * fresh++);
+    }
+    return node;
+  };
+  const wasSending = chatSeen.has("sending");
   welcome.hidden = state.chat.length > 0 || sending !== null;
   if (!welcome.hidden) paintWelcome();
 
   for (const entry of state.chat) {
     if (entry.role === "note" || entry.role === "heard") {
-      box.append(eventLine(entry.role, entry.text || ""));
+      box.append(once(eventLine(entry.role, entry.text || ""), `e${entry.id}`));
       continue;
     }
     if (entry.text || entry.thinking) {
       const node = turn(entry.role, entry.text || "");
       if (entry.thinking) node.insertBefore(thoughts(entry.thinking, entry.id), $(".turn-text", node));
-      box.append(node);
+      // the volunteer's own message already slid in while it was being sent
+      if (entry.role === "user" && wasSending) chatSeen.add(`t${entry.id}`);
+      box.append(once(node, `t${entry.id}`));
     }
     if (entry.proposal && entry.proposal !== docked && entry.proposal.id !== docked?.id) {
-      box.append(slipEl(entry.proposal, false));
+      box.append(once(slipEl(entry.proposal, false), `p${entry.proposal.id}:${entry.proposal.status}`));
     }
   }
   if (pendingText !== null) {
     const node = turn("user", pendingText);
     node.classList.add("pending");
-    box.append(node);
-  }
+    box.append(once(node, "sending"));
+  } else chatSeen.delete("sending");
   if (reply) {
-    box.append(reply.el);
+    box.append(once(reply.el, "reply"));
   } else if (sending !== null || state.busy) {
-    box.append(working("Working…"));
+    box.append(once(working("Working…"), "working"));
   }
+  if (!reply) chatSeen.delete("reply");
+  if (!(sending !== null || state.busy) || reply) chatSeen.delete("working");
   const dock = $("#slip-dock");
   const keepSteps = docked && dock._lastSlip === docked.id ? $(".steps", dock)?.scrollTop : null;
   dock.replaceChildren(...(docked ? [slipEl(docked, true)] : []));
   if (docked) {
     const steps = $(".steps", dock);
     if (steps && dock._lastSlip !== docked.id) {
+      // the assistant's list rises into place, a step at a time
+      enter(dock.firstElementChild, 0, "translateY(24px)");
+      $$(".step", steps).forEach((row, i) => enter(row, 120 + i * 45, "translateX(-6px)"));
       steps.scrollTop = 0;
       const n = docked.steps.length;
       say(`Holy Sound suggests ${n} change${n === 1 ? "" : "s"}. Press Apply or Not now.`);
@@ -352,6 +470,7 @@ function renderChat() {
     dock._lastSlip = docked.id;
   }
 
+  chatShown = true;
   if (!welcome.hidden) box.scrollTop = 0;
   else if (nearBottom || sending !== null || !box._shown) box.scrollTop = box.scrollHeight;
   box._shown = true;
@@ -504,6 +623,8 @@ function consequence(step) {
   return null;
 }
 
+const stepStates = new Map();   // "proposal:step" -> the state it was last drawn in
+
 function stepRow(step, i, mode, p) {
   const li = el("li", "step");
   li.append(el("span", "step-num", String(i + 1)));
@@ -529,6 +650,13 @@ function stepRow(step, i, mode, p) {
   }
   const words = { waiting: "Waiting", working: "Working", done: "Done", check: "Check", failed: "Failed" };
   const status = el("span", "step-state " + stateName);
+  const stepKey = `${p.id}:${i}`;
+  const was = stepStates.get(stepKey);
+  stepStates.set(stepKey, stateName);
+  if (was && was !== stateName) {
+    status.classList.add("just-changed");
+    if (stateName !== "working") enter(status, 0, "scale(0.85)");
+  }
   if (stateName !== "waiting") {
     const lamp = el("i", "lamp");
     lamp.style.background = { working: "var(--text)", done: "var(--green)", check: "var(--amber)", failed: "var(--red)" }[stateName];
@@ -953,7 +1081,14 @@ const groupEls = new Map(); // folder key (or "returns") -> dom refs
 let dragging = null;        // the strip being dragged to another folder
 let selectedKey = null;     // "t0" / "r1": the channel shown in the drawer
 
+let mixerShown = false;   // after the first drawing, new channels slide in rather than just appear
+
 function renderMixer(snap) {
+  flip($("#groups"), ".strip", (node) => node._key, () => drawMixer(snap));
+  mixerShown = true;
+}
+
+function drawMixer(snap) {
   renderMixSong(snap);
   const groups = buildMixerGroups(snap);
   const groupsEl = $("#groups");
@@ -984,8 +1119,9 @@ function renderMixer(snap) {
   for (const [key, strip] of strips) {
     if (!keepStrips.has(key)) {
       clearTimeout(strip._stopTimer);
-      strip.remove();
       strips.delete(key);
+      strip._key = null;
+      leave(strip);
     }
   }
 
@@ -1140,7 +1276,9 @@ function ensureGroup(key) {
   apply(loadCollapsedGroups().has(key));
   bus.addEventListener("click", () => {
     const folded = !section.classList.contains("folded");
-    apply(folded);
+    // the folders beside it slide over; opened strips fan back in
+    flip($("#groups"), ".track-group", (node) => node.dataset.group, () => apply(folded));
+    if (!folded) [...stripsEl.children].forEach((strip, i) => enter(strip, i * 35, "translateX(-10px)"));
     saveGroupCollapsed(key, folded);
   });
   // the label text arrives after the group is made
@@ -1240,9 +1378,14 @@ function placeStrips(container, rows, prefix, snap, keep) {
       strip = createStrip();
       strip._key = key;
       strips.set(key, strip);
+      if (mixerShown) strip._entering = true;
     }
     if (container.children[i] !== strip) container.insertBefore(strip, container.children[i] || null);
     updateStrip(strip, row, snap);
+    if (strip._entering) {
+      strip._entering = false;
+      enter(strip, 0, "translateY(14px) scale(0.96)");
+    }
   });
 }
 
@@ -1269,7 +1412,10 @@ function keepSelection(groups) {
     return;
   }
   const strip = strips.get(selectedKey);
-  if (drawer.firstElementChild !== strip._more) drawer.replaceChildren(strip._more);
+  if (drawer.firstElementChild !== strip._more) {
+    drawer.replaceChildren(strip._more);
+    enter(strip._more, 0, "translateY(6px)");
+  }
 }
 
 function selectStrip(strip, scroll = false) {
@@ -1343,13 +1489,15 @@ function buildMore(strip) {
   keyLine.append(followsKey, el("span", "", "Changes with the song key"));
   routing.append(el("h3", "", "Where it plays"), folderLine, copyColours, routeLine, keyLine, clipGains);
 
-  more.append(channel, sound, effects, routing);
+  const tone = buildTone(strip);
+  more.append(channel, sound, effects, routing, tone.section);
   strip._more = more;
   return {
     title, name, summary, colourChip: chip, mute, solo, soundHelp,
     balance, balanceInput: $("input", balance), balanceOut: $("output", balance),
     sendsTitle, sends, devicesTitle, devices, addDevice, folderLine, copyColours, folderSel, routeLine, clipGains,
     song, songTitle, songOn, songLevelInput: $("input", songLevel), songLevelOut: $("output", songLevel), keyLine, followsKey,
+    tone,
   };
 }
 
@@ -1396,6 +1544,8 @@ function createStrip() {
   // the strip's own pan bar moves the same value; the dot follows it at once
   slider(r.panInput, m.balanceOut, (pan) => ({ cmd: "set_pan", args: { ...target(strip), pan } }), panText);
   r.panInput.addEventListener("input", () => r.pan.style.setProperty("--p", String((parseFloat(r.panInput.value) + 1) / 2)));
+  r.panInput.addEventListener("pointerdown", () => r.pan.classList.add("is-down"));
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) r.panInput.addEventListener(ev, () => r.pan.classList.remove("is-down"));
   r.panInput.addEventListener("dblclick", () => { r.panInput.value = "0"; r.panInput.dispatchEvent(new Event("input", { bubbles: true })); r.panInput.dispatchEvent(new Event("change", { bubbles: true })); });
 
   wireFader(strip);
@@ -1547,7 +1697,7 @@ function slider(input, output, command, format) {
     liveCmd(cmd, args).catch(() => {});
     last = Date.now();
   };
-  input.addEventListener("pointerdown", () => holding.add(input));
+  input.addEventListener("pointerdown", () => { holding.add(input); stopTween(input, "value"); input._glideTo = null; });
   for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) {
     input.addEventListener(ev, () => setTimeout(() => holding.delete(input), 1200));
   }
@@ -1556,6 +1706,8 @@ function slider(input, output, command, format) {
   new MutationObserver(announce).observe(input, { attributes: true, attributeFilter: ["value"] });
   input.addEventListener("input", () => {
     holding.add(input);
+    stopTween(input, "value");
+    input._glideTo = null;
     output.textContent = format(parseFloat(input.value));
     announce();
     clearTimeout(timer);
@@ -1679,12 +1831,11 @@ function updateStrip(strip, row, snap) {
 
   const pan = row.pan_value ?? panFromText(row.pan);
   if (!holding.has(r.panInput)) {
-    r.panInput.value = String(pan);
-    r.pan.style.setProperty("--p", String((pan + 1) / 2));
+    glideInput(r.panInput, pan, (v) => r.pan.style.setProperty("--p", String((v + 1) / 2)));
     r.panInput.setAttribute("aria-valuetext", panText(pan));
   }
   if (!holding.has(m.balanceInput)) {
-    m.balanceInput.value = String(pan);
+    glideInput(m.balanceInput, pan);
     const words = panText(pan);
     if (m.balanceInput.getAttribute("aria-valuetext") !== words) m.balanceInput.setAttribute("aria-valuetext", words);
     if (m.balanceOut.textContent !== words) m.balanceOut.textContent = words;
@@ -1693,8 +1844,10 @@ function updateStrip(strip, row, snap) {
 
   const devSig = JSON.stringify(row.devices);
   if (m.devices._sig !== devSig) {
+    const had = m.devices._sig ? JSON.parse(m.devices._sig).length : null;
     m.devices._sig = devSig;
     m.devices.replaceChildren(...row.devices.map((d, i) => deviceRow(strip, d, i)));
+    if (had !== null) [...m.devices.children].slice(had).forEach((node, i) => enter(node, i * 60));
   }
 
   if (m.sends.children.length !== row.sends.length) {
@@ -1708,14 +1861,17 @@ function updateStrip(strip, row, snap) {
     const input = $("input", control);
     input.setAttribute("aria-label", `${label.textContent} send, ${row.name}`);
     if (!holding.has(input)) {
-      input.value = String(Math.round(dbToPos(s.level_db ?? -70) * 1000));
+      const out = $("output", control);
+      glideInput(input, Math.round(dbToPos(s.level_db ?? -70) * 1000), (v) => {
+        const shown = sendText(posToDb(v / 1000));
+        if (out.textContent !== shown) out.textContent = shown;
+      });
       const words = sendText(s.level_db);
       if (input.getAttribute("aria-valuetext") !== words) input.setAttribute("aria-valuetext", words);
-      const out = $("output", control);
-      if (out.textContent !== words) out.textContent = words;
     }
   });
   updateClips(strip, row, snap);
+  updateTone(strip, row);
 }
 
 /* The picked song's own level and On/Off for this channel, and whether it follows the song key. */
@@ -1733,8 +1889,7 @@ function updateSongMix(strip, row, snap) {
     m.songOn.title = on ? `Press to leave ${row.name} out of ${name}.` : `Press to bring ${row.name} back into ${name}.`;
     m.songLevelInput.setAttribute("aria-label", `${row.name} level in ${name}`);
     if (!holding.has(m.songLevelInput)) {
-      m.songLevelInput.value = clip.gain_db ?? 0;
-      m.songLevelOut.textContent = dbText(clip.gain_db ?? 0);
+      glideInput(m.songLevelInput, clip.gain_db ?? 0, (v) => { m.songLevelOut.textContent = dbText(Math.round(v * 10) / 10); });
     }
   }
   // Click and guide keep their key when a song is transposed; any track can opt in or out.
@@ -1768,8 +1923,8 @@ function updateClips(strip, row, snap) {
     const clip = clips.find((c) => c.scene_index === control._scene);
     const input = $("input", control);
     if (!clip || holding.has(input)) continue;
-    input.value = clip.gain_db ?? -24;
-    $("output", control).textContent = trueMinus(clip.gain || "");
+    const out = $("output", control);
+    glideInput(input, clip.gain_db ?? -24, (v) => { out.textContent = dbText(Math.round(v * 10) / 10); });
   }
 }
 
@@ -1784,6 +1939,315 @@ function clipGainControl(strip, clip, snap) {
   slider($("input", control), $("output", control),
     (db) => ({ cmd: "set_clip_gain", args: { track_index: strip._row.index, scene_index: clip.scene_index, db } }), dbText);
   return control;
+}
+
+// -- tone: the channel's EQ Eight, drawn as a curve with a handle per band ----------------
+
+const EQ_H = 200;        // viewBox height; the width follows the graph's shape on screen
+const EQ_TOP = 18;       // room for a handle at +15 dB
+const EQ_BOTTOM = 162;   // and at -15 dB, above the frequency labels
+const EQ_MIN_HZ = 20;
+const EQ_MAX_HZ = 20000;
+const EQ_RANGE_DB = 15;  // EQ Eight's own gain range
+const EQ_RATE = 48000;   // for drawing only
+const EQ_GAINED = new Set(["low shelf", "bell", "high shelf"]);
+const EQ_LABELS = {
+  "low cut 48": "Low cut (steep)", "low cut": "Low cut", "low shelf": "Low shelf", "bell": "Bell",
+  "notch": "Notch", "high shelf": "High shelf", "high cut": "High cut", "high cut 48": "High cut (steep)",
+};
+const EQ_GUESSED = Object.keys(EQ_LABELS);
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/* One of EQ_LABELS' keys for Live's name of a filter type (same rules as app/eq.py). */
+function eqKind(text, index) {
+  const t = (text || "").toLowerCase();
+  const steep = t.includes("48");
+  let side = null;
+  if (t.includes("notch")) return "notch";
+  if (t.includes("bell") || t.includes("peak")) return "bell";
+  if (t.includes("shelf")) return t.includes("low") ? "low shelf" : "high shelf";
+  if (t.includes("pass")) side = t.includes("high") ? "low cut" : "high cut";
+  else if (t.includes("cut")) side = t.includes("low") ? "low cut" : "high cut";
+  if (side) return steep ? side + " 48" : side;
+  return EQ_GUESSED[index] || "bell";
+}
+
+const EQ_MID = (EQ_TOP + EQ_BOTTOM) / 2;
+const EQ_HALF = (EQ_BOTTOM - EQ_TOP) / 2;
+const hzToX = (hz, w) => (Math.log(hz / EQ_MIN_HZ) / Math.log(EQ_MAX_HZ / EQ_MIN_HZ)) * w;
+const xToHz = (x, w) => EQ_MIN_HZ * Math.pow(EQ_MAX_HZ / EQ_MIN_HZ, Math.min(1, Math.max(0, x / w)));
+const dbToY = (db) => EQ_MID - (db / EQ_RANGE_DB) * EQ_HALF;
+const yToDb = (y) => Math.max(-EQ_RANGE_DB, Math.min(EQ_RANGE_DB, ((EQ_MID - y) / EQ_HALF) * EQ_RANGE_DB));
+
+function hzText(hz) {
+  return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+/* A band's response in dB at one frequency: the textbook (RBJ) biquads, close enough to draw. */
+function bandDb(b, hz) {
+  const w0 = (2 * Math.PI * b.freq_hz) / EQ_RATE;
+  const cos = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * Math.max(0.1, b.q));
+  const A = Math.pow(10, b.gain_db / 40);
+  const sq = 2 * Math.sqrt(A) * alpha;
+  let c;  // [b0, b1, b2, a0, a1, a2]
+  switch (b.kind.replace(" 48", "")) {
+    case "bell": c = [1 + alpha * A, -2 * cos, 1 - alpha * A, 1 + alpha / A, -2 * cos, 1 - alpha / A]; break;
+    case "low shelf": c = [A * ((A + 1) - (A - 1) * cos + sq), 2 * A * ((A - 1) - (A + 1) * cos), A * ((A + 1) - (A - 1) * cos - sq),
+      (A + 1) + (A - 1) * cos + sq, -2 * ((A - 1) + (A + 1) * cos), (A + 1) + (A - 1) * cos - sq]; break;
+    case "high shelf": c = [A * ((A + 1) + (A - 1) * cos + sq), -2 * A * ((A - 1) + (A + 1) * cos), A * ((A + 1) + (A - 1) * cos - sq),
+      (A + 1) - (A - 1) * cos + sq, 2 * ((A - 1) - (A + 1) * cos), (A + 1) - (A - 1) * cos - sq]; break;
+    case "low cut": c = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    case "high cut": c = [(1 - cos) / 2, 1 - cos, (1 - cos) / 2, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    case "notch": c = [1, -2 * cos, 1, 1 + alpha, -2 * cos, 1 - alpha]; break;
+    default: return 0;
+  }
+  const w = (2 * Math.PI * hz) / EQ_RATE;
+  const mag = (x0, x1, x2) => {
+    const re = x0 + x1 * Math.cos(w) + x2 * Math.cos(2 * w);
+    const im = x1 * Math.sin(w) + x2 * Math.sin(2 * w);
+    return re * re + im * im;
+  };
+  const db = 10 * Math.log10(mag(c[0], c[1], c[2]) / mag(c[3], c[4], c[5]));
+  return b.kind.endsWith("48") ? db * 4 : db;
+}
+
+function eqBands(eq) {
+  return eq.bands.map((b) => ({ ...b, kind: eqKind(b.type, b.type_index) }));
+}
+
+function curvePath(bands, w) {
+  const on = bands.filter((b) => b.on);
+  let d = "";
+  for (let x = 0; x <= w; x += 3) {
+    const hz = xToHz(x, w);
+    const db = on.reduce((sum, b) => sum + bandDb(b, hz), 0);
+    const y = Math.max(EQ_TOP - 12, Math.min(EQ_BOTTOM + 12, dbToY(db)));
+    d += `${x ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }
+  return d;
+}
+
+function svgEl(name, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+
+function buildTone(strip) {
+  const section = el("section", "m-tone");
+  const head = el("div", "tone-head");
+  const title = el("h3", "", "Tone (EQ)");
+  const flat = button("Flat", "text-btn tone-flat", () => eqFlat(strip));
+  head.append(title, flat);
+  const help = el("p", "tone-help");
+  const svg = svgEl("svg", { class: "eq-graph", role: "group" });
+  const grid = svgEl("g", { class: "eq-grid" });
+  const fill = svgEl("path", { class: "eq-fill" });
+  const curve = svgEl("path", { class: "eq-curve" });
+  const handles = svgEl("g", { class: "eq-handles" });
+  svg.append(grid, fill, curve, handles);
+  const band = el("div", "tone-band");
+  const bandName = el("span", "tone-band-name");
+  const typeSel = el("select", "tone-type");
+  typeSel.setAttribute("aria-label", "Filter type");
+  const onLine = el("label", "tone-on");
+  const onBox = el("input");
+  onBox.type = "checkbox";
+  onLine.append(onBox, el("span", "", "On"));
+  const readout = el("output", "tone-readout");
+  band.append(bandName, typeSel, onLine, readout);
+  const none = el("div", "tone-none");
+  none.append(el("p", "", "No EQ on this channel yet."),
+    button("Add EQ", "add-device", () => liveCmd("load_device", { ...target(strip), device_name: "EQ Eight" }).catch(() => {})));
+  section.append(head, help, none, svg, band);
+
+  const t = { section, title, flat, help, svg, grid, fill, curve, handles, band, bandName, typeSel, onBox, readout, none,
+    selected: 1, bands: null, w: 600 };
+  new ResizeObserver(() => layoutTone(strip)).observe(svg);
+  typeSel.addEventListener("change", () => setBand(strip, t.selected, { type_index: parseInt(typeSel.value, 10) }, true));
+  onBox.addEventListener("change", () => setBand(strip, t.selected, { on: onBox.checked }, true));
+  return t;
+}
+
+/* Fit the drawing to the graph's shape on screen, so it fills the width without stretching. */
+function layoutTone(strip) {
+  const t = strip._r.more.tone;
+  const box = t.svg.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const w = Math.round((box.width / box.height) * EQ_H);
+  if (w === t.w && t.grid.childElementCount) return;
+  t.w = w;
+  t.svg.setAttribute("viewBox", `0 0 ${w} ${EQ_H}`);
+  const lines = [];
+  for (const hz of [50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
+    lines.push(svgEl("line", { x1: hzToX(hz, w), x2: hzToX(hz, w), y1: 0, y2: EQ_BOTTOM + 14 }));
+    const label = svgEl("text", { x: hzToX(hz, w), y: EQ_H - 8, "text-anchor": "middle" });
+    label.textContent = hz >= 1000 ? `${hz / 1000}k` : String(hz);
+    lines.push(label);
+  }
+  for (const db of [-12, -6, 6, 12]) lines.push(svgEl("line", { x1: 0, x2: w, y1: dbToY(db), y2: dbToY(db), class: "minor" }));
+  lines.push(svgEl("line", { x1: 0, x2: w, y1: dbToY(0), y2: dbToY(0), class: "zero" }));
+  t.grid.replaceChildren(...lines);
+  paintTone(strip);
+}
+
+/* Change one band on screen at once, and in Live (throttled while dragging). */
+function setBand(strip, n, change, now = false) {
+  const t = strip._r.more.tone;
+  stopTween(t, "bands");
+  const b = t.bands && t.bands.find((x) => x.band === n);
+  if (!b) return;
+  Object.assign(b, change);
+  if (change.type_index !== undefined) b.kind = eqKind(t.types[change.type_index], change.type_index);
+  t.heldUntil = performance.now() + 1500;
+  paintTone(strip);
+  t.pending = { ...(t.pending || {}), ...change };
+  const push = () => {
+    const args = { ...target(strip), band: n, device_index: t.deviceIndex, ...t.pending };
+    t.pending = null;
+    t.lastPush = Date.now();
+    liveCmd("set_eq_band", args).catch(() => {});
+  };
+  clearTimeout(t.timer);
+  if (now || Date.now() - (t.lastPush || 0) > 120) push();
+  else t.timer = setTimeout(push, 120);
+}
+
+async function eqFlat(strip) {
+  try {
+    render(await api("/api/eq-flat", { track: strip._row.name, is_return: strip._row.is_return }));
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function updateTone(strip, row) {
+  const t = strip._r.more.tone;
+  const eq = row.eq;
+  t.none.hidden = !!eq;
+  t.svg.style.display = eq ? "" : "none";
+  t.band.hidden = !eq;
+  t.flat.hidden = !eq;
+  t.help.textContent = mixSong != null
+    ? `Drag a dot to shape the sound. Saved with ${songName(state.live.snapshot, mixSong) || "this song"}.`
+    : "Drag a dot to shape the sound: left and right is pitch, up and down is louder or quieter.";
+  if (!eq) { t.bands = null; return; }
+  if (t.dragging || performance.now() < (t.heldUntil || 0)) return;
+  const sig = JSON.stringify(eq);
+  if (t.sig === sig) return;
+  t.sig = sig;
+  t.types = eq.types && eq.types.length ? eq.types : EQ_GUESSED;
+  t.deviceIndex = eq.device_index;
+  const from = t.bands && t.bands.length === eq.bands.length ? t.bands.map((b) => ({ ...b })) : null;
+  const to = eqBands(eq);
+  t.bands = to;
+  const typesSig = t.types.join("|");
+  if (t.typeSel._sig !== typesSig) {
+    t.typeSel._sig = typesSig;
+    t.typeSel.replaceChildren(...t.types.map((text, i) => new Option(EQ_LABELS[eqKind(text, i)] || text, String(i))));
+  }
+  if (t.handles.childElementCount !== t.bands.length) buildHandles(strip);   // keep focus on a dot across updates
+  if (!from) {
+    paintTone(strip);
+    return;
+  }
+  // the dots and the curve travel from the old settings to the new: pitch on a log scale
+  tween(t, "bands", 0, 1, (k) => {
+    t.bands = to.map((b, i) => ({
+      ...b,
+      freq_hz: Math.exp(Math.log(from[i].freq_hz) + (Math.log(b.freq_hz) - Math.log(from[i].freq_hz)) * k),
+      gain_db: from[i].gain_db + (b.gain_db - from[i].gain_db) * k,
+      q: from[i].q + (b.q - from[i].q) * k,
+    }));
+    paintTone(strip);
+  }, 520);
+}
+
+function buildHandles(strip) {
+  const t = strip._r.more.tone;
+  t.handles.replaceChildren(...t.bands.map((b) => {
+    const g = svgEl("g", { class: "eq-handle", tabindex: "0", role: "slider" });
+    g.append(svgEl("circle", { r: 13 }));
+    const label = svgEl("text", { "text-anchor": "middle", dy: "4.5" });
+    label.textContent = String(b.band);
+    g.append(label);
+    g._band = b.band;
+    wireHandle(strip, g);
+    return g;
+  }));
+}
+
+function wireHandle(strip, g) {
+  const t = strip._r.more.tone;
+  const n = g._band;
+  const toGraph = (e) => {
+    const box = t.svg.getBoundingClientRect();
+    return { x: ((e.clientX - box.left) / box.width) * t.w, y: ((e.clientY - box.top) / box.height) * EQ_H };
+  };
+  g.addEventListener("pointerdown", (e) => {
+    stopTween(t, "bands");
+    t.selected = n;
+    t.dragging = true;
+    g.setPointerCapture(e.pointerId);
+    paintTone(strip);
+    e.preventDefault();
+  });
+  g.addEventListener("pointermove", (e) => {
+    if (!t.dragging || !g.hasPointerCapture(e.pointerId)) return;
+    const p = toGraph(e);
+    const b = t.bands.find((x) => x.band === n);
+    const change = { freq_hz: Math.round(xToHz(p.x, t.w)) };
+    if (!b.on) change.on = true;
+    if (EQ_GAINED.has(b.kind)) change.gain_db = Math.round(yToDb(p.y) * 2) / 2;
+    setBand(strip, n, change);
+  });
+  const end = () => { t.dragging = false; t.heldUntil = performance.now() + 1500; };
+  g.addEventListener("pointerup", end);
+  g.addEventListener("pointercancel", end);
+  g.addEventListener("focus", () => { t.selected = n; paintTone(strip); });
+  g.addEventListener("dblclick", () => setBand(strip, n, { gain_db: 0 }, true));
+  g.addEventListener("keydown", (e) => {
+    const b = t.bands.find((x) => x.band === n);
+    const step = e.shiftKey ? 4 : 1;
+    let change = null;
+    if (e.key === "ArrowLeft") change = { freq_hz: Math.max(EQ_MIN_HZ, Math.round(b.freq_hz / Math.pow(2, step / 12))) };
+    if (e.key === "ArrowRight") change = { freq_hz: Math.min(EQ_MAX_HZ, Math.round(b.freq_hz * Math.pow(2, step / 12))) };
+    if (e.key === "ArrowUp" && EQ_GAINED.has(b.kind)) change = { gain_db: Math.min(EQ_RANGE_DB, b.gain_db + 0.5 * step) };
+    if (e.key === "ArrowDown" && EQ_GAINED.has(b.kind)) change = { gain_db: Math.max(-EQ_RANGE_DB, b.gain_db - 0.5 * step) };
+    if (!change) return;
+    e.preventDefault();
+    setBand(strip, n, change);
+  });
+}
+
+function bandText(b) {
+  const words = [hzText(b.freq_hz)];
+  if (EQ_GAINED.has(b.kind)) words.push(dbText(b.gain_db));
+  if (b.kind === "bell") words.push(`Q ${b.q.toFixed(2)}`);
+  return words.join(" · ");
+}
+
+function paintTone(strip) {
+  const t = strip._r.more.tone;
+  if (!t.bands) return;
+  const path = curvePath(t.bands, t.w);
+  t.curve.setAttribute("d", path);
+  t.fill.setAttribute("d", `${path}L${t.w},${dbToY(0)}L0,${dbToY(0)}Z`);
+  for (const g of t.handles.children) {
+    const b = t.bands.find((x) => x.band === g._band);
+    const y = EQ_GAINED.has(b.kind) ? dbToY(b.gain_db) : dbToY(0);
+    g.setAttribute("transform", `translate(${hzToX(b.freq_hz, t.w).toFixed(1)},${y.toFixed(1)})`);
+    g.classList.toggle("is-off", !b.on);
+    g.classList.toggle("is-selected", b.band === t.selected);
+    g.setAttribute("aria-label", `Band ${b.band}, ${EQ_LABELS[b.kind]}${b.on ? "" : ", off"}`);
+    g.setAttribute("aria-valuetext", bandText(b));
+  }
+  const b = t.bands.find((x) => x.band === t.selected) || t.bands[0];
+  t.bandName.textContent = `Band ${b.band}`;
+  if (document.activeElement !== t.typeSel) t.typeSel.value = String(b.type_index);
+  t.onBox.checked = b.on;
+  t.readout.textContent = bandText(b);
 }
 
 function deviceRow(strip, name, index) {
@@ -2071,12 +2535,21 @@ function renderSongs(snap) {
   const playing = playingScenes(snap);
   const sig = JSON.stringify([snap.scenes, [...playing]]);
   if (sig === songsSig) return;
-  songsSig = sig;
-  list.replaceChildren(...snap.scenes.map((scene) => songRow(scene, playing.has(scene.index))));
+  const first = !list.childElementCount && !songsShown;
+  songsShown = true;
+  // rows are rebuilt, so they're followed by song name: a moved song travels to its new place
+  const known = new Set([...list.children].map((li) => li._song));
+  flip(list, ".song", (li) => li._song, () => {
+    list.replaceChildren(...snap.scenes.map((scene) => songRow(scene, playing.has(scene.index))));
+  });
+  if (!first) [...list.children].filter((li) => !known.has(li._song)).forEach((li, i) => enter(li, i * 50));
 }
+
+let songsShown = false;
 
 function songRow(scene, isPlaying) {
   const li = el("li", "song");
+  li._song = scene.name || `#${scene.index}`;
   li.classList.toggle("playing", isPlaying);
   li.append(el("span", "song-num", String(scene.index + 1)));
 
@@ -2183,15 +2656,21 @@ $("#add-song").addEventListener("submit", async (e) => {
 
 let roomSig = "";
 
+let roomShown = false;
+
 function renderRoom() {
   const facts = state.room || [];
   const list = $("#facts");
   const sig = JSON.stringify(facts);
   if (sig === roomSig) return;
+  const known = roomShown ? new Set([...list.children].map((li) => li._fact)) : null;
+  roomShown = true;
   roomSig = sig;
   $("#facts-empty").hidden = facts.length > 0;
   list.replaceChildren(...facts.map((f) => {
     const li = el("li", "fact");
+    li._fact = f.id;
+    if (known && !known.has(f.id)) enter(li);
     li.append(el("span", "fact-date", shortDate(f.added)), el("span", "fact-text", f.text));
     const forget = button("Forget", "text-btn", async () => {
       try {
@@ -2226,7 +2705,8 @@ $("#add-fact").addEventListener("submit", async (e) => {
 let currentTab = "mixer";
 
 function setTab(tab) {
-  if (tab !== currentTab) $("#pane-session").scrollTop = 0;
+  const changed = tab !== currentTab;
+  if (changed) $("#pane-session").scrollTop = 0;
   currentTab = tab;
   $$(".tab").forEach((t) => {
     const on = t.dataset.tab === tab;
@@ -2234,10 +2714,14 @@ function setTab(tab) {
     t.tabIndex = on ? 0 : -1;
   });
   if (state) renderLive();
+  if (changed) enter($(`#panel-${tab}`), 0, "translateY(6px)");
 }
 
 function setView(view) {
+  const was = $("#layout").dataset.view;
+  const changed = was !== undefined && (was === "chat") !== (view === "chat");   // only the phone swaps panes
   $("#layout").dataset.view = view;
+  if (changed) enter($(view === "chat" ? "#pane-chat" : "#pane-session"), 0, "translateY(6px)");
   $$(".bottom-nav button").forEach((b) => {
     if (b.dataset.view === view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
@@ -2266,9 +2750,10 @@ $$(".bottom-nav button").forEach((b) => b.addEventListener("click", () => setVie
 function toast(message, kind = "info") {
   const node = el("div", "toast " + kind, message);
   $("#toasts").append(node);
-  let timer = setTimeout(() => node.remove(), kind === "error" ? 8000 : 4000);
+  enter(node, 0, "translateX(24px)");
+  let timer = setTimeout(() => leave(node), kind === "error" ? 8000 : 4000);
   node.addEventListener("mouseenter", () => clearTimeout(timer));
-  node.addEventListener("mouseleave", () => { timer = setTimeout(() => node.remove(), 2500); });
+  node.addEventListener("mouseleave", () => { timer = setTimeout(() => leave(node), 2500); });
 }
 
 listen();

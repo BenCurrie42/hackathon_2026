@@ -2,7 +2,9 @@
 
 Same rule as file_builder/rig_spec.py: actions carry intent, never device parameters. A track is
 named, a level is in dB, an effect is a stock device (optionally one of its
-stock presets). Everything Ableton-specific happens in RigLink.
+stock presets). Everything Ableton-specific happens in RigLink. The one device
+setting is EQ Eight's bands, in Hz, dB and a fixed list of filter types, with
+limits tighter than the device's own.
 
 Tracks are referred to the way a volunteer would: by name, by the number Live
 shows beside them (1-based), or by a return track's letter (A, B, ...).
@@ -20,7 +22,7 @@ from typing import Annotated, ClassVar, Literal, Union
 
 from pydantic import BaseModel, Field, model_validator
 
-from app import mixdown, parts
+from app import eq, mixdown, parts
 from app.folders import FAMILIES, KEYS, classify
 from app.live import LiveUnavailable
 from live_control.starting_fader import starting_fader_db
@@ -437,6 +439,76 @@ class RemoveDevice(BaseModel):
         return f"Removed {matches[-1]['name']} from {t.name}."
 
 
+EqType = Literal[eq.TYPES]
+
+
+class EqBand(BaseModel):
+    """One EQ Eight band. Leave a field null to keep what the band has now."""
+
+    band: int = Field(ge=1, le=eq.BANDS, description="Which band, 1 to 8.")
+    on: bool = Field(default=True, description="False switches the band off.")
+    type: EqType | None = Field(default=None, description=(
+        "low cut / high cut (12 dB per octave; '48' versions are steep), low shelf / high shelf, bell, notch."))
+    freq_hz: float | None = Field(default=None, ge=20, le=20000, description="Centre or corner frequency in Hz.")
+    gain_db: float | None = Field(default=None, ge=-12, le=9, description=(
+        "Boost or cut in dB, for bell and shelves. Cuts and notches ignore it."))
+    q: float | None = Field(default=None, ge=0.3, le=8, description=(
+        "Width for a bell: 0.7 broad and musical, 2-4 narrow (cuts only). Leave null otherwise."))
+
+
+class SetEq(BaseModel):
+    """Shape a track's tone with its EQ Eight (added if the track has none). Per song, like the faders."""
+
+    action: Literal["set_eq"]
+    track: TrackRef
+    bands: list[EqBand] = Field(default_factory=list, max_length=eq.BANDS, description=(
+        "The bands to change; the rest stay as they are (or flat, with flat_first)."))
+    flat_first: bool = Field(default=False, description=(
+        "Reset all eight bands to EQ Eight's flat default before applying bands. Use it to start a "
+        "curve over, e.g. when fixing an EQ that's been messed up."))
+    song: MixSong
+
+    def describe(self):
+        start = "Reset the EQ on" if self.flat_first and not self.bands else "Set the EQ on"
+        words = "; ".join(_eq_change(b) for b in self.bands)
+        if self.flat_first and self.bands:
+            words = "flat, then " + words
+        return _in_song(self.song, f"{start} “{self.track}”" + (f": {words}" if words else ""))
+
+    def run(self, ex):
+        t = ex.track(self.track)
+        later = ex.later_song(self.song)
+        live_eq = ex.eq_now(t)
+        added = ""
+        if live_eq is None:
+            devices = ex.call("list_devices", track_index=t.index, is_return=t.is_return)
+            if any(d.get("class_name") == "Eq8" for d in devices):
+                raise ActionFailed(f"{t.name} has an EQ Eight I can't read, so I left it alone. "
+                                   "Restarting Ableton may fix it.")
+            problems = []
+            ex.load_device(problems, t.index, t.is_return, Device(device="EQ Eight"))
+            if problems:
+                raise ActionFailed(problems[0][0].upper() + problems[0][1:] + ".")
+            live_eq = ex.eq_now(t)
+            if live_eq is None:
+                raise ActionFailed(f"I added EQ Eight to {t.name} but can't read it back.")
+            added = "Added EQ Eight. "
+        changes = [b.model_dump() for b in self.bands]
+        if later:
+            base = eq.flat() if self.flat_first else (ex.saved_eq(later, t) or eq.bands_of(live_eq))
+            bands = eq.merged(base, changes)
+            ex.save_for_song(later, t, eq_bands=bands)
+            return f"{added}{t.name} will have EQ {eq.describe(bands)} in {later}."
+        base = eq.flat() if self.flat_first else eq.bands_of(live_eq)
+        bands = eq.merged(base, changes)
+        where = {"track_index": t.index, "is_return": t.is_return}
+        for cmd, args in eq.commands(where, live_eq, bands):
+            ex.call(cmd, **args)
+        now = ex.eq_now(t)
+        shown = eq.describe(eq.bands_of(now)) if now else eq.describe(bands)
+        return f"{added}{t.name} EQ is now {shown}."
+
+
 class SetTempo(BaseModel):
     """The whole set's tempo now. A song's own tempo is update_song."""
 
@@ -838,7 +910,7 @@ class Listen(BaseModel):
 
 Action = Union[
     AddTrack, AddReturn, RenameTrack, DeleteTrack, SetVolume, SetPan, SetMute, SetSolo,
-    SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetTempo, AddSong, UpdateSong,
+    SetInput, SetOutput, SetSend, AddDevice, RemoveDevice, SetEq, SetTempo, AddSong, UpdateSong,
     MoveSong, TransposeSong, DeleteSong, StartSong, PickSongMix, SaveCheckpoint, RestoreCheckpoint,
     Transport, SetColor, MoveToFolder, ImportPart, SetClipGain, TidyIntoParts, Listen,
 ]
@@ -1040,7 +1112,7 @@ class Executor:
         value = strip.get("sends", {}).get(send_to) if send_to else strip.get("volume_db")
         return song_mixes.SILENT_DB if value is None else float(value)
 
-    def save_for_song(self, song, target, volume_db=None, pan=None, mute=None, send=None):
+    def save_for_song(self, song, target, volume_db=None, pan=None, mute=None, send=None, eq_bands=None):
         """Change one track in a song's saved mix, without touching Live now."""
         from app import song_mixes
 
@@ -1048,7 +1120,20 @@ class Executor:
             return song_mixes.mix_of(self._live.snapshot(max_age=0))
 
         self.mixes.edit(song, seed, target.is_return, target.name,
-                        volume_db=volume_db, pan=pan, mute=mute, send=send)
+                        volume_db=volume_db, pan=pan, mute=mute, send=send, eq_bands=eq_bands)
+
+    def eq_now(self, target):
+        """The track's EQ Eight as RigLink reports it, or None if it has none."""
+        snap = self._live.snapshot(max_age=0)
+        rows = snap["returns"] if target.is_return else snap["tracks"]
+        row = next((r for r in rows if r["index"] == target.index), None)
+        return row.get("eq") if row else None
+
+    def saved_eq(self, song, target):
+        """The track's EQ bands in a song's saved mix, or None."""
+        saved = self.mixes.saved(song) if self.mixes else None
+        strip = (saved or {}).get("returns" if target.is_return else "tracks", {}).get(target.name.casefold())
+        return (strip or {}).get("eq")
 
     def song(self, ref):
         rows = self.call("list_scenes")
@@ -1063,6 +1148,21 @@ class Executor:
             return guess
         names = ", ".join(s["name"] or str(s["index"] + 1) for s in rows) or "none yet"
         raise ActionFailed(f"There's no song called {ref}. The songs are: {names}.")
+
+
+def _eq_change(b):
+    if not b.on:
+        return f"band {b.band} off"
+    words = [f"band {b.band}"]
+    if b.type:
+        words.append(b.type)
+    if b.freq_hz is not None:
+        words.append(eq.hz(b.freq_hz))
+    if b.gain_db is not None and (b.type is None or b.type in eq.GAINED):
+        words.append(f"{b.gain_db:+g} dB")
+    if b.q is not None and (b.type is None or b.type == "bell"):
+        words.append(f"Q {b.q:g}")
+    return " ".join(words)
 
 
 def _in_song(song, text):

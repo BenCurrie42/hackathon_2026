@@ -26,19 +26,19 @@ uv run python -m unittest tests.test_app.ServerTest                # one class
 uv run python -m unittest tests.test_app.RoomMemoryTest.test_xxx   # one test
 ```
 
-Result: **`Ran 143 tests in ~40s, OK`** (103 in `test_app.py`, 24 in `test_providers.py`, 16 in `test_write_als.py`). `tests/__init__.py` makes the folder discoverable; before 1.1.0 bare discovery silently ran 0 tests.
+Result: **`Ran 153 tests in ~40s, OK`** (113 in `test_app.py`, 24 in `test_providers.py`, 16 in `test_write_als.py`). `tests/__init__.py` makes the folder discoverable; before 1.1.0 bare discovery silently ran 0 tests.
 
 `tests/test_write_als.py` renders a click/pad/guide/keys spec against `templates/test.als` and checks formatting, the header, track order, input routing, gain, send holders, the pointee pool, `Track.N` references, and that the template is untouched. Its `DeviceTest` reads Live's `.adv` presets and skips when Live isn't installed. RigLink itself has no tests (see [riglink.md](riglink.md)); the fake Live stands in for it.
 
 ## What the tests cover
 
-`tests/test_app.py` (103 tests):
+`tests/test_app.py` (113 tests):
 
 | Class | Tests | Covers |
 | --- | --- | --- |
 | `ActionsTest` | 13 | Each proposable action running through `app/actions.py` against the fake Live; `run_all`, including the `on_step` working/done/check/failed states |
 | `SnapshotTest` | 2 | The mixer/song snapshot read from Live |
-| `ConversationTest` | 11 | `app/assistant.py:Conversation` with `ScriptedClaude`: tool loop, streaming, thinking, request shape, `session_notes` |
+| `ConversationTest` | 12 | `app/assistant.py:Conversation` with `ScriptedClaude`: tool loop, streaming, thinking, request shape, `session_notes` |
 | `ServerTest` | 14 | Real `ThreadingHTTPServer` on an ephemeral port: JSON API, events, apply flow and its `applying` progress in `/api/state`, 500 on an unexpected error |
 | `ListenToStemsTest` | 5 | `app/song_map.py` on synthetic WAV stems |
 | `StartingFaderTest` | 1 | `live_control/starting_fader.py` |
@@ -51,6 +51,8 @@ Result: **`Ran 143 tests in ~40s, OK`** (103 in `test_app.py`, 24 in `test_provi
 | `VendorSetTest` | 4 | `app/vendor_set.py` reading a vendor set (including the Live 8 layout) |
 | `TrackLayoutGuardTest` | 3 | The track layout rules (no track per stem, No Input, part tracks) hold in `import_part`, `song import` and `tidy_into_parts` |
 | `SongMixTest` | 16 | `app/song_mixes.py` and the server's song mixes: put back on pick or song start, only differences sent, survives restart and renames, checkpoints and undo, assistant actions for another song, `by_db` from a song's own level, loose names, notes |
+| `EqRulesTest` | 3 | `app/eq.py`: Live's type names map onto one vocabulary; a messed-up vocal gets every problem named; a gentle curve gets none |
+| `EqTest` | 6 | `set_eq` against the fake Live: adds an EQ Eight and shapes it, EQ follows the song, another song's EQ waits for it, a messed-up EQ is flagged in the notes and a fix clears it, the Flat button through the server, action limits tighter than the device. Shares `SongMixCase` with `SongMixTest` |
 | `FolderTest` | 3 | `app/folders.py` classification and remembered moves |
 | `RoomMemoryTest` | 4 | `app/room.py` persistence |
 | `ProposalLimitTest` | 1 | `Proposal` size limit (pydantic `ValidationError`) |
@@ -83,6 +85,17 @@ Result: **`Ran 143 tests in ~40s, OK`** (103 in `test_app.py`, 24 in `test_provi
 - **Scripted Claude.** `ScriptedClaude` replaces `anthropic.Anthropic`: it exposes `beta.messages.stream`, replays canned replies via `ScriptedStream` as stream events, and records each request (deep-copied) so tests can assert on what was sent. Helpers `text`, `call`, `reply`, `thinking` build the canned blocks.
 - **Provider HTTP stubs.** `tests/test_providers.py` routes every HTTP call through `FakeOpener` / `FakeResponse` (patched with `unittest.mock`), so no network.
 - **Real files, temp dirs.** Audio tests (`StemFolderCase`) write synthetic WAVs to temp directories. Room and folder memory take their location from `HOLYSOUND_HOME` / explicit paths rather than touching `~/.holysound`.
+
+## EQ eval (`scripts/eq_eval.py`)
+
+Not a unit test: it costs model calls. Each case wrecks one track's EQ Eight in the fake Live, sends the volunteer's complaint to the model `.env` picks, applies what it proposes, and scores the curve left: **clean** (no `eq.problems`), **gentle** (no boost over +4 dB, shelf over 3 dB or cut deeper than -6 dB), **small** (at most four bands doing anything), **heard** (the complaint's frequency range was touched). Six cases (`honky`, `harsh`, `muffled`, `boomy`, `gutted`, `wrecked`); last run 6/6 passed. Uses a temp `HOLYSOUND_HOME`, never your real memory.
+
+```
+uv run python scripts/eq_eval.py              # every case
+uv run python scripts/eq_eval.py honky harsh  # some of them
+```
+
+Rerun it after changing the Tone (EQ) prompt rules or `app/eq.py`'s problem rules.
 
 ## Live dev loop
 
@@ -130,7 +143,7 @@ Ranked by Sunday impact from `docs/td_next.md`:
 
 1. Item 1 (conversation to RigSpec) is done in 1.0.0; the leftover question is whether RigLink should consume `RigSpec`.
 2. **Record-arm and monitoring** (`mix monitor`, `track arm`): small command pair, most common "mic isn't working" cause. Touches [riglink.md](riglink.md) and [cli-and-live-control.md](cli-and-live-control.md).
-3. **Effect settings**: a short named list of safe controls (delay time/feedback, reverb decay, dry/wet), set by searching the parameter's display text like volume.
+3. **Effect settings**: EQ Eight bands are done; delay time/feedback, reverb decay and dry/wet remain, set the same way by searching the parameter's display text.
 4. **User Library presets** (cheapest part of non-stock content).
 5. **Song-to-song transitions**: blocked on asking the church whether the setlist is scenes or locators.
 6. MIDI mapping, clip editing (warping, loops), group tracks, renderer gaps (hardware output routing needs one probe).

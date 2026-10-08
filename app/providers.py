@@ -9,12 +9,15 @@ same shape, so the conversation never knows who answered:
 Both stream. on_event(kind, data), if given, hears the reply as it's written:
 ("thinking", text), ("text", text) and ("tool", name) as a tool call starts.
 
-Two providers:
+Three providers:
 
 - AnthropicProvider: the Anthropic SDK. Talks to Claude directly, or to an
   OpenCode Go model that speaks Anthropic's Messages format (Qwen, MiniMax).
 - OpenAIChatProvider: OpenAI's Chat Completions format over plain urllib, for
   the OpenCode Go models that speak it (Kimi, GLM, DeepSeek, MiMo...).
+- GlooProvider: the same Chat Completions format against Gloo AI Studio, with
+  Gloo's routing (a model, auto routing or a model family), its optional
+  `tradition`, and either an API key or OAuth client credentials.
 
 OpenCode Go doesn't translate between formats, so each model has to be called
 in its own. discover_models() asks OpenCode Go which models exist and
@@ -25,10 +28,12 @@ Configuration comes from the environment (.env), see .env.example.
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -41,6 +46,13 @@ PREFERRED_OPENCODE_MODEL = "kimi-k3"
 MAX_TOKENS = 16000
 REQUEST_TIMEOUT = 180  # seconds; a long proposal takes a while to write
 DISCOVERY_TIMEOUT = 4
+
+GLOO_BASE_URL = "https://platform.ai.gloo.com/ai/v2/guarded"
+GLOO_TOKEN_URL = "https://platform.ai.gloo.com/oauth2/token"
+GLOO_MODELS_URL = "https://platform.ai.gloo.com/platform/v2/models"  # public, no key
+DEFAULT_GLOO_MODEL = "gloo-anthropic-claude-sonnet-5.5"
+GLOO_FAMILIES = ("openai", "anthropic", "google", "open source")
+GLOO_TRADITIONS = ("evangelical", "catholic", "mainline", "not_faith_specific")
 
 CHAT, MESSAGES, RESPONSES = "chat", "messages", "responses"
 
@@ -228,8 +240,8 @@ class OpenAIChatProvider:
         self.opener = opener or urllib.request.urlopen
         self.session_id = None  # set per conversation; OpenCode Go requires it
 
-    def create(self, system, tools, messages, on_event=None):
-        body = {
+    def body(self, system, tools, messages):
+        return {
             "model": self.model,
             "max_tokens": MAX_TOKENS,
             "messages": chat_messages(system, messages),
@@ -239,19 +251,24 @@ class OpenAIChatProvider:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body).encode(),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream, application/json",
-                "User-Agent": USER_AGENT,
-                **session_headers(self.session_id),
-            },
-            method="POST",
-        )
+
+    def headers(self):
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+            "User-Agent": USER_AGENT,
+            **session_headers(self.session_id),
+        }
+
+    def create(self, system, tools, messages, on_event=None):
         try:
+            request = urllib.request.Request(
+                self.url,
+                data=json.dumps(self.body(system, tools, messages)).encode(),
+                headers=self.headers(),
+                method="POST",
+            )
             with self.opener(request, timeout=REQUEST_TIMEOUT) as response:
                 data = read_chat(response, on_event)
         except urllib.error.HTTPError as e:
@@ -274,6 +291,84 @@ class OpenAIChatProvider:
                 "Try again in a minute.")
         detail = f": {message}" if message else ""
         return AssistantUnavailable(f"The AI service turned that request down ({error.code}){detail}.")
+
+
+class GlooProvider(OpenAIChatProvider):
+    """Gloo AI Studio's Completions V2: OpenAI Chat format plus Gloo's routing.
+
+    model is a Gloo model id, "auto" (Gloo picks per request) or a model family
+    ("anthropic", "openai", "google", "open source"). credentials is an API key,
+    or a GlooToken for OAuth client credentials.
+    """
+
+    def __init__(self, credentials, model, tradition=None, base_url=GLOO_BASE_URL, opener=None):
+        token = credentials if isinstance(credentials, GlooToken) else None
+        super().__init__(base_url, None if token else credentials, model,
+                         key_var=token.key_var if token else "GLOO_API_KEY", opener=opener)
+        self.token = token
+        self.tradition = tradition
+
+    def body(self, system, tools, messages):
+        body = super().body(system, tools, messages)
+        del body["parallel_tool_calls"]  # not in Gloo's request schema
+        routing = self.model.strip().lower()
+        if routing == "auto":
+            del body["model"]
+            body["auto_routing"] = True
+        elif routing in GLOO_FAMILIES:
+            del body["model"]
+            body["model_family"] = routing
+        if self.tradition:
+            body["tradition"] = self.tradition
+        if self.session_id:
+            body["prompt_cache_key"] = self.session_id
+        return body
+
+    def headers(self):
+        key = self.token.get(self.opener) if self.token else self.api_key
+        return {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+            "User-Agent": USER_AGENT,
+        }
+
+
+class GlooToken:
+    """An OAuth access token from Gloo's client credentials, fetched again before it expires."""
+
+    key_var = "GLOO_CLIENT_ID and GLOO_CLIENT_SECRET"
+
+    def __init__(self, client_id, client_secret, url=GLOO_TOKEN_URL, clock=None):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.url = url
+        self.clock = clock or time.monotonic
+        self._token, self._expires_at = None, 0.0
+
+    def get(self, opener):
+        if self._token and self.clock() < self._expires_at - 60:
+            return self._token
+        basic = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+        request = urllib.request.Request(
+            self.url,
+            data=b"grant_type=client_credentials&scope=api/access",
+            headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": USER_AGENT},
+            method="POST",
+        )
+        try:
+            with opener(request, timeout=DISCOVERY_TIMEOUT * 4) as response:
+                data = json.loads(response.read())
+            self._token = data["access_token"]
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):
+                raise AssistantSetupError(bad_key(self.key_var)) from e
+            raise AssistantUnavailable(UNREACHABLE) from e
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise AssistantUnavailable(UNREACHABLE) from e
+        self._expires_at = self.clock() + float(data.get("expires_in") or 3600)
+        return self._token
 
 
 def _error_message(error):
@@ -482,6 +577,40 @@ def discover_models(base_url=OPENCODE_BASE_URL, opener=None, refresh=False):
     return _discovered
 
 
+_gloo_catalog = None
+
+
+def gloo_models(opener=None, refresh=False):
+    """({model id: catalog entry} for Gloo's chat models, live?). Cached per process."""
+    global _gloo_catalog
+    if _gloo_catalog is not None and not refresh:
+        return _gloo_catalog
+    try:
+        listed = _get_json(GLOO_MODELS_URL, opener or urllib.request.urlopen)["data"]
+        models = {m["id"]: m for m in listed if m.get("id") and m.get("supports_streaming")}
+        _gloo_catalog = (models, True)
+    except (OSError, ValueError, KeyError, TypeError):
+        _gloo_catalog = ({}, False)
+    return _gloo_catalog
+
+
+def gloo_models_text(env, opener=None):
+    models, live = gloo_models(opener)
+    chosen = env.get("HOLYSOUND_MODEL") or DEFAULT_GLOO_MODEL
+    if not live:
+        return "Couldn't reach Gloo AI Studio's model list. Check this computer's internet connection."
+    usable = {i: m for i, m in models.items() if m.get("supports_tools") and not m.get("is_deprecated")}
+    width = max(len(i) for i in usable)
+    lines = ["Gloo AI Studio models that can drive Holy Sound (tool calling):"]
+    for model_id, m in usable.items():
+        mark = "  <- in use" if model_id == chosen else ""
+        lines.append(f"  {model_id.ljust(width)}  {m.get('family') or ''}{mark}")
+    lines.append("")
+    lines.append("Pick one with HOLYSOUND_MODEL=... in .env, or HOLYSOUND_MODEL=auto to let Gloo choose "
+                 "per message, or a family: anthropic, openai, google, open source.")
+    return "\n".join(lines)
+
+
 def _get_json(url, opener):
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "holy-sound"})
     with opener(request, timeout=DISCOVERY_TIMEOUT) as response:
@@ -520,6 +649,8 @@ def default_model(models):
 def list_models_text(env=None, opener=None):
     """What `python -m app --list-models` prints."""
     env = os.environ if env is None else env
+    if chosen_provider_name(env) == "gloo":
+        return gloo_models_text(env, opener)
     base_url = env.get("HOLYSOUND_BASE_URL") or OPENCODE_BASE_URL
     models, live = discover_models(base_url, opener)
     using_go = chosen_provider_name(env) in ("opencode-go", "opencode")
@@ -549,6 +680,8 @@ def chosen_provider_name(env=None):
         return "anthropic"
     if env.get("OPENCODE_API_KEY"):
         return "opencode-go"
+    if env.get("GLOO_API_KEY") or env.get("GLOO_CLIENT_ID"):
+        return "gloo"
     return "anthropic"
 
 
@@ -560,8 +693,10 @@ def provider_from_env(env=None, opener=None):
         return _anthropic_provider(env)
     if name in ("opencode-go", "opencode"):
         return _opencode_provider(env, opener)
+    if name in ("gloo", "gloo-ai"):
+        return _gloo_provider(env, opener)
     raise AssistantSetupError(
-        f"HOLYSOUND_PROVIDER in .env should be anthropic or opencode-go, not \"{name}\".")
+        f"HOLYSOUND_PROVIDER in .env should be anthropic, opencode-go or gloo, not \"{name}\".")
 
 
 def _anthropic_provider(env):
@@ -603,3 +738,31 @@ def _opencode_provider(env, opener=None):
         client = anthropic.Anthropic(base_url=root, api_key=key, default_headers={"User-Agent": USER_AGENT})
         return AnthropicProvider(client, model=model, key_var="OPENCODE_API_KEY", gateway=True)
     return OpenAIChatProvider(base_url, key, model, opener=opener)
+
+
+def _gloo_provider(env, opener=None):
+    key = env.get("GLOO_API_KEY")
+    client_id, secret = env.get("GLOO_CLIENT_ID"), env.get("GLOO_CLIENT_SECRET")
+    if key:
+        credentials = key
+    elif client_id and secret:
+        credentials = GlooToken(client_id, secret)
+    else:
+        raise AssistantSetupError(not_set_up("GLOO_API_KEY"))
+    model = env.get("HOLYSOUND_MODEL") or DEFAULT_GLOO_MODEL
+    if model.strip().lower() not in ("auto", *GLOO_FAMILIES):
+        models, live = gloo_models(opener)
+        if live and model not in models:
+            raise AssistantSetupError(
+                f"Gloo AI Studio doesn't have a model called \"{model}\". Run "
+                "`uv run python -m app --list-models` to see the ones it has.")
+        if live and not models[model].get("supports_tools"):
+            raise AssistantSetupError(
+                f"{model} can't call tools, which Holy Sound needs to make changes. Pick another with "
+                "HOLYSOUND_MODEL in .env (`uv run python -m app --list-models` shows them).")
+    tradition = (env.get("GLOO_TRADITION") or "").strip().lower() or None
+    if tradition and tradition not in GLOO_TRADITIONS:
+        raise AssistantSetupError(
+            f"GLOO_TRADITION in .env should be one of {', '.join(GLOO_TRADITIONS)}, not \"{tradition}\".")
+    return GlooProvider(credentials, model, tradition=tradition,
+                        base_url=(env.get("HOLYSOUND_BASE_URL") or GLOO_BASE_URL), opener=opener)

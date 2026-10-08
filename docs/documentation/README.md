@@ -1,6 +1,6 @@
 # Holy Sound
 
-Describe your Sunday, get a working Ableton Live session. Holy Sound builds and runs a Live set for a church worship team from a plain-English chat. Product framing is in the top-level [README](../../README.md); what is missing, ranked, is in [td_next.md](../td_next.md). Current version: 1.1.0 (see the [changelog](../../CHANGELOG.md)).
+Describe your Sunday, get a working Ableton Live session. Holy Sound builds and runs a Live set for a church worship team from a plain-English chat. Product framing is in the top-level [README](../../README.md); what is missing, ranked, is in [td_next.md](../td_next.md). Current version: 1.2.0 (see the [changelog](../../CHANGELOG.md)).
 
 This folder is mirrored to the GitHub wiki: edit the pages here, then publish them with `scripts/publish_wiki.py`.
 
@@ -26,6 +26,7 @@ How the code works, module by module.
 | [RigLink](riglink.md) | The Control Surface inside Live, its socket protocol, `LiveConnection` |
 | [Web server API](web-server-api.md) | `app/server.py` endpoints, shared Live connection, `fake_live` |
 | [Assistant and actions](assistant-and-actions.md) | Conversation loop, providers, every proposable action |
+| [MCP server](mcp.md) | `app/mcp.py`: driving Holy Sound from any MCP agent |
 | [Audio analysis and memory](audio-analysis-and-memory.md) | WAV/AIFF reading, song maps, room memory, mixer folders and key choices |
 | [Frontend](frontend.md) | `app/static/`: chat, change slip, console mixer, channel drawer, song mix |
 | [Testing and development](testing-and-development.md) | Setup, test suite, Live dev loop, release process |

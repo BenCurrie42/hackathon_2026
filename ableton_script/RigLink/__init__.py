@@ -6,7 +6,8 @@ executing them against the currently open Live Set.
 
 Command vocabulary matches RigSpec, not Live's full API surface: tracks,
 routing, mixer, stock devices and presets, returns and sends, tempo, scenes,
-locators, transport, output meters. Nothing here writes raw device parameters.
+locators, transport, output meters. No raw device parameters: the one device
+setting exposed is EQ Eight's bands, through named controls.
 
 Volume and send levels are set in dB without a dB-to-value formula: we
 binary-search the parameter's own str_for_value() display text, so Live's
@@ -419,18 +420,30 @@ def _parse_db(text):
 
 def _set_db(param, db):
     """Set a dB-displayed parameter by searching its own display strings."""
+    return _set_by_display(param, db, _parse_db)
+
+
+def _set_by_display(param, wanted, parse):
+    """Set a parameter whose display rises with its value, by searching its display strings."""
     lo, hi = param.min, param.max
-    if db <= _parse_db(param.str_for_value(lo)):
+    if wanted <= parse(param.str_for_value(lo)):
         param.value = lo
         return _display(param)
     for _ in range(40):
         mid = (lo + hi) / 2.0
-        if _parse_db(param.str_for_value(mid)) < db:
+        if parse(param.str_for_value(mid)) < wanted:
             lo = mid
         else:
             hi = mid
     param.value = hi
     return _display(param)
+
+
+def _parse_number(text):
+    """A display like "1.20 kHz", "250 Hz", "0.71" or "-3.5 dB" as a number (kHz in Hz)."""
+    text = text.replace("−", "-").strip()
+    number = float(text.split()[0].rstrip("kK"))
+    return number * 1000 if "k" in text.lower() else number
 
 
 def _get_mixer(rf, track_index, is_return=False):
@@ -548,6 +561,122 @@ def _delete_device(rf, track_index, device_index, is_return=False):
     name = track.devices[device_index].name
     track.delete_device(device_index)
     return {"index": device_index, "name": name}
+
+
+def _device_parameters(rf, track_index, device_index, is_return=False):
+    """Every parameter of one device as Live names and shows it. For probing, not for the app."""
+    device = _track(rf, track_index, is_return).devices[device_index]
+    return {
+        "name": device.name,
+        "class_name": device.class_name,
+        "parameters": [
+            {
+                "name": p.name, "value": p.value, "min": p.min, "max": p.max, "display": _display(p),
+                "is_quantized": p.is_quantized, "items": list(p.value_items) if p.is_quantized else [],
+            }
+            for p in device.parameters
+        ],
+    }
+
+
+# -- EQ Eight ----------------------------------------------------------------
+# The one device whose settings can be changed, and only through these named
+# controls. Frequency, gain and Q are set by searching each parameter's own
+# display text, like volume, so Live does every conversion. Filter types are
+# Live's own names for them (value_items), passed back by index.
+
+EQ_CLASS = "Eq8"
+EQ_BANDS = 8
+
+
+def _eq_device(track, device_index=None):
+    if device_index is not None:
+        device = track.devices[device_index]
+        if device.class_name != EQ_CLASS:
+            raise LookupError("%s isn't an EQ Eight" % device.name)
+        return device_index, device
+    for i, device in enumerate(track.devices):
+        if device.class_name == EQ_CLASS:
+            return i, device
+    return None, None
+
+
+def _eq_params(device):
+    return {p.name: p for p in device.parameters}
+
+
+def _eq_band_params(params, band):
+    # Live 12.4.6 names them "1 Filter On A", "1 Filter Type A", "1 Frequency A",
+    # "1 Gain A", "1 Q A"; A is the curve EQ Eight uses in Stereo mode (B is the
+    # second curve in L/R and M/S modes).
+    names = {"on": "Filter On", "type": "Filter Type", "freq": "Frequency", "gain": "Gain", "q": "Q"}
+    found = {}
+    for key, word in names.items():
+        param = params.get("%d %s A" % (band, word))
+        if param is None:
+            raise LookupError("EQ Eight has no %r for band %d" % (word, band))
+        found[key] = param
+    return found
+
+
+def _eq_state(track, device_index=None):
+    """A track's EQ Eight (the first one, unless an index is given) as numbers and Live's words."""
+    index, device = _eq_device(track, device_index)
+    if device is None:
+        return None
+    params = _eq_params(device)
+    bands = []
+    types = []
+    for band in range(1, EQ_BANDS + 1):
+        p = _eq_band_params(params, band)
+        types = list(p["type"].value_items)
+        bands.append({
+            "band": band,
+            "on": bool(p["on"].value),
+            "type_index": int(p["type"].value),
+            "type": _display(p["type"]),
+            "freq_hz": _parse_number(_display(p["freq"])),
+            "gain_db": _parse_number(_display(p["gain"])),
+            "q": _parse_number(_display(p["q"])),
+        })
+    on = params.get("Device On")
+    return {"device_index": index, "on": bool(on.value) if on is not None else True,
+            "types": types, "bands": bands}
+
+
+def _snapshot_eq(track):
+    """The EQ for the snapshot; a track whose EQ can't be read just shows none."""
+    try:
+        return _eq_state(track)
+    except (LookupError, ValueError, IndexError):
+        return None
+
+
+def _get_eq(rf, track_index, is_return=False, device_index=None):
+    state = _eq_state(_track(rf, track_index, is_return), device_index)
+    if state is None:
+        raise LookupError("that track has no EQ Eight")
+    return state
+
+
+def _set_eq_band(rf, track_index, band, is_return=False, device_index=None,
+                 on=None, type_index=None, freq_hz=None, gain_db=None, q=None):
+    track = _track(rf, track_index, is_return)
+    index, device = _eq_device(track, device_index)
+    if device is None:
+        raise LookupError("that track has no EQ Eight")
+    p = _eq_band_params(_eq_params(device), int(band))
+    if type_index is not None:
+        p["type"].value = max(p["type"].min, min(p["type"].max, int(type_index)))
+    if freq_hz is not None:
+        _set_by_display(p["freq"], float(freq_hz), _parse_number)
+    if gain_db is not None:
+        _set_by_display(p["gain"], float(gain_db), _parse_number)
+    if q is not None:
+        _set_by_display(p["q"], float(q), _parse_number)
+    if on is not None:
+        p["on"].value = 1 if on else 0
+    return _eq_state(track, index)["bands"][int(band) - 1]
 
 
 # -- Meters ----------------------------------------------------------------
@@ -1042,6 +1171,7 @@ def _strip(song, i, track, is_return, meters):
             for r, s in zip(song.return_tracks, mixer.sends)
         ],
         "devices": [d.name for d in track.devices],
+        "eq": _snapshot_eq(track),
         "output": _routing_now(track, "output"),
     }
     if not is_return:
@@ -1126,6 +1256,9 @@ COMMANDS = {
     "load_device": _load_device,
     "list_devices": _list_devices,
     "delete_device": _delete_device,
+    "device_parameters": _device_parameters,
+    "get_eq": _get_eq,
+    "set_eq_band": _set_eq_band,
     "reset_meters": _reset_meters,
     "get_meters": _get_meters,
     "import_audio": _import_audio,

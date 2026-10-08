@@ -6,7 +6,7 @@ How to install Holy Sound and open it for the first time. You do not need to kno
 
 - A Mac. Python 3.11 or newer. [uv](https://docs.astral.sh/uv/) to run it.
 - Ableton Live 12. (The format facts were verified on Live 12.4.5; RigLink was probed on 12.4.6.)
-- An Anthropic API key, or an [OpenCode Go](https://opencode.ai/docs/go/) key.
+- An Anthropic API key, an [OpenCode Go](https://opencode.ai/docs/go/) key, or a [Gloo AI Studio](https://studio.ai.gloo.com) key.
 
 You can chat, plan and save new tracks as an Ableton file without Ableton running. To change a set that is open in Ableton, you need RigLink (below).
 
@@ -33,6 +33,19 @@ HOLYSOUND_MODEL=kimi-k3    # optional, kimi-k3 is the default
 ```
 
 `uv run python -m app --list-models` lists the models available right now. A few (Grok, the GPT ones) speak a format Holy Sound does not support, and it says so if you pick one. Claude is what the project is tested against. Provider details: [assistant-and-actions.md](assistant-and-actions.md).
+
+### Using Gloo AI Studio instead
+
+Put this in `.env` (the key is on Gloo AI Studio's API Credentials page):
+
+```sh
+HOLYSOUND_PROVIDER=gloo
+GLOO_API_KEY=your-key
+HOLYSOUND_MODEL=gloo-anthropic-claude-sonnet-5.5   # optional; or auto, or anthropic / openai / google / open source
+GLOO_TRADITION=evangelical                         # optional
+```
+
+An older account with a client ID and secret sets `GLOO_CLIENT_ID` and `GLOO_CLIENT_SECRET` instead of `GLOO_API_KEY`. `--list-models` lists Gloo's models that can call tools.
 
 ## Run it
 

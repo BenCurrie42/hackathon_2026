@@ -220,6 +220,8 @@ own track, each with Live's default input. These hold everywhere audio comes in
   plus static files, no framework or build step. OpenCode Go's
   OpenAI-compatible models go over stdlib `urllib`, not the `openai` package;
   its Anthropic-format models reuse the `anthropic` SDK with a custom `base_url`.
+  Gloo AI Studio uses the same stdlib Chat path. The MCP server is hand-written
+  JSON-RPC, not the `mcp` package.
 - Stock Ableton devices only. No third-party plugins.
 - **Never mutate `templates/`.** Fixtures are `chmod a-w` as a backstop. Git
   doesn't record that bit, so a fresh clone needs `chmod a-w templates/*` again.
@@ -268,7 +270,11 @@ app/                            Web app: chat + mixer, `uv run python -m app`
                                 sorted by track name, plus moves remembered in ~/.holysound/folders.json
     song_mixes.py               Each song's faders, pan, mute and sends, and named checkpoints,
                                 in ~/.holysound/song_mixes.json; the server puts them back on a pick
+    eq.py                       EQ Eight in words: filter types, the curve as text for the
+                                assistant, rule-based EQ problems, set_eq_band diffs
     fake_live.py                In-memory stand-in for Live + RigLink, for tests/demo
+    mcp.py                      MCP server (stdio JSON-RPC, stdlib): any agent drives the
+                                running app's JSON API
     static/                     The page: HTML/CSS/JS, served as-is
 tests/                          unittest suite; needs neither Live nor an API key.
                                 `uv run python -m unittest` runs all of it
@@ -279,6 +285,7 @@ templates/probe_noinput.als     Live's own save of a generated set; source of
 docs/td_next.md                 What's missing, ranked by Sunday impact
 docs/agents_of_flourishing.md   What to add for the Gloo Challenge 1 judges, ranked
 scripts/publish_wiki.py         Copies docs/documentation into a wiki clone
+scripts/eq_eval.py              Messes up an EQ on fake Live, asks the model to fix it, scores it
 
 Run everything from the repo root: imports are package-relative to it
 (`from live_control.live_connection import ...`).
@@ -370,6 +377,14 @@ group tracks.
   stretch them. Auto-Warp still moves each clip's start to its guessed first
   beat (different per stem, up to ~3 s here), so the import resets every clip
   start to 0. With warping off, clip markers are in seconds.
+- EQ Eight through the LOM, probed in 12.4.6 with RigLink's `device_parameters`: 84
+  parameters, `Device On`, `Output`, `Scale`, `Adaptive Q`, then per band n (1-8)
+  `n Filter On A`, `n Filter Type A`, `n Frequency A`, `n Gain A`, `n Q A` and the same
+  with `B` (the second curve in L/R and M/S modes). The width is `Q`, not "Resonance".
+  Filter type `value_items`: `High Pass 48dB`, `High Pass 12dB`, `Low Shelf`, `Bell`,
+  `Notch`, `High Shelf`, `Low Pass 12dB`, `Low Pass 48dB`. Frequency and Q are 0..1
+  internally; displays read `37.5 Hz`, `1000 Hz`, `3.23 kHz`, `-15.0 dB`, `0.71`.
+  A new EQ Eight's bands match `Defaults/Audio Effects/EQ Eight.adv`.
 - Live reads a `.als` once at open and holds it in memory. Rewriting the file
   underneath a running Live does nothing and gets clobbered on its next save.
   **Never generate over a set that's currently open.**

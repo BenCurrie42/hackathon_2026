@@ -56,6 +56,18 @@ OUTPUTS = {
 }
 
 
+# EQ Eight's filter types, as Live 12.4.6 names them (value_items of "1 Filter Type A").
+EQ_TYPES = ["High Pass 48dB", "High Pass 12dB", "Low Shelf", "Bell", "Notch", "High Shelf", "Low Pass 12dB",
+            "Low Pass 48dB"]
+# Its default bands (on, type index, Hz), as in Live's Defaults/Audio Effects/EQ Eight.adv.
+EQ_DEFAULT = [(True, 2, 30.0), (True, 3, 200.0), (True, 3, 1000.0), (True, 5, 5000.0),
+              (False, 3, 100.0), (False, 3, 10000.0), (False, 3, 5000.0), (False, 6, 18000.0)]
+
+
+def _new_eq():
+    return [{"on": on, "type_index": kind, "freq_hz": hz, "gain_db": 0.0, "q": 0.71} for on, kind, hz in EQ_DEFAULT]
+
+
 # Live gives new tracks colours from its palette; these are close enough.
 DEFAULT_COLORS = [0xFF94A6, 0xFFA529, 0xCC9927, 0xF7F47C, 0xBFFB00, 0x1AFF2F, 0x25FFA8, 0x5CFFE8, 0x8BC5FF, 0x5480E4]
 
@@ -121,6 +133,7 @@ class FakeSet:
             "mute": False,
             "solo": False,
             "devices": [],
+            "eqs": [],  # per device: its EQ bands for an EQ Eight, else None
             "output": {"type": "Master", "channel": ""},
             "sends": [None for _ in self.returns],
         }
@@ -156,6 +169,7 @@ class FakeSet:
                 for r, s in zip(self.returns, t["sends"])
             ],
             "devices": list(t["devices"]),
+            "eq": self._eq_state(t),
             "output": dict(t["output"]),
         }
         if not is_return:
@@ -410,6 +424,7 @@ class FakeSet:
                 raise LookupError("%s has no preset called %r" % (name, preset))
         time.sleep(0.3)  # Live walks its browser here; the real thing is slower.
         track["devices"].append(name)
+        track["eqs"].append(_new_eq() if name == "EQ Eight" else None)
         return {"track_index": track_index, "device": device_name, "preset": preset}
 
     def list_devices(self, track_index, is_return=False):
@@ -422,7 +437,51 @@ class FakeSet:
     def delete_device(self, track_index, device_index, is_return=False):
         track = self._track(track_index, is_return)
         name = track["devices"].pop(device_index)
+        track["eqs"].pop(device_index)
         return {"index": device_index, "name": name}
+
+    def _eq_device(self, track, device_index=None):
+        if device_index is not None:
+            if track["eqs"][device_index] is None:
+                raise LookupError("%s isn't an EQ Eight" % track["devices"][device_index])
+            return device_index
+        return next((i for i, e in enumerate(track["eqs"]) if e is not None), None)
+
+    def _eq_state(self, track, device_index=None):
+        i = self._eq_device(track, device_index)
+        if i is None:
+            return None
+        bands = [
+            {"band": n + 1, "on": b["on"], "type_index": b["type_index"], "type": EQ_TYPES[b["type_index"]],
+             "freq_hz": round(b["freq_hz"], 1), "gain_db": round(b["gain_db"], 2), "q": round(b["q"], 2)}
+            for n, b in enumerate(track["eqs"][i])
+        ]
+        return {"device_index": i, "on": True, "types": list(EQ_TYPES), "bands": bands}
+
+    def get_eq(self, track_index, is_return=False, device_index=None):
+        state = self._eq_state(self._track(track_index, is_return), device_index)
+        if state is None:
+            raise LookupError("that track has no EQ Eight")
+        return state
+
+    def set_eq_band(self, track_index, band, is_return=False, device_index=None,
+                    on=None, type_index=None, freq_hz=None, gain_db=None, q=None):
+        track = self._track(track_index, is_return)
+        i = self._eq_device(track, device_index)
+        if i is None:
+            raise LookupError("that track has no EQ Eight")
+        b = track["eqs"][i][int(band) - 1]
+        if type_index is not None:
+            b["type_index"] = max(0, min(len(EQ_TYPES) - 1, int(type_index)))
+        if freq_hz is not None:
+            b["freq_hz"] = max(10.0, min(22000.0, float(freq_hz)))
+        if gain_db is not None:
+            b["gain_db"] = max(-15.0, min(15.0, float(gain_db)))
+        if q is not None:
+            b["q"] = max(0.1, min(18.0, float(q)))
+        if on is not None:
+            b["on"] = bool(on)
+        return self._eq_state(track, i)["bands"][int(band) - 1]
 
     def list_stock_devices(self):
         return {k: list(v) for k, v in STOCK_DEVICES.items()}

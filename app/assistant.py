@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app import song_map
+from app import eq, song_map
 from app.actions import Proposal, is_audible, is_destructive
 from app.providers import (
     AnthropicProvider,
@@ -56,8 +56,9 @@ Propose nothing.
 - Louder or quieter: set_volume with by_db (-3 = 3 dB down, 2 = 2 dB up); the app works out \
 the new level. Use db only for an exact level ("set it to -6").
 - More or less reverb or delay: set_send with by_db and to_return.
-- Which song: put song on set_volume, set_pan, set_mute and set_send when the volunteer names \
-one ("in Washed"). Leave it null for the song the mixer is on.
+- Tone ("muddy", "harsh", "thin", "boomy", "fix the EQ"): set_eq. See "Tone (EQ)".
+- Which song: put song on set_volume, set_pan, set_mute, set_send and set_eq when the volunteer \
+names one ("in Washed"). Leave it null for the song the mixer is on.
 - In every song: one step per song, each with its song.
 - Leave a part out of one song, or bring it back: set_mute with that song, on true or false.
 - Show a song's mix on the mixer now: pick_song_mix. Keep or go back to a snapshot of a \
@@ -94,7 +95,7 @@ them as a session file.
 ## Tools: values and limits
 13. Fader and send levels are dB: 0 is unity, -70 is off, max +6. Pan is -1 (left) to 1 \
 (right). Change levels in 1-3 dB steps.
-14. Each song has its own mix. Faders, pan, mute and sends are saved per song by the app: \
+14. Each song has its own mix. Faders, pan, mute, sends and EQ are saved per song by the app: \
 while the mixer is on a song, every change saves to it, and it comes back when that song is \
 picked or starts. A change for another song only changes its saved mix; the faders don't move \
 until it's on. With the mixer on no song, faders are shared by every song. A song's clips \
@@ -112,8 +113,9 @@ without changing its speed. It doesn't touch MIDI, live inputs, or tracks marked
 key" (click, guide, count and SMPTE by default; the volunteer can change that per track). The \
 notes show each song's transpose.
 17. Refer to tracks by exact name; names must be unique.
-18. You can't change effect settings, group or reorder tracks in Live, delete clips, or move \
-the Master fader. Say so plainly if asked.
+18. The only effect setting you can change is EQ Eight's bands (set_eq). You can't change \
+other effect settings, group or reorder tracks in Live, delete clips, or move the Master \
+fader. Say so plainly if asked.
 19. Use only effect names from the stock device list. Leave presets out unless named.
 20. Meter readings are 0-1 after the fader. Compare tracks with each other; never call a \
 reading dB.
@@ -179,6 +181,24 @@ on choruses and bridges, so where they enter is usually a chorus. A section wher
 drop out is often a verse or a breakdown.
 37. Tell the volunteer what you heard in a sentence or two ("Vox 1 is the lead; the BGVs only \
 come in on the choruses at 0:48 and 2:10"). Call it a guess when file names don't settle it.
+
+## Tone (EQ)
+38. The notes show each track's EQ Eight band by band ("EQ: 1: low cut 90 Hz; 3: bell 300 Hz \
+-3.0 dB Q 1.0") and any EQ PROBLEMS the app found by rule. A track with no EQ line has no EQ \
+Eight; set_eq adds one. Each song keeps its own EQ, like its faders.
+39. Fixing an EQ (it has EQ PROBLEMS, or "fix the EQ", "it sounds wrong"): one set_eq with \
+flat_first true, then a gentle curve for that part. The fix must clear every EQ PROBLEM and add \
+none. Use as few bands as you can (two to four). Say in one sentence what was wrong and what \
+you did, in plain words ("the vocal had a big honky boost; I took it out and cleaned up the \
+low end").
+40. A gentle curve: boosts +4 dB at most and broad (Q 0.7-1.5); cuts down to -6 dB, narrow \
+(Q 2-4) only to remove one problem; shelves under ±3 dB. Low cut: vocals 80-120 Hz, acoustic \
+and electric 80-120 Hz, keys, piano and pads 40-80 Hz, bass and kick 30-40 Hz or none. No high \
+cut below 12 kHz except on bass. Muddy = cut 200-400 Hz; boomy = 80-200 Hz; boxy or honky = \
+500 Hz-1 kHz; harsh = 2.5-5 kHz; thin = lower the low cut or +2 dB at 150-250 Hz; dull = high \
+shelf +2 dB at 8-10 kHz or remove a high cut; vocal clarity = +2 dB at 3-5 kHz.
+41. Small requests are small changes: "a bit less muddy" is one band, about -2 to -3 dB, \
+without flat_first.
 """
 
 
@@ -393,6 +413,21 @@ class Conversation:
             p["status"] = status
             p["results"] = results
 
+    def add_proposal(self, actions, text=None):
+        """A proposal from an outside agent (app/mcp.py): shown and applied like the assistant's own.
+
+        The model's history doesn't hear of it; the next session notes show what it changed.
+        """
+        with self._lock:
+            pid = str(next(self._ids))
+            self.proposals[pid] = {"id": pid, "actions": actions, "status": "pending", "results": None}
+            for other in self.proposals.values():
+                if other["id"] != pid and other["status"] == "pending":
+                    other["status"] = "superseded"
+            self._entry(role="assistant", text=text or proposal_sentence(actions), proposal_id=pid)
+            self.feed.publish("end")  # open pages refresh and show it
+            return pid
+
     # -- internals ----------------------------------------------------------
 
     def _begin(self):
@@ -516,7 +551,8 @@ class Conversation:
                         if other["id"] != pid and other["status"] == "pending":
                             other["status"] = "superseded"
                     self._open_tool_use = (proposal_call["id"], pid, results)
-                    return shown + [said(reply, proposal_id=pid)]
+                    # Some models propose without a word; the volunteer still gets a sentence.
+                    return shown + [said(reply or proposal_sentence(proposal.actions), proposal_id=pid)]
 
                 if invalid is not None:
                     fixes += 1
@@ -843,6 +879,12 @@ def _strip_line(t, scene_names=None):
         parts.append("SOLO")
     if t["devices"]:
         parts.append("effects: " + ", ".join(t["devices"]))
+    if t.get("eq"):
+        bands = eq.bands_of(t["eq"])
+        parts.append("EQ: " + eq.describe(bands, t["eq"].get("on", True)))
+        problems = eq.problems(bands, t["name"])
+        if problems:
+            parts.append("EQ PROBLEMS: " + "; ".join(problems))
     sends = [f"{s['return']} {s['level']}" for s in t["sends"] if s.get("level_db") is not None]
     if sends:
         parts.append("sends: " + ", ".join(sends))
@@ -854,6 +896,28 @@ def _strip_line(t, scene_names=None):
     if clips:
         parts.append("clips: " + ", ".join(clips))
     return " | ".join(parts)
+
+
+def proposal_sentence(actions):
+    """One sentence for a proposal the model sent without saying anything."""
+    n = len(actions)
+    if n == 1:
+        what = actions[0].describe().split(":")[0].rstrip(".")
+        return f"{what}. Press Apply to make the change."
+    names = []
+    for a in actions:
+        name = getattr(a, "track", None) or getattr(a, "part", None)
+        if name and name not in names:
+            names.append(name)
+    where = ""
+    if names:
+        shown = names[:3]
+        rest = len(names) - len(shown)
+        listed = ", ".join(shown[:-1]) + (f" and {shown[-1]}" if len(shown) > 1 else shown[0])
+        if rest:
+            listed = ", ".join(shown) + f" and {rest} more"
+        where = f" to {listed}"
+    return f"Here are {n} changes{where}. Press Apply to make them."
 
 
 def describe_proposal(p):

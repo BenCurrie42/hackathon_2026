@@ -55,6 +55,7 @@ sequenceDiagram
 - Every tool call gets a `tool_result`, in order. Unknown tool name -> error result. Non-dict input (provider returned unparseable JSON) -> error asking to resend.
 - One `propose_changes` per reply; extra calls get `ONE_PROPOSAL` back.
 - A reply to a new volunteer message that has no tool call but reads as making a change (`PROMISE`: "I'll…", "Sending…", "I've turned…", not ending in `?`), or is empty, is sent back once with `NUDGE_PROMISE` / `NUDGE_EMPTY`. Smaller models often describe a change instead of proposing it. Never done when reporting applied results, where "I've turned…" is true.
+- A proposal sent with no text gets one written by `proposal_sentence`: one change reads as its step ("Set the EQ on “Acoustic”. Press Apply to make the change."), several as a count and the first three tracks. No extra model call: the proposal's tool call stays open until the volunteer decides.
 - `stop_reason == "refusal"` -> `_Refused`; history is rewound and the volunteer sees "Sorry, I can't help with that one."
 - Any other exception (including `AssistantUnavailable`) rewinds history (`_rewind`), removes the user entry from the transcript, and re-raises, so a failed turn leaves no trace and the message can be resent.
 - If a text reply accompanies a tool call that is not `propose_changes`, it is shown as its own entry; with a proposal, the text is attached to the proposal entry.
@@ -68,16 +69,16 @@ sequenceDiagram
 
 Two layers, both in `app/assistant.py`:
 
-**`SYSTEM`** (constant, sent as the system prompt every call; cached on Anthropic via `cache_control: ephemeral`). It opens with **What to use for what**, a short map from common requests to actions (questions answered from the notes, `by_db` for up/down, `song` for "in Washed", `set_mute` with a song to leave a part out, checkpoints), written for smaller models. Then 37 numbered rules in sections: how to talk (short, plain sentences, no JSON/IDs, offer don't instruct), how changes happen (propose only; never claim done until a check-marked result), tool values and limits (dB, pan, each song's own mix, song order and `move_song`, what `transpose_song` leaves alone, "can't change effect settings / group tracks / delete clips / move Master"), importing audio (every song on the same part tracks, one `import_part` per part per song, never a track per stem, say the key guess and ask when it is unclear, offer `tidy_into_parts` once for a track-per-stem set and say to save a copy first), mixing guidance (click to in-ears, SMPTE muted, leave parts out of one song by muting them in that song, part tracks stay centre, folders), remembering, safety (`listen`, `start_song`, `transport` make sound), and listening to stems. The colour list is interpolated from `rig.TRACK_COLORS`. The model still speaks in dB (rule 13); only the sentences actions show the volunteer turn fader levels into percentages (see [Wording](#wording)).
+**`SYSTEM`** (constant, sent as the system prompt every call; cached on Anthropic via `cache_control: ephemeral`). It opens with **What to use for what**, a short map from common requests to actions (questions answered from the notes, `by_db` for up/down, `set_eq` for tone words like "muddy" or "harsh", `song` for "in Washed", `set_mute` with a song to leave a part out, checkpoints), written for smaller models. Then 41 numbered rules in sections: how to talk (short, plain sentences, no JSON/IDs, offer don't instruct), how changes happen (propose only; never claim done until a check-marked result), tool values and limits (dB, pan, each song's own mix, song order and `move_song`, what `transpose_song` leaves alone, rule 18: EQ Eight's bands are the only effect setting it can change; it can't group tracks, delete clips or move Master), importing audio (every song on the same part tracks, one `import_part` per part per song, never a track per stem, say the key guess and ask when it is unclear, offer `tidy_into_parts` once for a track-per-stem set and say to save a copy first), mixing guidance (click to in-ears, SMPTE muted, leave parts out of one song by muting them in that song, part tracks stay centre, folders), remembering, safety (`listen`, `start_song`, `transport` make sound), listening to stems, and **Tone (EQ)** (rules 38-41: read the EQ and EQ PROBLEMS lines; fix a messed-up EQ with one `set_eq` with `flat_first` and a gentle two-to-four-band curve that clears every problem; numeric limits for a gentle curve and low cuts per part; a word-to-frequency map for muddy, boomy, boxy, harsh, thin, dull; small requests are one band without `flat_first`). The colour list is interpolated from `rig.TRACK_COLORS`. The model still speaks in dB (rule 13); only the sentences actions show the volunteer turn fader levels into percentages (see [Wording](#wording)).
 
 **`<session>` notes** (rebuilt by `session_notes(snapshot, stock_devices, live_error, imports, room, mix_song, saved_mixes, checkpoints)` on every user message; the prompt tells the model to trust these over earlier chat):
 
 | Section | Source |
 | --- | --- |
 | Live connected? tempo, time signature, playing/stopped; or "Live is NOT connected (reason)" | `snapshot["song"]` / `live_error` |
-| `Tracks:` numbered, one line each via `_strip_line`: name, folder, "keeps its key" (a track a transpose leaves alone), colour name (`color_name`, nearest of `TRACK_COLORS`), audio/MIDI, input, output, volume, pan, MUTED/SOLO, effects, sends, clips per song with gain and "OFF in this song" for a switched-off clip | snapshot + `FolderMemory` (`App.with_folders`) |
+| `Tracks:` numbered, one line each via `_strip_line`: name, folder, "keeps its key" (a track a transpose leaves alone), colour name (`color_name`, nearest of `TRACK_COLORS`), audio/MIDI, input, output, volume, pan, MUTED/SOLO, effects, `EQ:` (the first EQ Eight band by band via `eq.describe`, or "flat" / "switched off") and `EQ PROBLEMS:` (`eq.problems`), sends, clips per song with gain and "OFF in this song" for a switched-off clip | snapshot + `FolderMemory` (`App.with_folders`) |
 | `Returns (shared effects):` lettered A, B, ... | snapshot |
-| `Mixer is on: <song>` (or no song; a picked song the open set doesn't have, say from another set, reads as no song), then `Songs (scenes)…`: index, name, BPM, transpose (`transposed +2`, or "clips at mixed keys"), `MIXER IS ON THIS SONG`, `PLAYING`; under each, `mix:` every track in that song with its fader, `OFF in this song`, `MUTED`, pan and sends (`song_mixes.describe_song`), from the live mixer for the current song, the saved mix for others, or "not saved yet"; and its `checkpoints` by name | snapshot scenes + `SongMixMemory` (`_songs_lines`) |
+| `Mixer is on: <song>` (or no song; a picked song the open set doesn't have, say from another set, reads as no song), then `Songs (scenes)…`: index, name, BPM, transpose (`transposed +2`, or "clips at mixed keys"), `MIXER IS ON THIS SONG`, `PLAYING`; under each, `mix:` every track in that song with its fader, `OFF in this song`, `MUTED`, pan, sends and EQ (`song_mixes.describe_song`), from the live mixer for the current song, the saved mix for others, or "not saved yet"; and its `checkpoints` by name | snapshot scenes + `SongMixMemory` (`_songs_lines`) |
 | `Outputs:` `Master; Ext. Out ...` from `ext_outputs`; falls back to outputs in use with a "ask which ones feed in-ears" hint for older RigLink | `_outputs_line` |
 | `Imported audio folders (import_part can use their files)` name and file count | `App.imports` (also remembered across runs in `imports.json`) |
 | `Stock devices in this Live:` by category; `FALLBACK_DEVICES` when Live is down or lists none | `App.live.stock_devices()` |
@@ -105,22 +106,26 @@ A provider exposes `create(system, tools, messages, on_event=None) -> Reply(stop
 | --- | --- | --- |
 | `AnthropicProvider(gateway=False)` | `anthropic` SDK `client.beta.messages.stream` | Claude directly. Prompt caching on the system block, adaptive thinking with summarized display, `output_config.effort`, `disable_parallel_tool_use`, beta `server-side-fallback-2026-07-01` with `fallbacks="default"`. |
 | `AnthropicProvider(gateway=True)` | `anthropic` SDK `client.messages.stream` against OpenCode Go's root URL | OpenCode Go models that speak Anthropic Messages (Qwen, MiniMax). Plain request only, with `x-opencode-session` header. |
-| `OpenAIChatProvider` | stdlib `urllib.request` POST to `{base}/chat/completions`, SSE streaming | OpenCode Go models that speak Chat Completions (Kimi, GLM, DeepSeek, MiMo). `opener` is injectable for tests. |
+| `OpenAIChatProvider` | stdlib `urllib.request` POST to `{base}/chat/completions`, SSE streaming | OpenCode Go models that speak Chat Completions (Kimi, GLM, DeepSeek, MiMo). `opener` is injectable for tests. Subclasses override `body()` and `headers()`. |
+| `GlooProvider` | `OpenAIChatProvider` against `https://platform.ai.gloo.com/ai/v2/guarded` (Gloo Completions V2) | Gloo AI Studio. Drops `parallel_tool_calls` (not in Gloo's schema) and the OpenCode session header; sends the session id as `prompt_cache_key`. `HOLYSOUND_MODEL=auto` sends `auto_routing: true` and a family name (`anthropic`, `openai`, `google`, `open source`) sends `model_family`, each instead of `model`. Optional `tradition`. Auth is `GLOO_API_KEY` as a Bearer key, or `GlooToken`: OAuth client credentials (Basic auth, `scope=api/access`) at `/oauth2/token`, cached until 60 s before `expires_in`. |
 
 `MAX_TOKENS = 16000`, `REQUEST_TIMEOUT = 180` s (chat provider).
 
 ### Choosing a provider
 
-`chosen_provider_name(env)`: `HOLYSOUND_PROVIDER` if set (`anthropic`, `opencode-go`, or alias `opencode`); else `anthropic` if `ANTHROPIC_API_KEY` is set; else `opencode-go` if `OPENCODE_API_KEY` is set; else `anthropic`. `provider_from_env` is called lazily by `Conversation.client()` on first use (not at server start), so a missing key surfaces in `App.ai_state` as a sentence rather than crashing. `.env` is loaded by `server.load_dotenv` (`os.environ.setdefault`, so real env wins).
+`chosen_provider_name(env)`: `HOLYSOUND_PROVIDER` if set (`anthropic`, `opencode-go` or alias `opencode`, `gloo` or alias `gloo-ai`); else `anthropic` if `ANTHROPIC_API_KEY` is set; else `opencode-go` if `OPENCODE_API_KEY` is set; else `gloo` if `GLOO_API_KEY` or `GLOO_CLIENT_ID` is set; else `anthropic`. `provider_from_env` is called lazily by `Conversation.client()` on first use (not at server start), so a missing key surfaces in `App.ai_state` as a sentence rather than crashing. `.env` is loaded by `server.load_dotenv` (`os.environ.setdefault`, so real env wins).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HOLYSOUND_PROVIDER` | auto (above) | `anthropic` or `opencode-go`; anything else raises `AssistantSetupError`. |
+| `HOLYSOUND_PROVIDER` | auto (above) | `anthropic`, `opencode-go` or `gloo`; anything else raises `AssistantSetupError`. |
 | `ANTHROPIC_API_KEY` | none | Anthropic key. |
-| `HOLYSOUND_MODEL` | `claude-opus-5-5` (Anthropic); `kimi-k3` or first Chat model (OpenCode Go) | Model id. |
+| `HOLYSOUND_MODEL` | `claude-opus-5-5` (Anthropic); `kimi-k3` or first Chat model (OpenCode Go); `gloo-anthropic-claude-sonnet-5.5` (Gloo) | Model id. Gloo also takes `auto` or a model family. |
 | `HOLYSOUND_EFFORT` | `medium` | Anthropic only. |
 | `OPENCODE_API_KEY` | none | OpenCode Go key. |
-| `HOLYSOUND_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenCode Go base URL. |
+| `HOLYSOUND_BASE_URL` | `https://opencode.ai/zen/go/v1` (OpenCode Go); `https://platform.ai.gloo.com/ai/v2/guarded` (Gloo) | Base URL of the chosen gateway. |
+| `GLOO_API_KEY` | none | Gloo AI Studio key. |
+| `GLOO_CLIENT_ID`, `GLOO_CLIENT_SECRET` | none | Gloo OAuth client credentials (deprecated by Gloo; used only without `GLOO_API_KEY`). |
+| `GLOO_TRADITION` | none | `evangelical`, `catholic`, `mainline` or `not_faith_specific`; anything else is a setup error. |
 
 `uv run python -m app --list-models` prints `list_models_text()` and exits.
 
@@ -132,6 +137,10 @@ A provider exposes `create(system, tools, messages, on_event=None) -> Reply(stop
 2. GET `https://models.dev/api.json`; `models_dev_formats` reads provider `opencode-go`, mapping each model's npm package to a format (`@ai-sdk/openai-compatible` -> chat, `@ai-sdk/anthropic` -> messages, `@ai-sdk/openai` -> responses). If models.dev fails, use `guess_format` by family name.
 
 Formats: `chat`, `messages`, `responses`. **Responses-only models (grok, gpt-*-luna, ...) are rejected** with an `AssistantSetupError` telling the volunteer to pick another. If discovery is live and the chosen model isn't listed, that is also a setup error. OpenCode Go does not translate between formats, so each model is called in its own.
+
+### Gloo model catalog
+
+`gloo_models()` GETs `https://platform.ai.gloo.com/platform/v2/models` (public, no key), keeps entries with `supports_streaming`, and caches `({id: entry}, is_live)` per process. With a model id (not `auto` or a family), `_gloo_provider` rejects an id the live catalog doesn't list, and one without `supports_tools`. If the catalog can't be reached the model is used as given. `--list-models` with Gloo chosen prints `gloo_models_text`: tool-capable, non-deprecated models with their family.
 
 ### Format conversion for Chat Completions
 
@@ -158,7 +167,7 @@ Each action is a pydantic model with a `Literal` `action` discriminator, `descri
 
 **References.** Tracks (`TrackRef`): exact name (case-insensitive), 1-based number, return letter `A`/`B`, or a name ignoring Live's `A-` prefix. Songs (`SongRef`): name or 1-based number. Both resolve against the live set *when the action runs*, so a later action can use a track an earlier one created (the executor caches track lists and clears the cache after structural changes). Ambiguous or missing names raise `ActionFailed` with the list of valid names.
 
-**Shared types.** `Device{device, preset?}`; `Output{destination: "Master"|"Ext. Out"|"Sends Only", channel?}`; `InputChannel` is regex `^\d{1,2}(/\d{1,2})?$`; `ColorName` is a `Literal` of `rig.TRACK_COLORS` keys; `FolderKey` is a `Literal` of `app.folders.KEYS`. Level fields: fader/send `-70..6` dB, clip gain `-70..24` dB, pan `-1..1`, BPM `20..999`.
+**Shared types.** `Device{device, preset?}`; `Output{destination: "Master"|"Ext. Out"|"Sends Only", channel?}`; `InputChannel` is regex `^\d{1,2}(/\d{1,2})?$`; `ColorName` is a `Literal` of `rig.TRACK_COLORS` keys; `FolderKey` is a `Literal` of `app.folders.KEYS`. Level fields: fader/send `-70..6` dB, clip gain `-70..24` dB, pan `-1..1`, BPM `20..999`. `EqBand{band 1-8, on, type?, freq_hz? 20..20000, gain_db? -12..9, q? 0.3..8}`, tighter than EQ Eight's own ranges; `type` is a `Literal` of `eq.TYPES`.
 
 Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` ("plays out loud" tag). `Transport.audible` is a property that is true only when `playing`.
 
@@ -168,7 +177,7 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `add_return` | `name`, `devices[]` | `create_return_track`, `load_device` | Returns lettered by index. | |
 | `rename_track` | `track`, `new_name` | `set_track_name` | Also renames in `FolderMemory` so folder moves follow. | |
 | `delete_track` | `track` | `delete_track` | Result says undo in Ableton brings it back. | destructive |
-| `set_volume` | `track`, `db` or `by_db`, `song?` | `set_volume` | Any track or return. A `song` other than the one on the mixer edits only that song's saved mix (`Executor.save_for_song`); Live isn't touched. Same `song` rule for `set_pan`, `set_mute`, `set_send`. | |
+| `set_volume` | `track`, `db` or `by_db`, `song?` | `set_volume` | Any track or return. A `song` other than the one on the mixer edits only that song's saved mix (`Executor.save_for_song`); Live isn't touched. Same `song` rule for `set_pan`, `set_mute`, `set_send`, `set_eq`. | |
 | `set_pan` | `track`, `pan`, `song?` | `set_pan` | | |
 | `set_mute` | `track`, `on`, `song?` | `set_mute` | | |
 | `set_solo` | `track`, `on` | `set_solo` | | |
@@ -177,6 +186,7 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `set_send` | `track`, `to_return`, `db` or `by_db`, `song?` | `set_send` | Fails with a sentence if `to_return` is not a return track. | |
 | `add_device` | `track`, `device{device, preset?}` | `load_device` | Appended at end of chain. A missing preset falls back to the device default with a note (`Executor.load_device`, matches RigLink's "no preset called" error). Any other load failure raises. | |
 | `remove_device` | `track`, `device` (name on the track) | `list_devices`, `delete_device` | Case-insensitive; removes the **last** matching device. Error lists the devices present. | destructive |
+| `set_eq` | `track`, `bands[]` (up to 8 `EqBand`; null fields keep the band's value), `flat_first`, `song?` | `load_device` EQ Eight if the track has none, then one `set_eq_band` per band that differs (`eq.commands`) | `flat_first` resets all eight bands to EQ Eight's default (`eq.FLAT`) before `bands`. Reads the EQ with `Executor.eq_now` (the snapshot's `eq`); for another song it merges onto `Executor.saved_eq` and saves without touching Live. Result describes the curve read back. | |
 | `set_tempo` | `bpm` | `set_tempo` | Whole-set tempo. | |
 | `add_song` | `name`, `bpm?`, `position?` (1 = first) | `create_scene` (with `index`) | Songs are scenes. A position pushes later songs down; null adds at the end. | |
 | `move_song` | `song`, `position` (1 = first) | `list_scenes`, `move_scene` | Moves the song and its clips. Fails with a sentence if the position is past the last slot. | |
@@ -186,7 +196,7 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `start_song` | `song` | `fire_scene` | Launches the scene. | audible |
 | `save_checkpoint` | `label`, `song?` | `App.checkpoint_song_mix` | A named copy of the song's mix (the mixer's song unless named). | |
 | `restore_checkpoint` | `label`, `song?` | `SongMixMemory.find_checkpoint`, `App.restore_song_mix` | Matched by name (exact, then contains). Checkpoints the replaced mix first. For another song only its saved mix changes. | |
-| `pick_song_mix` | `song` (null = no song) | `App.pick_song_mix` | Puts the song's saved faders, pan, mute and sends back. Fails with "Song mixes need the Holy Sound app." when `run_all` gets no `mixes`/`mix_control` (`Executor.need_mix_control`); same for the checkpoint actions. | |
+| `pick_song_mix` | `song` (null = no song) | `App.pick_song_mix` | Puts the song's saved faders, pan, mute, sends and EQ back. Fails with "Song mixes need the Holy Sound app." when `run_all` gets no `mixes`/`mix_control` (`Executor.need_mix_control`); same for the checkpoint actions. | |
 | `transport` | `playing` | `play` / `stop` | | audible when playing |
 | `set_color` | `track`, `color` | `set_track_color` | RGB from `TRACK_COLORS`. | |
 | `move_to_folder` | `track`, `folder` | `FolderMemory.move`, then `set_track_color` | Fails if `ex.folders is None`. Folder is app-side memory only; Live shows it as the folder's colour (colour failure is a partial "But"). Returns not allowed. | |
@@ -194,6 +204,10 @@ Flags: `destructive` (ClassVar, shown as "removes" tag in the UI) and `audible` 
 | `set_clip_gain` | `track`, `song`, `db` | `set_clip_gain` | Clip gain, not the fader. | |
 | `tidy_into_parts` | `assign[]` (up to 100 `{song?, track, part}`: parts for tracks whose names don't say, e.g. a singer's name; null song = every song) | many; see [part-tracks-and-imports.md](part-tracks-and-imports.md) | Rebuilds every song on the part tracks and deletes the per-stem tracks they replace. Takes a minute or two per song. | destructive |
 | `listen` | `song?`, `seconds` (3-30, default 10) | `get_song`, `fire_scene`, `reset_meters`, sleep, `get_meters`, `stop` | Fails if no song given and nothing is playing. Stops playback afterwards only if it started it. Sets `ex.detail` to a meter report (peak/average per track, Live's 0-1 meter scale, not dB). Blocks the apply request for the whole duration. | audible |
+
+### EQ in words (`app/eq.py`)
+
+`set_eq`, the session notes and song mixes share one vocabulary: eight filter types (`TYPES`: `low cut 48`, `low cut`, `low shelf`, `bell`, `notch`, `high shelf`, `high cut`, `high cut 48`), with `kind_of` mapping Live's type names onto them and `type_index` mapping back (falling back to a guessed menu order). `bands_of` turns RigLink's EQ into bands, `merged` lays changes over a base, `differs`/`same` compare within readback tolerances, and `commands` diffs to `set_eq_band` calls. `describe` gives one line ("flat", or each band that does something). `problems(bands, track_name)` flags a curve by rule, not taste, so the same curve always gets the same diagnosis: boosts over +6 dB, cuts below -12 dB, a narrow bell boost, an odd notch, a low cut too high (lower threshold on bass, kick and drums), a high cut too low, a boomy low shelf, and a vocal with no low cut.
 
 ### Execution (`run_all`, `Executor`)
 

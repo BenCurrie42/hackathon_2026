@@ -313,6 +313,98 @@ class DiscoveryTest(unittest.TestCase):
         self.assertIn("not supported", text)
 
 
+GLOO_CATALOG = {"object": "list", "data": [
+    {"id": "gloo-anthropic-claude-sonnet-5.5", "family": "Anthropic", "supports_tools": True,
+     "supports_streaming": True},
+    {"id": "gloo-meta-llama-4-maverick", "family": "Open Source", "supports_tools": False,
+     "supports_streaming": True},
+    {"id": "gloo-openai-text-embedding-3-small", "family": "OpenAI"},
+]}
+
+
+class GlooTest(unittest.TestCase):
+    def setUp(self):
+        providers._gloo_catalog = None
+        self.addCleanup(setattr, providers, "_gloo_catalog", None)
+
+    def make(self, *replies, **env):
+        opener = FakeOpener(GLOO_CATALOG, *replies)
+        return provider_from_env(env, opener=opener), opener
+
+    def test_chosen_by_its_key(self):
+        self.assertEqual(providers.chosen_provider_name({"GLOO_API_KEY": "g"}), "gloo")
+        self.assertEqual(providers.chosen_provider_name({"GLOO_CLIENT_ID": "c"}), "gloo")
+        self.assertEqual(providers.chosen_provider_name({"GLOO_API_KEY": "g", "ANTHROPIC_API_KEY": "a"}),
+                         "anthropic")
+
+    def test_request_is_gloo_shaped(self):
+        provider, opener = self.make(sse(delta(content="Hi."), delta(finish="stop")),
+                                     GLOO_API_KEY="g-key", GLOO_TRADITION="Evangelical")
+        self.assertIsInstance(provider, providers.GlooProvider)
+        provider.session_id = "conv-1"
+        reply = provider.create("sys", _tools(), [{"role": "user", "content": "hi"}])
+        self.assertEqual(reply.content, [{"type": "text", "text": "Hi."}])
+        request = opener.requests[-1]
+        self.assertEqual(request.full_url, "https://platform.ai.gloo.com/ai/v2/guarded/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer g-key")
+        self.assertIsNone(request.get_header("X-opencode-session"))
+        body = opener.sent()
+        self.assertEqual(body["model"], "gloo-anthropic-claude-sonnet-5.5")
+        self.assertEqual(body["tradition"], "evangelical")
+        self.assertEqual(body["prompt_cache_key"], "conv-1")
+        self.assertNotIn("parallel_tool_calls", body)
+        self.assertEqual(body["tools"][0]["function"]["name"], "propose_changes")
+
+    def test_auto_routing_and_families_replace_the_model(self):
+        # No model id to check, so the catalog isn't fetched.
+        opener = FakeOpener(completion("ok"))
+        auto = provider_from_env({"GLOO_API_KEY": "g", "HOLYSOUND_MODEL": "auto"}, opener=opener)
+        auto.create("sys", [], [{"role": "user", "content": "hi"}])
+        self.assertEqual((opener.sent().get("model"), opener.sent().get("auto_routing")), (None, True))
+        opener = FakeOpener(completion("ok"))
+        family = provider_from_env({"GLOO_API_KEY": "g", "HOLYSOUND_MODEL": "Anthropic"}, opener=opener)
+        family.create("sys", [], [{"role": "user", "content": "hi"}])
+        self.assertEqual((opener.sent().get("model"), opener.sent().get("model_family")), (None, "anthropic"))
+
+    def test_client_credentials_fetch_a_token_once(self):
+        provider, opener = self.make(
+            {"access_token": "tok-1", "expires_in": 3600, "token_type": "bearer"},
+            completion("one"), completion("two"),
+            GLOO_CLIENT_ID="cid", GLOO_CLIENT_SECRET="secret")
+        provider.create("sys", [], [{"role": "user", "content": "hi"}])
+        provider.create("sys", [], [{"role": "user", "content": "again"}])
+        token_request = opener.requests[1]
+        self.assertEqual(token_request.full_url, "https://platform.ai.gloo.com/oauth2/token")
+        self.assertEqual(token_request.data, b"grant_type=client_credentials&scope=api/access")
+        self.assertTrue(token_request.get_header("Authorization").startswith("Basic "))
+        self.assertEqual(len(opener.requests), 4)  # catalog, token, two completions
+        self.assertEqual(opener.requests[-1].get_header("Authorization"), "Bearer tok-1")
+
+    def test_setup_errors_are_sentences(self):
+        for env, expect in [
+            ({"HOLYSOUND_PROVIDER": "gloo"}, "GLOO_API_KEY"),
+            ({"GLOO_API_KEY": "g", "HOLYSOUND_MODEL": "gloo-nope"}, "--list-models"),
+            ({"GLOO_API_KEY": "g", "HOLYSOUND_MODEL": "gloo-meta-llama-4-maverick"}, "can't call tools"),
+            ({"GLOO_API_KEY": "g", "GLOO_TRADITION": "baptist"}, "GLOO_TRADITION"),
+        ]:
+            providers._gloo_catalog = None
+            with self.assertRaises(AssistantSetupError) as ctx:
+                self.make(**env)
+            self.assertIn(expect, str(ctx.exception))
+
+    def test_bad_key_names_gloo(self):
+        provider, _ = self.make(http_error(401, {"error": {"message": "no"}}), GLOO_API_KEY="g")
+        with self.assertRaises(AssistantSetupError) as ctx:
+            provider.create("sys", [], [{"role": "user", "content": "hi"}])
+        self.assertIn("GLOO_API_KEY", str(ctx.exception))
+
+    def test_list_models_shows_tool_models_only(self):
+        text = providers.list_models_text({"GLOO_API_KEY": "g"}, opener=FakeOpener(GLOO_CATALOG))
+        self.assertIn("gloo-anthropic-claude-sonnet-5.5  Anthropic  <- in use", text)
+        self.assertNotIn("maverick", text)
+        self.assertNotIn("embedding", text)
+
+
 class ProviderChoiceTest(unittest.TestCase):
     def setUp(self):
         providers._discovered = None
