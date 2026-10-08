@@ -37,4 +37,5 @@ New to the code: read Architecture, then whichever backend you are touching.
 
 | Page | Covers |
 | --- | --- |
+| [Agent build document](../../AGENT_BUILD.md) | The hackathon technical writeup: user, architecture, prompts verbatim, stack, tools, evaluation, guardrails, reproduction |
 | [Holy Sound for Agents of Flourishing](../agents_of_flourishing.md) | What to add so it reads as an agent for the Gloo Challenge 1 judges, ranked |

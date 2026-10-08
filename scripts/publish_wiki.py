@@ -34,10 +34,12 @@ PAGES = {
     "docs/documentation/riglink.md": "RigLink",
     "docs/documentation/web-server-api.md": "Web-Server-API",
     "docs/documentation/assistant-and-actions.md": "Assistant-And-Actions",
+    "docs/documentation/mcp.md": "MCP-Server",
     "docs/documentation/audio-analysis-and-memory.md": "Audio-Analysis-And-Memory",
     "docs/documentation/frontend.md": "Frontend",
     "docs/documentation/testing-and-development.md": "Testing-And-Development",
     "docs/agents_of_flourishing.md": "Agents-Of-Flourishing",
+    "AGENT_BUILD.md": "Agent-Build-Document",
 }
 
 _LINK = re.compile(r"\]\((?!https?://|mailto:|#)([^)#\s]+)(#[^)\s]*)?\)")

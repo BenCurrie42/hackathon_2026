@@ -14,7 +14,8 @@ what's plugged in, what songs) and get a session that's ready to go.
 
 We're building it for the 2026 Gloo AI Hackathon (Ministry Resourcing track).
 It's a prototype. Latest release: [v1.2.0](https://github.com/BenCurrie42/hackathon_2026/releases/tag/v1.2.0)
-([changelog](CHANGELOG.md)).
+([changelog](CHANGELOG.md)). The technical writeup for the judges is
+[AGENT_BUILD.md](AGENT_BUILD.md).
 
 ## How it works
 
