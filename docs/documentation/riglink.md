@@ -23,7 +23,7 @@ Constants: `HOST = "127.0.0.1"`, `PORT = 9877` (duplicated in `live_connection.p
 
 There are no threads. Live's Python API is main-thread only, so RigLink never touches it from a background thread. Instead everything is driven from `RigLink.update_display()`, which Live calls on its main thread roughly every 100 ms (the client docstring says "a few times a second"). Each tick:
 
-1. Sample every audio track's output meter (`_read_levels`) into two `MeterWindow`s.
+1. Sample every audio track's output meter (`_read_levels`) into three `MeterWindow`s (`_meters` for `get_meters`, `_display_meters` for snapshots, `_live_meters` for `get_live_meters`), so no reader resets another's measurement.
 2. `_accept_new_clients()`: non-blocking `accept()` loop.
 3. `_service_clients()`: non-blocking `recv(4096)` per client, buffer, split on `\n`, call `_handle_line` for each complete line.
 4. `_flush_clients()`: non-blocking `send` of queued replies. Replies that don't fit stay in `_outgoing[client]` and go out on later ticks.
@@ -160,6 +160,7 @@ Parameters are looked up by name: `"<band> Filter On A"`, `"<band> Filter Type A
 | Command | Params | Returns | Notes |
 |---|---|---|---|
 | `reset_meters` | none | `{reset: true}` | Clears the measurement window used by `get_meters`. |
+| `get_live_meters` | none | `{fresh: true, tracks: [peak\|null], returns: [peak\|null], master: peak}` or `{fresh: false}` | The UI's fast meter feed: each channel's peak since the last call (`null` = no audio output), then resets `_live_meters`. `fresh: false` when no tick has sampled since, so a read between ticks isn't mistaken for silence. Refresh rate is bounded by the ~100 ms tick. |
 | `get_meters` | none | `{ticks, tracks[{kind, index, name, has_audio_output, peak, average, samples}]}` | `kind` is `track`, `return` or `master`. Values are Live's 0..1 post-fader output meter (max of L/R) sampled each tick since the last reset; mapping to dBFS is unverified. Per CLAUDE.md, first-play readings are unreliable. |
 
 ### Audio clips
@@ -211,7 +212,7 @@ Within Live itself, features are probed with `hasattr`/`getattr` (`create_audio_
 
 | Method | Command |
 |---|---|
-| `ping`, `list_tracks`, `list_returns`, `api_names`, `reset_meters`, `get_meters`, `get_song`, `play`, `stop`, `list_scenes`, `list_locators`, `get_snapshot`, `list_stock_devices` | same name, no params |
+| `ping`, `list_tracks`, `list_returns`, `api_names`, `reset_meters`, `get_meters`, `get_live_meters`, `get_song`, `play`, `stop`, `list_scenes`, `list_locators`, `get_snapshot`, `list_stock_devices` | same name, no params |
 | `create_audio_track`, `create_midi_track`, `create_return_track` | `(name=None)` |
 | `set_track_name`, `delete_track`, `set_track_color`, `track_contents` | `(track_index, ..., is_return=False)` |
 | `get_routing`, `set_routing` | `(track_index, [direction, type_name, channel_name=None], is_return=False)` |

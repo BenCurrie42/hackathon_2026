@@ -4,7 +4,9 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const POLL_MS = 1500;
-const POLL_PLAYING_MS = 600;   // meters move while a song plays
+const POLL_PLAYING_MS = 600;   // the playhead and song states move while a song plays
+const METER_GAP_MS = 30;       // between meter reads; Live itself samples meters about every 100 ms
+const METER_FALL_PER_S = 1.6;  // how fast a meter drops after a peak, in meter-heights per second
 const POLL_APPLYING_MS = 250;  // step states move while changes are being applied
 const POLL_HIDDEN_MS = 5000;
 const MINUS = "−";
@@ -228,7 +230,60 @@ async function poll() {
   pollTimer = setTimeout(poll, wait);
 }
 
-document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { poll(); pollMeters(); } });
+
+// -- meters: their own fast feed, drawn every frame --------------------------------
+
+let meterTimer = null;
+let meterFedAt = 0;              // when the feed last brought new levels
+const aimedMeters = new Set();   // meter elements with a level to draw
+
+const meterFeedLive = () => performance.now() - meterFedAt < 1000;
+
+async function pollMeters() {
+  clearTimeout(meterTimer);
+  if (document.hidden) return;
+  let wait = METER_GAP_MS;
+  try {
+    const { meters } = await api("/api/meters");
+    if (meters) {
+      meterFedAt = performance.now();
+      meters.tracks.forEach((peak, i) => aimMeter(strips.get("t" + i)?._r.meter, peak ?? 0));
+      meters.returns.forEach((peak, i) => aimMeter(strips.get("r" + i)?._r.meter, peak ?? 0));
+      aimMeter($("#master-meter"), meters.master);
+    } else if (!state?.live.connected) {
+      wait = POLL_MS;
+    }
+  } catch {
+    wait = POLL_MS;
+  }
+  meterTimer = setTimeout(pollMeters, wait);
+}
+
+/* A meter jumps straight up to a new peak and falls back smoothly, like a hardware meter. */
+function aimMeter(meter, peak) {
+  if (!meter) return;
+  meter._aim = Math.min(1, Math.max(0, peak));
+  if (meter._shown == null || meter._aim > meter._shown) meter._shown = meter._aim;
+  aimedMeters.add(meter);
+}
+
+let meterFrameAt = 0;
+function drawMeters(now) {
+  const dt = meterFrameAt ? Math.min(0.1, (now - meterFrameAt) / 1000) : 0;
+  meterFrameAt = now;
+  for (const meter of aimedMeters) {
+    if (!meter.isConnected) { aimedMeters.delete(meter); continue; }
+    meter._shown = Math.max(meter._aim, meter._shown - METER_FALL_PER_S * dt);
+    const lit = Math.round(meter._shown * 1000) / 1000;
+    if (lit !== meter._lit) {
+      meter._lit = lit;
+      meter.style.setProperty("--lit", String(lit));
+    }
+  }
+  requestAnimationFrame(drawMeters);
+}
+requestAnimationFrame(drawMeters);
 
 function render(next) {
   state = next;
@@ -1897,11 +1952,12 @@ function updateSongMix(strip, row, snap) {
   m.followsKey.checked = !row.keeps_key;
 }
 
-/* Live's meters run 0-1 (after the fader). Peak since the last poll, shown in n segments. */
+/* Live's meters run 0-1 (after the fader). The snapshot only says whether a channel has one;
+   the level comes from the fast meter feed, or from the snapshot when RigLink is too old for it. */
 function paintMeter(meter, reading) {
   if (!meter) return;
   meter.hidden = reading == null;
-  meter.style.setProperty("--lit", String(Math.min(1, reading?.peak ?? 0)));
+  if (!meterFeedLive()) aimMeter(meter, reading?.peak ?? 0);
 }
 
 function songName(snap, sceneIndex) {
@@ -2758,3 +2814,4 @@ function toast(message, kind = "info") {
 
 listen();
 poll();
+pollMeters();

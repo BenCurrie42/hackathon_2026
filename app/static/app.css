@@ -228,7 +228,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
 .main-bar > i {
   position: absolute; left: 0; top: 0; bottom: 0; width: calc(var(--lit) * 100%);
   background: linear-gradient(to right, var(--green) 0 79%, var(--amber) 79% 92%, var(--red) 92%); background-size: 120px 100%;
-  transition: width 0.25s ease-out;
 }
 
 /* -- layout ------------------------------------------------------------------------ */
@@ -553,7 +552,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--text-2); }
   background: linear-gradient(to top, var(--green) 0 78%, var(--amber) 78% 92%, var(--red) 92%);
 }
 .meter::before { opacity: 0.16; }
-.meter > i { clip-path: inset(calc(100% - var(--lit) * 100%) 0 0 0); transition: clip-path 0.25s ease-out; }
+.meter > i { clip-path: inset(calc(100% - var(--lit) * 100%) 0 0 0); }
 
 /* the signature: while the assistant writes to a channel, one crisp light runs its edge */
 .run { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; display: none; z-index: 3; }

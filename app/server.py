@@ -496,7 +496,7 @@ def make_handler(app):
         server_version = "HolySound"
 
         def log_message(self, fmt, *args):  # quieter than the default
-            if not self.path.startswith(("/api/state", "/api/events")):
+            if not self.path.startswith(("/api/state", "/api/events", "/api/meters")):
                 super().log_message(fmt, *args)
 
         # -- access ------------------------------------------------------
@@ -586,6 +586,8 @@ def make_handler(app):
                     return self._json(app.state())
                 if url.path == "/api/events":
                     return self._events()
+                if url.path == "/api/meters":
+                    return self._json({"meters": app.live.meters()})
                 if url.path == "/api/notes":
                     return self._json({"notes": app.notes()})
                 if url.path == "/api/presets":

@@ -204,7 +204,7 @@ On a touch screen (`pointer: coarse`) the native input is switched off so the st
 
 Fader, balance, sends and clip levels all throttle `liveCmd` to about one call per 150 ms with a trailing call, send a final value on `change`, and stay in `holding` for 1.2 s after release so a poll can't pull them back.
 
-**Meters.** There is no separate meter request. `row.meter.peak` (0 to 1) arrives in each snapshot; `paintMeter` sets `--lit` and hides the meter when the reading is null. The header's **Main** meter uses the same function. Polling speeds up to 600 ms while a song plays.
+**Meters.** They have their own feed. `pollMeters()` reads `GET /api/meters` again `METER_GAP_MS` (30 ms) after each reply, so it runs as fast as RigLink's ~100 ms tick allows; it stops while the tab is hidden and slows to 1.5 s while Live is unreachable. `aimMeter` sets each meter's target; `drawMeters` runs every animation frame, jumps straight up to a new peak and falls at `METER_FALL_PER_S` (1.6 meter-heights a second), writing `--lit`. The CSS has no transition on meters, so nothing lags behind that. The snapshot's `row.meter` still decides whether a channel has a meter (`paintMeter` hides it when null) and supplies the level only when the feed hasn't answered for a second (an older RigLink without `get_live_meters`). The header's **Main** meter works the same way.
 
 **Motion.** The "motion" block near the top of `app.js` has four tools, all no-ops under reduced motion: `tween(owner, key, from, to, apply)` (eased number over 420 ms, one per owner and key, restarted from wherever it is), `glideInput(input, to, onFrame)` (a range input set from a poll), `enter(node)` / `leave(node)` (slide in, fade out) and `flip(container, selector, key, change)` (keyed FLIP: rebuilt rows still travel from their old place). Used for: the fader cap (CSS `transition: bottom`, off while `.is-down`), pan, balance, sends, song and clip levels, tempo, the EQ curve and dots (frequency on a log scale), new or removed strips and their neighbours, folder folding, songs reordered or added, room facts, effects added, the drawer and tab panels, chat entries (each once, by entry id, never on first load), the docked slip and its steps, step lamps (pulse while working, land when they change), toasts and dialogs. Slider drags and EQ drags stop any glide on that control (`stopTween`).
 
@@ -311,7 +311,6 @@ Error strings come from the server as full sentences, matching the project rule 
 
 - `CLAUDE.md` describes `app/static/` as "HTML/CSS/JS, served as-is", which matches, but doesn't mention the fonts folder or the SSE endpoint `/api/events`. See [web-server-api.md](web-server-api.md).
 - `app/static/fonts/` also holds Atkinson Hyperlegible and B612 Mono files that no stylesheet rule references; they look left over from an earlier design.
-- The meter comment says "peak since the last poll", but the page does nothing to compute that. It shows whatever `meter.peak` the server sends. See [riglink.md](riglink.md).
 - No JS test coverage for `app.js`.
 
 See also: [architecture.md](architecture.md), [cli-and-live-control.md](cli-and-live-control.md), [audio-analysis-and-memory.md](audio-analysis-and-memory.md).

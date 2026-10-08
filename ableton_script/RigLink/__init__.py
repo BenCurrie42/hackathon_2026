@@ -43,6 +43,8 @@ class RigLink(ControlSurface):
         # A second window for the UI's meters: each snapshot reads and clears
         # it, so drawing meters never resets a measurement in progress.
         self._display_meters = MeterWindow()
+        # And one for the UI's fast meter feed, read and cleared many times a second.
+        self._live_meters = MeterWindow()
         self._open_server()
 
     def _open_server(self):
@@ -73,6 +75,7 @@ class RigLink(ControlSurface):
         layout, levels = _read_levels(self.song())
         self._meters.add(layout, levels)
         self._display_meters.add(layout, levels)
+        self._live_meters.add(layout, levels)
         self._accept_new_clients()
         self._service_clients()
         self._flush_clients()
@@ -691,6 +694,31 @@ def _get_meters(rf):
     return {"ticks": rf._meters.ticks, "tracks": rf._meters.rows(rf.song())}
 
 
+def _get_live_meters(rf):
+    """Each meter's peak since the last call, for the UI. Kept small: polled several times a second.
+
+    Live samples meters once per update_display tick, so a call between ticks
+    has nothing new and says so rather than reporting silence.
+    """
+    window = rf._live_meters
+    if not window.ticks:
+        return {"fresh": False}
+    song = rf.song()
+
+    def peaks(kind, tracks):
+        return [(window.stats(kind, i) or (0.0, 0.0))[0] if t.has_audio_output else None
+                for i, t in enumerate(tracks)]
+
+    meters = {
+        "fresh": True,
+        "tracks": peaks("track", song.tracks),
+        "returns": peaks("return", song.return_tracks),
+        "master": (window.stats("master", 0) or (0.0, 0.0))[0],
+    }
+    window.reset()
+    return meters
+
+
 # -- Audio clips -----------------------------------------------------------
 
 
@@ -1261,6 +1289,7 @@ COMMANDS = {
     "set_eq_band": _set_eq_band,
     "reset_meters": _reset_meters,
     "get_meters": _get_meters,
+    "get_live_meters": _get_live_meters,
     "import_audio": _import_audio,
     "set_clip_gain": _set_clip_gain,
     "set_clip_active": _set_clip_active,

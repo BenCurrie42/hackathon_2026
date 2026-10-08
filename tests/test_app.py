@@ -592,6 +592,24 @@ class ServerTest(FakeLiveCase):
         status, state = self.request("POST", "/api/track-folder", {"track": "Pad", "folder": None})
         self.assertEqual(self.folder_of(state, "Pad"), "instruments")  # back to sorting by name
 
+    def test_meter_feed_is_one_peak_per_channel_and_leaves_the_snapshot_cached(self):
+        self.live.call("create_audio_track", name="Click")
+        self.live.call("create_midi_track", name="Keys MIDI")
+        self.live.snapshot()
+        cached = self.live._snapshot_at
+        status, data = self.request("GET", "/api/meters")
+        self.assertEqual(status, 200)
+        meters = data["meters"]
+        self.assertEqual(len(meters["tracks"]), len(self.fake.tracks))
+        self.assertIsNone(meters["tracks"][-1])  # a MIDI track with no instrument has no meter
+        self.assertIsInstance(meters["master"], float)
+        self.assertEqual(self.live._snapshot_at, cached)
+
+    def test_meter_feed_goes_quiet_on_an_older_riglink(self):
+        self.fake.get_live_meters = None  # handle() treats a missing command as unknown
+        self.assertIsNone(self.request("GET", "/api/meters")[1]["meters"])
+        self.assertFalse(self.live._has_live_meters_cmd)
+
     def test_assistant_moves_a_track_to_a_folder_and_colours_it_in_live(self):
         self.live.call("create_audio_track", name="Mystery")
         actions = Proposal.model_validate({"actions": [

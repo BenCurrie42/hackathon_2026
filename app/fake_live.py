@@ -234,6 +234,13 @@ class FakeSet:
                      "peak": master, "average": master * 0.7, "samples": ticks})
         return {"ticks": ticks, "tracks": rows}
 
+    def get_live_meters(self):
+        def peaks(tracks):
+            return [None if t["is_midi"] and not t["devices"] else self._level(t) for t in tracks]
+        tracks = peaks(self.tracks)
+        return {"fresh": True, "tracks": tracks, "returns": peaks(self.returns),
+                "master": min(1.0, sum(p or 0 for p in tracks) * 0.6)}
+
     def import_audio(self, track_index, file_path, scene_index, name=None, gain_db=None):
         track = self._track(track_index)
         if track["is_midi"]:

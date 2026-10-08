@@ -70,6 +70,7 @@ All API responses are JSON with `Cache-Control: no-store` unless noted. Errors a
 | `/` and any other path | Static file from `app/static/` (`/` serves `index.html`). See [Static files](#static-files). | 404 plain text `Not found.` |
 | `/api/state` | `App.state()` | none from Live: a Live outage is reported inside `live`, not as an HTTP error |
 | `/api/notes` | `{"notes": str}`: `App.notes()`, the session notes the assistant reads | none; a Live outage is described in the text |
+| `/api/meters` | `{"meters": {tracks, returns, master}}` from `LiveLink.meters()` (RigLink `get_live_meters`), or `{"meters": null}` when nothing new was sampled, Live is unreachable or busy (waits at most 50 ms for the lock), or RigLink is too old. Doesn't invalidate the snapshot cache. | none |
 | `/api/events` | `text/event-stream` of assistant reply events (below) | none; ends when the client disconnects |
 | `/api/presets?device=<name>` | `{"presets": [...]}` via RigLink `list_presets` | 400 if Live unreachable or RigLink rejects the device |
 | `/api/devices` | `{"devices": {...}}` via `list_stock_devices`; `null` if RigLink can't say (older RigLink) | 400 if Live unreachable |
@@ -81,7 +82,7 @@ Note that on GET, `UserError`, `LiveUnavailable` and `RigLinkError` all map to H
 
 #### `/api/events`
 
-Streams `event: <kind>\ndata: <json>\n\n` from `app.chat.feed` (`ReplyFeed`, see [assistant-and-actions.md](assistant-and-actions.md)). Kinds seen in the feed: `start`, `end`, `step`, `thinking`, `text`, `tool`. A `: still here` comment is written every `KEEP_ALIVE = 15` s of silence. The cursor is taken before headers are sent so no event is missed. The finished turn arrives via `/api/state`, not here. Access logging skips `/api/state` and `/api/events`.
+Streams `event: <kind>\ndata: <json>\n\n` from `app.chat.feed` (`ReplyFeed`, see [assistant-and-actions.md](assistant-and-actions.md)). Kinds seen in the feed: `start`, `end`, `step`, `thinking`, `text`, `tool`. A `: still here` comment is written every `KEEP_ALIVE = 15` s of silence. The cursor is taken before headers are sent so no event is missed. The finished turn arrives via `/api/state`, not here. Access logging skips `/api/state`, `/api/events` and `/api/meters`.
 
 ### POST
 

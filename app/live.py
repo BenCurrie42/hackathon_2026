@@ -38,6 +38,7 @@ class LiveLink:
         self._lock = threading.Lock()
         self._snapshot = None
         self._snapshot_at = 0.0
+        self._has_live_meters_cmd = True
         self._stock_devices = None
         self._has_snapshot_cmd = True
 
@@ -59,6 +60,7 @@ class LiveLink:
                 pass
         self._conn = None
         self._stock_devices = None
+        self._has_live_meters_cmd = True  # a reconnect may be a newer RigLink
 
     def _send(self, cmd, **args):
         """Send one command. Caller holds the lock."""
@@ -156,6 +158,27 @@ class LiveLink:
             "devices": [d["name"] for d in devices],
             "output": _current(routing["output"]),
         }
+
+    def meters(self):
+        """Each meter's peak since the last read, or None when there's nothing new to draw.
+
+        Never waits behind a long command and leaves the snapshot cache alone:
+        the page asks for this many times a second.
+        """
+        if not self._has_live_meters_cmd or not self._lock.acquire(timeout=0.05):
+            return None
+        try:
+            meters = self._send("get_live_meters")
+        except RigLinkError as e:
+            if "unknown cmd" in str(e):
+                # An older RigLink; the page falls back to the snapshot's meters.
+                self._has_live_meters_cmd = False
+            return None
+        except LiveUnavailable:
+            return None
+        finally:
+            self._lock.release()
+        return meters if meters.get("fresh") else None
 
     def stock_devices(self):
         """Device names this copy of Live has, or None if RigLink can't say."""

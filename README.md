@@ -2,7 +2,7 @@
 
 **Describe your Sunday. Get a working Ableton session.**
 
-[Watch the 57-second intro](https://drive.google.com/file/d/1JS_2oy9hb-i6gZmTE7OLHSQjQRqbP8_h/view?usp=sharing)
+[Watch the 90-second intro](https://drive.google.com/file/d/1Kq2hpUynWhhkNWITW27_fQQ-kfCkewfi/view?usp=sharing)
 
 Most small churches running tracks on Sunday have one volunteer who figured out
 Ableton on their own, and they rebuild the same session every week: name the
